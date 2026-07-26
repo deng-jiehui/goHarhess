@@ -1,0 +1,15 @@
+# Local reference material; not part of the Go framework repository.
+/qwen_agent/
+/01_系统架构分析.md
+
+# Go build and test artifacts.
+*.exe
+*.test
+*.out
+/bin/
+
+# Editor and OS metadata.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
