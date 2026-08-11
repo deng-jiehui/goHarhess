@@ -31,9 +31,6 @@ type SyncDispatcher struct {
 	sequence atomic.Uint64
 }
 
-// Dispatcher is retained as a behavior-free alias for source compatibility.
-type Dispatcher = SyncDispatcher
-
 // New validates handlers and creates a synchronous dispatcher.
 func New(handlers []Handler, config Config) (*SyncDispatcher, error) {
 	if config.Timeout < 0 || config.Timeout > maxTimeout {
