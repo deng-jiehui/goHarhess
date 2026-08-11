@@ -139,3 +139,19 @@ LLM StreamReader ----------------------> 下游模型/Agent
 - 嵌套 Agent/Graph 的 parent/child scope、trace 和事件序号保持正确。
 - 全仓库 `go test -count=1 ./...`、`go vet ./...`，以及配置 MinGW-w64 GCC 后的
   `go test -race -count=1 ./...`。
+
+## 并发与上下文约束
+
+- StateGraph 的 Fan-Out 可能从多个 Goroutine 同时调用同一个 Dispatcher；`Sequence`
+  必须通过 `atomic.AddUint64`（或等价原子操作）分配，Handler 实现必须自行保证线程安全。
+- `Config.Timeout` 是协作式超时。Handler 必须主动感知并响应 `ctx.Done()`；忽略 Context
+  的同步阻塞 I/O 仍可能卡住 Agent，框架不能强行终止该调用。
+- 每个 Handler 收到独立的 Event 深拷贝，Metadata、Metrics.Custom 以及其中的 map/slice
+  必须递归复制，前一个 Handler 的修改不能污染后一个 Handler。
+- `context.WithoutCancel` 会同时剥离上游取消和框架 deadline。需要在请求取消后继续写盘
+  的 Handler 应从原始业务 Context 派生独立的持久化 Context，例如：
+
+  ```go
+  persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+  defer cancel()
+  ```
