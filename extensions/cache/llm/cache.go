@@ -171,9 +171,12 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 
 	m.mu.Lock()
 	if flight := m.flights[key]; flight != nil {
-		m.stats.shared.Add(1)
-		m.mu.Unlock()
-		return flight.subscribe(ctx), nil
+		if flight.active() {
+			m.stats.shared.Add(1)
+			m.mu.Unlock()
+			return flight.subscribe(ctx), nil
+		}
+		delete(m.flights, key)
 	}
 	flight := newCacheFlight(ctx)
 	m.flights[key] = flight
@@ -418,6 +421,12 @@ func (f *cacheFlight) releaseSubscriber() {
 	if f.subscribers == 0 && !f.finished {
 		f.cancel()
 	}
+}
+
+func (f *cacheFlight) active() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.finished && f.ctx.Err() == nil
 }
 
 func (f *cacheFlight) append(item runnable.Item[corellm.Event]) {
