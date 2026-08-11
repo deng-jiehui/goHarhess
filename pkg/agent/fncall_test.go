@@ -11,7 +11,7 @@ import (
 	"goharness/pkg/tool"
 )
 
-func TestFnCallAgentCallsToolAndContinues(t *testing.T) {
+func TestReactAgentCallsToolAndContinues(t *testing.T) {
 	ctx := context.Background()
 	echo := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
@@ -28,7 +28,7 @@ func TestFnCallAgentCallsToolAndContinues(t *testing.T) {
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
 
-	a, err := agent.NewFnCallAgent(agent.BaseConfig{
+	a, err := agent.New(agent.BaseConfig{
 		Name:  "tester",
 		Model: model,
 		Tools: []tool.Tool{echo},
@@ -37,7 +37,7 @@ func TestFnCallAgentCallsToolAndContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	last, err := agent.RunSync(ctx, a, []schema.Message{schema.UserMessage("call echo")})
+	last, err := a.Invoke(ctx, []schema.Message{schema.UserMessage("call echo")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,5 +52,29 @@ func TestFnCallAgentCallsToolAndContinues(t *testing.T) {
 	}
 	if last[2].Text() != "done" {
 		t.Fatalf("final content = %q, want done", last[2].Text())
+	}
+}
+
+func TestReactAgentAcceptsBlankArgumentsForNoArgumentTool(t *testing.T) {
+	var calls int
+	ping := tool.NewFunctionTool(tool.Spec{Name: "ping"}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		calls++
+		if len(input.Args) != 0 {
+			t.Fatalf("args=%#v", input.Args)
+		}
+		return tool.TextResult("pong"), nil
+	})
+	call := schema.Message{Role: schema.RoleAssistant, FunctionCall: &schema.FunctionCall{Name: "ping", Arguments: ""}}
+	model := llm.NewScriptedModel([]schema.Message{call}, []schema.Message{schema.AssistantMessage("done")})
+	value, err := agent.New(agent.BaseConfig{Model: model, Tools: []tool.Tool{ping}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("ping")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(output) != 3 || output[1].Text() != "pong" {
+		t.Fatalf("calls=%d output=%#v", calls, output)
 	}
 }
