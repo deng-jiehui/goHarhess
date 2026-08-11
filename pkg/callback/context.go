@@ -154,20 +154,20 @@ func OperationFromContext(ctx context.Context) (Operation, bool) {
 	return operation, true
 }
 
-// WithDispatcher exposes a dispatcher to nested framework components.
-func WithDispatcher(ctx context.Context, dispatcher *Dispatcher) context.Context {
+// WithDispatcher exposes a synchronous dispatcher to nested framework components.
+func WithDispatcher(ctx context.Context, dispatcher *SyncDispatcher) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, dispatcherContextKey{}, dispatcher)
 }
 
-// DispatcherFromContext resolves the callback dispatcher for the current run.
-func DispatcherFromContext(ctx context.Context) (*Dispatcher, bool) {
+// DispatcherFromContext resolves the synchronous callback dispatcher for the current run.
+func DispatcherFromContext(ctx context.Context) (*SyncDispatcher, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	dispatcher, ok := ctx.Value(dispatcherContextKey{}).(*Dispatcher)
+	dispatcher, ok := ctx.Value(dispatcherContextKey{}).(*SyncDispatcher)
 	return dispatcher, ok && dispatcher != nil
 }
 
