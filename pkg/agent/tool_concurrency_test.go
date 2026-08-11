@@ -378,7 +378,7 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 		Model:       model,
 		Tools:       []tool.Tool{deleteTool},
 		Middlewares: []tool.Middleware{rbac},
-		Callbacks:   []callback.Callback{audit},
+		Callbacks:   []callback.Handler{audit},
 	})
 	if err != nil {
 		t.Fatal(err)

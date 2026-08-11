@@ -15,7 +15,7 @@ import (
 type runLifecycle struct {
 	base       *Base
 	ctx        context.Context
-	dispatcher *callback.Dispatcher
+	dispatcher *callback.SyncDispatcher
 	operation  callback.Operation
 	terminal   atomic.Bool
 	metrics    callback.Metrics
@@ -31,7 +31,7 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 	ctx, scope := callback.EnterScope(ctx)
 	dispatcher, exists := callback.DispatcherFromContext(ctx)
 	if !exists {
-		callbacks := make([]callback.Callback, 0, len(b.callbacks)+len(opts.Callbacks))
+		callbacks := make([]callback.Handler, 0, len(b.callbacks)+len(opts.Callbacks))
 		callbacks = append(callbacks, b.callbacks...)
 		callbacks = append(callbacks, opts.Callbacks...)
 		var err error
@@ -41,7 +41,7 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 		}
 		ctx = callback.WithDispatcher(ctx, dispatcher)
 	} else if len(b.callbacks) > 0 || len(opts.Callbacks) > 0 {
-		callbacks := make([]callback.Callback, 0, len(b.callbacks)+len(opts.Callbacks))
+		callbacks := make([]callback.Handler, 0, len(b.callbacks)+len(opts.Callbacks))
 		callbacks = append(callbacks, b.callbacks...)
 		callbacks = append(callbacks, opts.Callbacks...)
 		var err error
@@ -78,7 +78,7 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 			InputBytes:    messageBytes(messages),
 		},
 	}
-	dispatcher.Dispatch(agentCtx, callback.StartEvent(callback.EventAgentStart, operation, lifecycle.metrics))
+	_ = dispatcher.Dispatch(agentCtx, callback.StartEvent(callback.EventAgentStart, operation, lifecycle.metrics))
 	return ctx, lifecycle, nil
 }
 
@@ -86,14 +86,14 @@ func (l *runLifecycle) fail(err error) {
 	if l == nil || !l.terminal.CompareAndSwap(false, true) {
 		return
 	}
-	l.dispatcher.Dispatch(l.ctx, callback.ErrorEvent(callback.EventAgentError, l.operation, err, l.metrics))
+	_ = l.dispatcher.Dispatch(l.ctx, callback.ErrorEvent(callback.EventAgentError, l.operation, err, l.metrics))
 }
 
 func (l *runLifecycle) finish() {
 	if l == nil || !l.terminal.CompareAndSwap(false, true) {
 		return
 	}
-	l.dispatcher.Dispatch(l.ctx, callback.EndEvent(callback.EventAgentEnd, l.operation, l.metrics))
+	_ = l.dispatcher.Dispatch(l.ctx, callback.EndEvent(callback.EventAgentEnd, l.operation, l.metrics))
 }
 
 func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferSize int) runnable.Stream[schema.MessageEvent] {
@@ -140,7 +140,7 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 			}
 			event := callback.ProgressEvent(callback.EventAgentChunk, l.operation, chunkMetrics)
 			event.Metadata["agent.chunk_index"] = chunkIndex
-			l.dispatcher.Dispatch(l.ctx, event)
+			_ = l.dispatcher.Dispatch(l.ctx, event)
 			if !emitMessageItem(l.ctx, out, item) {
 				l.fail(l.ctx.Err())
 				return
@@ -182,7 +182,7 @@ func (b *Base) beginLLMCall(
 	functions []schema.FunctionDefinition,
 	opts RunOptions,
 	contextStats contextengine.Stats,
-) (context.Context, callback.Operation, *callback.Dispatcher, callback.Metrics) {
+) (context.Context, callback.Operation, *callback.SyncDispatcher, callback.Metrics) {
 	dispatcher, _ := callback.DispatcherFromContext(ctx)
 	info := llm.DescribeModel(b.model)
 	name := info.Name
@@ -222,7 +222,7 @@ func (b *Base) beginLLMCall(
 		ToolCalls:     len(functions),
 	}
 	if dispatcher != nil {
-		dispatcher.Dispatch(llmCtx, callback.StartEvent(callback.EventLLMStart, operation, metrics))
+		_ = dispatcher.Dispatch(llmCtx, callback.StartEvent(callback.EventLLMStart, operation, metrics))
 	}
 	return llmCtx, operation, dispatcher, metrics
 }
@@ -230,7 +230,7 @@ func (b *Base) beginLLMCall(
 func observeLLMStream(
 	ctx context.Context,
 	stream runnable.Stream[llm.Event],
-	dispatcher *callback.Dispatcher,
+	dispatcher *callback.SyncDispatcher,
 	operation callback.Operation,
 	metrics callback.Metrics,
 ) runnable.Stream[llm.Event] {
@@ -242,19 +242,19 @@ func observeLLMStream(
 			select {
 			case <-ctx.Done():
 				if dispatcher != nil {
-					dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
+					_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
 				}
 				return
 			case item, ok := <-stream:
 				if !ok {
 					if dispatcher != nil {
-						dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
+						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
 					}
 					return
 				}
 				if item.Err != nil {
 					if dispatcher != nil {
-						dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, item.Err, metrics))
+						_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, item.Err, metrics))
 					}
 					emitLLMEvent(ctx, out, item)
 					return
@@ -262,7 +262,7 @@ func observeLLMStream(
 				eventValue := item.Value
 				if eventValue.Kind == llm.EventDone {
 					if dispatcher != nil {
-						dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
+						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
 					}
 					emitLLMEvent(ctx, out, item)
 					return
@@ -271,7 +271,7 @@ func observeLLMStream(
 					applyUsageMetrics(&metrics, eventValue.Usage)
 					if !emitLLMEvent(ctx, out, item) {
 						if dispatcher != nil {
-							dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
+							_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
 						}
 						return
 					}
@@ -296,11 +296,11 @@ func observeLLMStream(
 				if dispatcher != nil {
 					event := callback.ProgressEvent(callback.EventLLMChunk, operation, chunkMetrics)
 					event.Metadata["llm.chunk_index"] = chunkIndex
-					dispatcher.Dispatch(ctx, event)
+					_ = dispatcher.Dispatch(ctx, event)
 				}
 				if !emitLLMEvent(ctx, out, item) {
 					if dispatcher != nil {
-						dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
+						_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
 					}
 					return
 				}

@@ -1,36 +1,122 @@
 package agent
 
-const DefaultMaxLLMCalls = 20
+import (
+	"context"
+	"errors"
+	"time"
+
+	"goharness/pkg/callback"
+	"goharness/pkg/runnable"
+	"goharness/pkg/state"
+)
+
+type resolvedRunOptionsKey struct{}
+
+func withResolvedRunOptions(ctx context.Context, opts RunOptions) context.Context {
+	return context.WithValue(ctx, resolvedRunOptionsKey{}, opts)
+}
+
+func resolvedRunOptionsFromContext(ctx context.Context) (RunOptions, bool) {
+	opts, ok := ctx.Value(resolvedRunOptionsKey{}).(RunOptions)
+	return opts, ok
+}
+
+const (
+	DefaultMaxParallelTools = 8
+)
 
 type RunOptions struct {
-	Lang        string
-	Seed        *int64
-	MaxLLMCalls int
-	Knowledge   string
-	Metadata    map[string]any
+	Lang                string
+	Seed                *int64
+	MaxLLMCalls         int
+	MaxParallelTools    int
+	ToolCallTimeout     time.Duration
+	StreamBufferSize    int
+	MaxTokens           int
+	DeltaStream         bool
+	Knowledge           string
+	Metadata            map[string]any
+	GlobalOptions       []runnable.Option
+	NodeOptions         []runnable.Option
+	Callbacks           []callback.Handler
+	ConversationID      string
+	ContextWindowTokens int
+	StateValues         map[string]any
+	CheckpointBypass    bool
+	Breakpointers       []Breakpointer
+	InterruptSignal     *InterruptSignal
+	resume              bool
+	continuation        *state.Continuation
+	agentKind           AgentKind
+	interruptBypass     bool
+	session             *conversationSession
+	graphState          *state.GraphStateCheckpoint
 }
 
 type RunOption func(*RunOptions)
 
-func defaultRunOptions() RunOptions {
+const runOptionsValueKey = "agent.run_options"
+
+func (option RunOption) Apply(values *runnable.OptionSet) error {
+	if option == nil {
+		return errors.New("agent run option is nil")
+	}
+	if values == nil {
+		return errors.New("runnable option set is nil")
+	}
+	if values.Values == nil {
+		values.Values = map[string]any{}
+	}
+	options, ok := values.Values[runOptionsValueKey].([]RunOption)
+	if _, exists := values.Values[runOptionsValueKey]; exists && !ok {
+		return errors.New("agent run option set has an invalid value")
+	}
+	values.Values[runOptionsValueKey] = append(options, option)
+	return nil
+}
+
+func defaultRunOptions(limits agentLimits) RunOptions {
 	return RunOptions{
-		MaxLLMCalls: DefaultMaxLLMCalls,
-		Metadata:    map[string]any{},
+		MaxLLMCalls:      limits.maxLLMCalls,
+		MaxParallelTools: limits.maxConcurrency,
+		ToolCallTimeout:  limits.timeout,
+		StreamBufferSize: limits.streamBufferSize,
+		MaxTokens:        limits.maxTokens,
+		Metadata:         map[string]any{},
+		StateValues:      map[string]any{},
 	}
 }
 
-func resolveRunOptions(opts ...RunOption) RunOptions {
-	ro := defaultRunOptions()
+func resolveRunOptions(limits agentLimits, opts ...RunOption) RunOptions {
+	ro := defaultRunOptions(limits)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&ro)
 		}
 	}
-	if ro.MaxLLMCalls <= 0 {
-		ro.MaxLLMCalls = DefaultMaxLLMCalls
+	if ro.MaxLLMCalls <= 0 || ro.MaxLLMCalls > limits.maxLLMCalls {
+		ro.MaxLLMCalls = limits.maxLLMCalls
+	}
+	if ro.MaxParallelTools <= 0 || ro.MaxParallelTools > limits.maxConcurrency {
+		ro.MaxParallelTools = limits.maxConcurrency
+	}
+	if ro.ToolCallTimeout <= 0 || ro.ToolCallTimeout > limits.timeout {
+		ro.ToolCallTimeout = limits.timeout
+	}
+	if ro.StreamBufferSize <= 0 {
+		ro.StreamBufferSize = limits.streamBufferSize
+	}
+	if ro.StreamBufferSize > limits.streamBufferSize {
+		ro.StreamBufferSize = limits.streamBufferSize
+	}
+	if ro.ContextWindowTokens < 0 {
+		ro.ContextWindowTokens = 0
 	}
 	if ro.Metadata == nil {
 		ro.Metadata = map[string]any{}
+	}
+	if ro.StateValues == nil {
+		ro.StateValues = map[string]any{}
 	}
 	return ro
 }
@@ -47,9 +133,29 @@ func WithSeed(seed int64) RunOption {
 	}
 }
 
-func WithMaxLLMCalls(max int) RunOption {
+// WithRunMaxLLMCalls tightens the Agent-wide model-call limit for one run.
+// The Agent-wide default is configured with WithMaxLLMCalls.
+func WithRunMaxLLMCalls(max int) RunOption {
 	return func(opts *RunOptions) {
 		opts.MaxLLMCalls = max
+	}
+}
+
+func WithMaxParallelTools(max int) RunOption {
+	return func(opts *RunOptions) {
+		opts.MaxParallelTools = max
+	}
+}
+
+func WithToolCallTimeout(timeout time.Duration) RunOption {
+	return func(opts *RunOptions) {
+		opts.ToolCallTimeout = timeout
+	}
+}
+
+func WithDeltaStream(enabled bool) RunOption {
+	return func(opts *RunOptions) {
+		opts.DeltaStream = enabled
 	}
 }
 
@@ -63,4 +169,55 @@ func WithMetadata(key string, value any) RunOption {
 	return func(opts *RunOptions) {
 		opts.Metadata[key] = value
 	}
+}
+
+// WithRunCallbacks adds synchronous lifecycle Handlers for one Agent run.
+func WithRunCallbacks(values ...callback.Handler) RunOption {
+	return func(opts *RunOptions) {
+		opts.Callbacks = append(opts.Callbacks, values...)
+	}
+}
+
+// WithRunCallback adds one synchronous lifecycle Handler for one Agent run.
+func WithRunCallback(value callback.Handler) RunOption {
+	return WithRunCallbacks(value)
+}
+
+// WithConversationID loads and saves a versioned conversation checkpoint.
+func WithConversationID(value string) RunOption {
+	return func(opts *RunOptions) { opts.ConversationID = value }
+}
+
+// WithContextWindowTokens overrides the configured context window for one run.
+func WithContextWindowTokens(value int) RunOption {
+	return func(opts *RunOptions) { opts.ContextWindowTokens = value }
+}
+
+// WithStateValue updates one durable value on the next successful checkpoint.
+func WithStateValue(key string, value any) RunOption {
+	return func(opts *RunOptions) { opts.StateValues[key] = value }
+}
+
+// WithStateValues updates durable values on the next successful checkpoint.
+func WithStateValues(values map[string]any) RunOption {
+	return func(opts *RunOptions) {
+		for key, value := range values {
+			opts.StateValues[key] = value
+		}
+	}
+}
+
+// WithCheckpointBypass prevents nested Agents from loading or saving state.
+func WithCheckpointBypass() RunOption {
+	return func(opts *RunOptions) { opts.CheckpointBypass = true }
+}
+
+// WithRunBreakpointer adds a durable breakpoint policy for one run.
+func WithRunBreakpointer(value Breakpointer) RunOption {
+	return func(opts *RunOptions) { opts.Breakpointers = append(opts.Breakpointers, value) }
+}
+
+// WithInterruptSignal checks an externally controlled signal at safe points.
+func WithInterruptSignal(value *InterruptSignal) RunOption {
+	return func(opts *RunOptions) { opts.InterruptSignal = value }
 }

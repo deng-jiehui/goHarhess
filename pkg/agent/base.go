@@ -27,8 +27,8 @@ type BaseConfig struct {
 	Tools         []tool.BaseTool
 	// Middlewares run in order inside the fixed system runtime.
 	Middlewares []tool.Middleware
-	// Callbacks observe Agent, LLM, retriever and tool lifecycles asynchronously.
-	Callbacks      []callback.Callback
+	// Callbacks observe Agent, LLM, retriever and tool lifecycles synchronously.
+	Callbacks      []callback.Handler
 	CallbackConfig callback.Config
 	// ContextEngine governs role ordering, prompt-cache prefixes and token budgets.
 	ContextEngine runnable.Runnable[contextengine.Request, contextengine.Result]
@@ -61,7 +61,7 @@ type Base struct {
 	tools               map[string]*toolruntime.Binding
 	toolOrder           []string
 	toolRuntime         *toolruntime.Runtime
-	callbacks           []callback.Callback
+	callbacks           []callback.Handler
 	callbackConfig      callback.Config
 	contextEngine       runnable.Runnable[contextengine.Request, contextengine.Result]
 	contextBuilder      runnable.Runnable[contextengine.Request, contextengine.Result]
@@ -110,7 +110,7 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		model:               cfg.Model,
 		tools:               map[string]*toolruntime.Binding{},
 		toolRuntime:         runtime,
-		callbacks:           append([]callback.Callback(nil), cfg.Callbacks...),
+		callbacks:           append([]callback.Handler(nil), cfg.Callbacks...),
 		callbackConfig:      cfg.CallbackConfig,
 		contextEngine:       cfg.ContextEngine,
 		contextBuilder:      cfg.ContextBuilder,
@@ -239,14 +239,14 @@ func (b *Base) callLLM(ctx context.Context, messages []schema.Message, functions
 	stream, err := b.model.Stream(llmCtx, llm.Request{Messages: schema.CloneMessages(messages), Options: chatOptions}, nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)...)
 	if err != nil {
 		if dispatcher != nil {
-			dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
+			_ = dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
 		}
 		return nil, err
 	}
 	if stream == nil {
 		err := errors.New("llm model returned a nil stream")
 		if dispatcher != nil {
-			dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
+			_ = dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
 		}
 		return nil, err
 	}
