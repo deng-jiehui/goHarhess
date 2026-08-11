@@ -226,6 +226,7 @@ func TestOpenAICompatibleRejectsInvalidToolCallIndexes(t *testing.T) {
 	cases := map[string]string{
 		"negative":  `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":-1,"function":{"name":"bad","arguments":"{}"}}]}}]}`,
 		"duplicate": `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"first","arguments":"{}"}},{"index":0,"function":{"name":"second","arguments":"{}"}}]}}]}`,
+		"oversized": `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1000000,"function":{"name":"bad","arguments":"{}"}}]}}]}`,
 	}
 	for name, frame := range cases {
 		t.Run(name, func(t *testing.T) {

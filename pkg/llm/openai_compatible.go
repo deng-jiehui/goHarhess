@@ -295,6 +295,9 @@ type openAIResponse struct {
 	Usage   *openAIUsage   `json:"usage,omitempty"`
 }
 
+// maxOpenAIToolCallIndex bounds provider-controlled sparse slot allocation.
+const maxOpenAIToolCallIndex = 1024
+
 type openAIChoice struct {
 	Index        int           `json:"index"`
 	Message      openAIMessage `json:"message"`
@@ -402,6 +405,9 @@ func openAIMessageToSchema(value openAIMessage, indexed bool) ([]schema.Message,
 		for _, toolCall := range value.ToolCalls {
 			if toolCall.Index < 0 {
 				return nil, fmt.Errorf("invalid tool call index %d", toolCall.Index)
+			}
+			if toolCall.Index > maxOpenAIToolCallIndex {
+				return nil, fmt.Errorf("invalid tool call index %d: exceeds maximum %d", toolCall.Index, maxOpenAIToolCallIndex)
 			}
 			if _, exists := seen[toolCall.Index]; exists {
 				return nil, fmt.Errorf("duplicate tool call index %d", toolCall.Index)
