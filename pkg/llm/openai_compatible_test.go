@@ -204,6 +204,34 @@ func TestOpenAICompatibleStreamingPreservesSparseToolCallIndexes(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleStreamingRejectsEOFBeforeDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+	}))
+	defer server.Close()
+
+	model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+		Model: "incomplete-stream", BaseURL: server.URL, Client: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := model.Stream(context.Background(), llm.Request{Options: llm.ChatOptions{DeltaStream: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamErr error
+	for item := range stream {
+		if item.Err != nil {
+			streamErr = item.Err
+		}
+	}
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "before [DONE]") {
+		t.Fatalf("stream error=%v", streamErr)
+	}
+}
+
 func TestOpenAICompatibleRejectsMultipleChoices(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

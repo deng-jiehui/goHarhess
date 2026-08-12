@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
@@ -23,22 +24,34 @@ func NewHandlerModel(handler Handler) *ScriptedModel {
 	return &ScriptedModel{handler: handler}
 }
 
-func (m *ScriptedModel) Chat(ctx context.Context, messages []schema.Message, opts ChatOptions) (Stream, error) {
-	response, err := m.nextResponse(ctx, messages, opts)
+func (m *ScriptedModel) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Response, error) {
+	messages, err := m.nextResponse(ctx, request.Messages, request.Options)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{Messages: messages}, nil
+}
+
+var _ Model = (*ScriptedModel)(nil)
+
+func (m *ScriptedModel) Stream(ctx context.Context, request Request, _ ...runnable.Option) (runnable.Stream[Event], error) {
+	response, err := m.Invoke(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-
-	out := make(chan Chunk, 1)
-	go func() {
-		defer close(out)
-		select {
-		case <-ctx.Done():
-			out <- Chunk{Err: ctx.Err()}
-		case out <- Chunk{Messages: schema.CloneMessages(response)}:
-		}
-	}()
+	out := make(chan runnable.Item[Event], 2)
+	out <- runnable.Item[Event]{Value: Event{Kind: EventDelta, Messages: response.Messages}}
+	out <- runnable.Item[Event]{Value: Event{Kind: EventDone}}
+	close(out)
 	return out, nil
+}
+
+func (m *ScriptedModel) Capabilities() Capabilities {
+	return Capabilities{Streaming: true, ToolCalls: true, Reasoning: true}
+}
+
+func (m *ScriptedModel) ModelInfo() ModelInfo {
+	return ModelInfo{Name: "scripted", Provider: "test", ModelType: "scripted"}
 }
 
 func (m *ScriptedModel) nextResponse(ctx context.Context, messages []schema.Message, opts ChatOptions) ([]schema.Message, error) {

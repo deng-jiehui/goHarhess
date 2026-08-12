@@ -265,7 +265,7 @@ func (m *OpenAICompatibleModel) streamEvents(ctx context.Context, body io.ReadCl
 				}
 			}
 		}
-		sendWireEvent(ctx, out, wireEvent{kind: wireEventDone})
+		sendWireEvent(ctx, out, wireEvent{err: errors.New("OpenAI-compatible stream closed before [DONE]")})
 	}()
 	return out
 }

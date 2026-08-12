@@ -153,6 +153,32 @@ func (c Content) AppendText(suffix string) Content {
 	return MultiContent(items...)
 }
 
+// Append combines an incremental content fragment with the current content.
+func (c Content) Append(other Content) Content {
+	if other.IsZero() {
+		return c
+	}
+	if c.IsZero() {
+		return other
+	}
+	if !c.multimodal && !other.multimodal {
+		return TextContent(c.text + other.text)
+	}
+
+	items := make([]ContentItem, 0)
+	if c.multimodal {
+		items = append(items, c.Items()...)
+	} else if c.text != "" {
+		items = append(items, TextItem(c.text))
+	}
+	if other.multimodal {
+		items = append(items, other.Items()...)
+	} else if other.text != "" {
+		items = append(items, TextItem(other.text))
+	}
+	return MultiContent(items...)
+}
+
 func (c Content) Validate() error {
 	if !c.multimodal {
 		return nil

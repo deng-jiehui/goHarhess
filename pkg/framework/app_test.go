@@ -25,7 +25,7 @@ func TestAppRunsDefaultAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	last, err := app.RunSync(context.Background(), []schema.Message{schema.UserMessage("hello")})
+	last, err := app.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")})
 	if err != nil {
 		t.Fatal(err)
 	}

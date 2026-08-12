@@ -2,38 +2,93 @@ package agent
 
 import (
 	"context"
+	"errors"
 
+	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
-type Chunk struct {
-	Messages []schema.Message
-	Err      error
-}
-
-type Stream <-chan Chunk
-
+// Agent is the complete public Agent contract: one final result, one typed
+// message data stream, and stable diagnostic naming.
 type Agent interface {
-	Run(ctx context.Context, messages []schema.Message, opts ...RunOption) (Stream, error)
-	Name() string
-	Description() string
+	runnable.NamedRunnable[[]schema.Message, []schema.Message]
+	runnable.Streamer[[]schema.Message, schema.MessageEvent]
 }
 
-func Collect(stream Stream) ([]schema.Message, error) {
-	var last []schema.Message
-	for chunk := range stream {
-		if chunk.Err != nil {
-			return nil, chunk.Err
+func emitMessageItem(ctx context.Context, out chan<- runnable.Item[schema.MessageEvent], item runnable.Item[schema.MessageEvent]) bool {
+	item.Value = item.Value.Clone()
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- item:
+		return true
+	}
+}
+
+func appendMessages(left, right []schema.Message) []schema.Message {
+	combined := make([]schema.Message, 0, len(left)+len(right))
+	combined = append(combined, schema.CloneMessages(left)...)
+	combined = append(combined, schema.CloneMessages(right)...)
+	return combined
+}
+
+func reduceMessageEvents(ctx context.Context, stream runnable.Stream[schema.MessageEvent]) ([]schema.Message, error) {
+	if ctx == nil {
+		return nil, errors.New("agent context is nil")
+	}
+	if stream == nil {
+		return nil, errors.New("agent event stream is nil")
+	}
+	var final []schema.Message
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case item, ok := <-stream:
+			if !ok {
+				return schema.CloneMessages(final), nil
+			}
+			if item.Err != nil {
+				return nil, item.Err
+			}
+			if item.Value.Kind == schema.MessageEventSnapshot && len(item.Value.Messages) > 0 {
+				final = schema.CloneMessages(item.Value.Messages)
+			}
+			if item.Value.Kind == schema.MessageEventDone {
+				return schema.CloneMessages(final), nil
+			}
 		}
-		last = schema.CloneMessages(chunk.Messages)
 	}
-	return last, nil
 }
 
-func RunSync(ctx context.Context, a Agent, messages []schema.Message, opts ...RunOption) ([]schema.Message, error) {
-	stream, err := a.Run(ctx, messages, opts...)
-	if err != nil {
-		return nil, err
+func prefetchMessageEvents(ctx context.Context, stream runnable.Stream[schema.MessageEvent]) (runnable.Stream[schema.MessageEvent], error) {
+	if stream == nil {
+		return nil, errors.New("agent recipe returned a nil stream")
 	}
-	return Collect(stream)
+	var first runnable.Item[schema.MessageEvent]
+	var ok bool
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case first, ok = <-stream:
+	}
+	if !ok {
+		out := make(chan runnable.Item[schema.MessageEvent])
+		close(out)
+		return out, nil
+	}
+	if first.Err != nil {
+		return nil, first.Err
+	}
+	out := make(chan runnable.Item[schema.MessageEvent], 1)
+	out <- first
+	go func() {
+		defer close(out)
+		for item := range stream {
+			if !emitMessageItem(ctx, out, item) {
+				return
+			}
+		}
+	}()
+	return out, nil
 }

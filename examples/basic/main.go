@@ -43,7 +43,7 @@ func main() {
 		[]schema.Message{schema.AssistantMessage("tool call finished")},
 	)
 
-	a, err := agent.NewFnCallAgent(agent.BaseConfig{
+	a, err := agent.New(agent.BaseConfig{
 		Name:          "assistant",
 		SystemMessage: "You are a helpful assistant.",
 		Model:         model,
@@ -58,7 +58,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	last, err := app.RunSync(ctx, []schema.Message{schema.UserMessage("please use echo")})
+	last, err := app.Invoke(ctx, []schema.Message{schema.UserMessage("please use echo")})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -129,11 +129,30 @@ func (m Message) FunctionID(defaultID string) string {
 }
 
 func CloneMessages(messages []Message) []Message {
+	cloned, _ := cloneMessages(messages, false)
+	return cloned
+}
+
+// CloneMessagesStrict returns fully isolated messages or rejects an unknown
+// mutable value in Extra or multimodal content.
+func CloneMessagesStrict(messages []Message) ([]Message, error) {
+	return cloneMessages(messages, true)
+}
+
+func cloneMessages(messages []Message, strict bool) ([]Message, error) {
 	copied := make([]Message, len(messages))
 	for i, msg := range messages {
 		copied[i] = msg
-		copied[i].Content = cloneContent(msg.Content)
-		copied[i].ReasoningContent = cloneContent(msg.ReasoningContent)
+		content, err := cloneMessageContent(msg.Content, strict, fmt.Sprintf("messages[%d].content", i))
+		if err != nil {
+			return nil, err
+		}
+		copied[i].Content = content
+		reasoning, err := cloneMessageContent(msg.ReasoningContent, strict, fmt.Sprintf("messages[%d].reasoning_content", i))
+		if err != nil {
+			return nil, err
+		}
+		copied[i].ReasoningContent = reasoning
 		if msg.FunctionCall != nil {
 			fc := *msg.FunctionCall
 			copied[i].FunctionCall = &fc
@@ -141,11 +160,39 @@ func CloneMessages(messages []Message) []Message {
 		if msg.Extra != nil {
 			copied[i].Extra = make(map[string]any, len(msg.Extra))
 			for k, v := range msg.Extra {
-				copied[i].Extra[k] = v
+				cloned, err := cloneAnyValue(v, strict, fmt.Sprintf("messages[%d].extra[%q]", i, k), 0)
+				if err != nil {
+					return nil, err
+				}
+				copied[i].Extra[k] = cloned
 			}
 		}
 	}
-	return copied
+	return copied, nil
+}
+
+func cloneMessageContent(content Content, strict bool, path string) (Content, error) {
+	if !content.IsMultimodal() {
+		return cloneContent(content), nil
+	}
+	items := content.Items()
+	for index := range items {
+		if items[index].Audio != nil {
+			value, err := cloneAnyValue(items[index].Audio, strict, fmt.Sprintf("%s[%d].audio", path, index), 0)
+			if err != nil {
+				return Content{}, err
+			}
+			items[index].Audio = value
+		}
+		if items[index].Video != nil {
+			value, err := cloneAnyValue(items[index].Video, strict, fmt.Sprintf("%s[%d].video", path, index), 0)
+			if err != nil {
+				return Content{}, err
+			}
+			items[index].Video = value
+		}
+	}
+	return MultiContent(items...), nil
 }
 
 func HasChinese(messages []Message) bool {

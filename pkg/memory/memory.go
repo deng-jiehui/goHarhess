@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
@@ -16,17 +17,24 @@ type RAGConfig struct {
 	SupportedSuffix map[string]bool
 }
 
-type Retriever interface {
-	Retrieve(ctx context.Context, query string, files []string, cfg RAGConfig) (string, error)
+type RetrieveRequest struct {
+	Query  string
+	Files  []string
+	Config RAGConfig
+}
+
+type KnowledgeRequest struct {
+	Messages []schema.Message
+	Lang     string
 }
 
 type Memory struct {
 	SystemFiles []string
 	Config      RAGConfig
-	Retriever   Retriever
+	Retriever   runnable.Runnable[RetrieveRequest, string]
 }
 
-func New(systemFiles []string, cfg RAGConfig, retriever Retriever) *Memory {
+func New(systemFiles []string, cfg RAGConfig, retriever runnable.Runnable[RetrieveRequest, string]) *Memory {
 	if cfg.SupportedSuffix == nil {
 		cfg.SupportedSuffix = defaultSupportedSuffix()
 	}
@@ -37,13 +45,13 @@ func New(systemFiles []string, cfg RAGConfig, retriever Retriever) *Memory {
 	}
 }
 
-func (m *Memory) Knowledge(ctx context.Context, messages []schema.Message, lang string) (string, error) {
-	files := m.ragFiles(messages)
+func (m *Memory) Invoke(ctx context.Context, request KnowledgeRequest, options ...runnable.Option) (string, error) {
+	files := m.ragFiles(request.Messages)
 	if len(files) == 0 || m.Retriever == nil {
 		return "", nil
 	}
-	query := schema.LastUserText(messages)
-	return m.Retriever.Retrieve(ctx, query, files, m.Config)
+	query := schema.LastUserText(request.Messages)
+	return m.Retriever.Invoke(ctx, RetrieveRequest{Query: query, Files: files, Config: m.Config}, options...)
 }
 
 func (m *Memory) ragFiles(messages []schema.Message) []string {
@@ -85,7 +93,7 @@ func (m *Memory) isSupported(path string) bool {
 
 type StaticRetriever string
 
-func (s StaticRetriever) Retrieve(ctx context.Context, query string, files []string, cfg RAGConfig) (string, error) {
+func (s StaticRetriever) Invoke(context.Context, RetrieveRequest, ...runnable.Option) (string, error) {
 	return string(s), nil
 }
 
