@@ -283,6 +283,41 @@ func TestCallbackFilterChunksKeepsSynchronousTerminalMetrics(t *testing.T) {
 	}
 }
 
+func TestCallbackErrorSinkObservesFailureWithoutChangingAgentResult(t *testing.T) {
+	sentinel := errors.New("billing unavailable")
+	var mu sync.Mutex
+	var reported []callback.CallbackError
+	value, err := agent.NewBasicAgent(agent.BaseConfig{
+		Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")}),
+		Callbacks: []callback.Handler{callback.CallbackFunc(func(context.Context, callback.Event) error {
+			return sentinel
+		})},
+		CallbackErrorSinks: []callback.ErrorSink{callback.ErrorSinkFunc(func(_ context.Context, callbackErr callback.CallbackError) {
+			mu.Lock()
+			reported = append(reported, callbackErr)
+			mu.Unlock()
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")})
+	if err != nil {
+		t.Fatalf("Invoke error = %v", err)
+	}
+	if len(output) == 0 || output[len(output)-1].Text() != "ok" {
+		t.Fatalf("Invoke output = %#v", output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reported) == 0 {
+		t.Fatal("Callback ErrorSink was not called synchronously")
+	}
+	if !errors.Is(reported[0].Err, sentinel) {
+		t.Fatalf("reported error = %v", reported[0].Err)
+	}
+}
+
 func TestNestedAgentKeepsLocalCallbacksAndGraphSpansScoped(t *testing.T) {
 	var mu sync.Mutex
 	var events []callback.Event

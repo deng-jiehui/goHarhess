@@ -35,7 +35,7 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 		callbacks = append(callbacks, b.callbacks...)
 		callbacks = append(callbacks, opts.Callbacks...)
 		var err error
-		dispatcher, err = callback.New(callbacks, b.callbackConfig)
+		dispatcher, err = callback.New(callbacks, b.callbackConfig, b.callbackErrorSinks...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -45,7 +45,7 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 		callbacks = append(callbacks, b.callbacks...)
 		callbacks = append(callbacks, opts.Callbacks...)
 		var err error
-		dispatcher, err = callback.NewChild(dispatcher, callbacks)
+		dispatcher, err = callback.NewChild(dispatcher, callbacks, b.callbackErrorSinks...)
 		if err != nil {
 			return nil, nil, err
 		}

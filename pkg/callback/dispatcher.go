@@ -11,6 +11,8 @@ import (
 
 const maxTimeout = 5 * time.Minute
 
+var errHandlerTimeout = errors.New("callback Handler timeout")
+
 // Config controls synchronous callback execution.
 type Config struct {
 	Timeout      time.Duration
@@ -25,18 +27,19 @@ type handlerEntry struct {
 // SyncDispatcher invokes handlers inline in the caller's goroutine. It has no
 // queue, worker or flush lifecycle, so accepted events cannot be dropped.
 type SyncDispatcher struct {
-	handlers []handlerEntry
-	parent   *SyncDispatcher
-	config   Config
-	sequence atomic.Uint64
+	handlers   []handlerEntry
+	errorSinks []ErrorSink
+	parent     *SyncDispatcher
+	config     Config
+	sequence   *atomic.Uint64
 }
 
 // New validates handlers and creates a synchronous dispatcher.
-func New(handlers []Handler, config Config) (*SyncDispatcher, error) {
+func New(handlers []Handler, config Config, errorSinks ...ErrorSink) (*SyncDispatcher, error) {
 	if config.Timeout < 0 || config.Timeout > maxTimeout {
 		return nil, fmt.Errorf("callback timeout must be zero or at most %s: %s", maxTimeout, config.Timeout)
 	}
-	dispatcher := &SyncDispatcher{config: config}
+	dispatcher := &SyncDispatcher{config: config, sequence: &atomic.Uint64{}}
 	for index, value := range handlers {
 		if value == nil {
 			return nil, fmt.Errorf("callback at index %d cannot be nil", index)
@@ -47,20 +50,29 @@ func New(handlers []Handler, config Config) (*SyncDispatcher, error) {
 		}
 		dispatcher.handlers = append(dispatcher.handlers, handlerEntry{name: name, value: value})
 	}
+	for index, sink := range errorSinks {
+		if sink == nil {
+			return nil, fmt.Errorf("callback error sink at index %d cannot be nil", index)
+		}
+		dispatcher.errorSinks = append(dispatcher.errorSinks, sink)
+	}
 	return dispatcher, nil
 }
 
 // NewChild creates a local synchronous callback scope. Accepted events are
 // forwarded to parent before local handlers execute.
-func NewChild(parent *SyncDispatcher, handlers []Handler) (*SyncDispatcher, error) {
+func NewChild(parent *SyncDispatcher, handlers []Handler, errorSinks ...ErrorSink) (*SyncDispatcher, error) {
 	if parent == nil {
-		return New(handlers, Config{})
+		return New(handlers, Config{}, errorSinks...)
 	}
-	child, err := New(handlers, parent.config)
+	inherited := append([]ErrorSink(nil), parent.errorSinks...)
+	inherited = append(inherited, errorSinks...)
+	child, err := New(handlers, parent.config, inherited...)
 	if err != nil {
 		return nil, err
 	}
 	child.parent = parent
+	child.sequence = parent.sequence
 	return child, nil
 }
 
@@ -92,10 +104,10 @@ func (d *SyncDispatcher) Dispatch(ctx context.Context, event Event) error {
 		handlerCtx := ctx
 		var cancel context.CancelFunc
 		if d.config.Timeout > 0 {
-			handlerCtx, cancel = context.WithTimeout(ctx, d.config.Timeout)
+			handlerCtx, cancel = context.WithTimeoutCause(ctx, d.config.Timeout, errHandlerTimeout)
 		}
 		err, panicked := invoke(entry, handlerCtx, handlerEvent)
-		timedOut := d.config.Timeout > 0 && errors.Is(handlerCtx.Err(), context.DeadlineExceeded)
+		timedOut := d.config.Timeout > 0 && errors.Is(context.Cause(handlerCtx), errHandlerTimeout)
 		if cancel != nil {
 			cancel()
 		}
@@ -108,10 +120,21 @@ func (d *SyncDispatcher) Dispatch(ctx context.Context, event Event) error {
 			}
 		}
 		if err != nil {
-			failures = append(failures, CallbackError{Callback: entry.name, Event: handlerEvent.Clone(), Err: err})
+			callbackErr := CallbackError{Callback: entry.name, Event: handlerEvent.Clone(), Err: err}
+			failures = append(failures, callbackErr)
+			d.report(ctx, callbackErr)
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func (d *SyncDispatcher) report(ctx context.Context, callbackErr CallbackError) {
+	for _, sink := range d.errorSinks {
+		func() {
+			defer func() { _ = recover() }()
+			sink.OnError(ctx, callbackErr)
+		}()
+	}
 }
 
 func isChunkEvent(eventType EventType) bool {

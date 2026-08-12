@@ -4,7 +4,7 @@
 
 **Goal:** 将 Callback 默认执行改为同步直调，精简公开配置并隔离高频 Chunk 观测，同时保持 Agent、Graph、LLM 和 Tool 的生命周期数据流正确。
 
-**Architecture:** 用无队列的 `SyncDispatcher` 取代现有混合异步 `Dispatcher`；`Dispatch` 在当前 Goroutine 按注册顺序执行 Handler，返回聚合的 `CallbackError`，框架调用点忽略该错误。`FilterChunks` 在统一入口过滤 Chunk，`Sequence` 使用原子递增，事件对每个 Handler 使用递归深拷贝。异步观察能力只作为不接入 Agent 的显式 `AsyncObserverManager`/用户包装，不能复用同步配置。
+**Architecture:** 用无队列的 `SyncDispatcher` 取代现有混合异步 `Dispatcher`；`Dispatch` 在当前 Goroutine 按注册顺序执行 Handler，返回聚合的 `CallbackError`，并通过独立 `ErrorSink` 旁路报告。`FilterChunks` 在统一入口过滤 Chunk，父子 Dispatcher 共享原子 `Sequence`，事件对每个 Handler 使用递归深拷贝。框架不提供异步管理器，异步包装完全由用户负责。
 
 **Tech Stack:** Go、标准库 `context`/`errors`/`sync/atomic`，现有 `pkg/callback`、`pkg/agent`、`pkg/graph` 和 `internal/toolruntime` 测试工具链。
 
@@ -32,7 +32,7 @@
 
 **Interfaces:**
 - Consumes: existing `CallbackFunc`, `Funcs`, `Event`, `CallbackError`, `CloneMetadata`.
-- Produces: `Handler`, `SyncDispatcher`, `New([]Handler, Config)`, `NewChild(*SyncDispatcher, []Handler)`, `Dispatch(context.Context, Event) error`, and an explicit opt-in `AsyncObserverManager` that is not used by Agent construction.
+- Produces: `Handler`, `SyncDispatcher`, `ErrorSink`, `New([]Handler, Config, ...ErrorSink)`, `NewChild(*SyncDispatcher, []Handler, ...ErrorSink)` and `Dispatch(context.Context, Event) error`.
 
 - [ ] **Step 1: Write failing synchronous-dispatch tests.** Replace the old non-blocking/drop assertions with tests that assert a blocking Handler prevents `Dispatch` from returning until it releases, Handlers execute in registration order, errors and panics are returned as aggregated `CallbackError` values, and later Handlers still run.
 
@@ -40,17 +40,17 @@
 
 - [ ] **Step 3: Run the focused callback tests to capture RED.**
 
-Run: `go test ./pkg/callback -run 'Test(Sync|Dispatcher|AsyncObserver)' -count=1`
+Run: `go test ./pkg/callback -run 'Test(Sync|Dispatcher|ErrorSink)' -count=1`
 
 Expected: FAIL because the synchronous dispatcher API and deep per-Handler snapshots are not implemented yet.
 
 - [ ] **Step 4: Implement `Handler` naming and synchronous dispatcher.** Define `Handler` as the primary interface; retain `type Callback = Handler` only as a behavior-free source alias if needed by untouched consumers. Replace queue/worker/mutex/Wait/Stats/Dropped code with immutable Handler entries, an `atomic.Uint64` sequence, `FilterChunks`, and inline invocation. `Dispatch` must clone the event for every Handler, recover panics, wrap timeout/error as `CallbackError`, continue through all Handlers, and return `errors.Join` of failures. `Timeout == 0` must not create a deadline; positive timeout uses `context.WithTimeout` cooperatively and does not disable a Handler.
 
-- [ ] **Step 5: Implement the explicit asynchronous observer helper.** Keep `AsyncObserverManager` independent from `Config` and Agent; it accepts user-defined observers, clones events before handing them off, and documents that buffering, cancellation, retry, shutdown, and loss policy belong to the caller. Do not invoke it from `callback.New` or `agent.WithCallbacks`.
+- [ ] **Step 5: Implement the independent error sink.** Notify `ErrorSink.OnError` synchronously for every isolated Handler error/panic; contain sink panics and inherit sinks across child dispatchers. Do not put ErrorSink in `callback.Config` or create framework Goroutines.
 
 - [ ] **Step 6: Run focused tests to capture GREEN.**
 
-Run: `go test ./pkg/callback -run 'Test(Sync|Dispatcher|AsyncObserver)' -count=1`
+Run: `go test ./pkg/callback -run 'Test(Sync|Dispatcher|ErrorSink)' -count=1`
 
 Expected: PASS, including race-safe sequence allocation and deep-copy isolation.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"goharness/pkg/callback"
 	"goharness/pkg/graph"
@@ -11,8 +12,72 @@ import (
 	"goharness/pkg/schema"
 )
 
+type graphRuntimeContextKey struct{}
+
 type callbackGraphState struct {
 	Messages []schema.Message
+}
+
+func TestGraphCallbackReleasesStateLockBeforeHandler(t *testing.T) {
+	var sink graph.EventSink
+	returned := make(chan error, 1)
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, event callback.Event) error {
+		if event.Type == callback.EventGraphStart {
+			sink.Publish(ctx, graph.Event{Type: graph.EventNodeStart, NodeID: "reentrant"})
+		}
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.WithDispatcher(context.Background(), dispatcher)
+	ctx = callback.BindGraph(ctx, "reentrant.graph")
+	var ok bool
+	sink, ok = graph.EventSinkFromContext(ctx)
+	if !ok {
+		t.Fatal("missing graph callback sink")
+	}
+	go func() {
+		sink.Publish(ctx, graph.Event{Type: graph.EventGraphStart})
+		returned <- nil
+	}()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Handler re-entry deadlocked graph callback state")
+	}
+}
+
+func TestGraphCallbackUsesPublishedRuntimeContext(t *testing.T) {
+	seen := make(chan any, 1)
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, event callback.Event) error {
+		if event.Type == callback.EventGraphNode {
+			seen <- ctx.Value(graphRuntimeContextKey{})
+		}
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := callback.WithDispatcher(context.Background(), dispatcher)
+	bound := callback.BindGraph(base, "runtime-context.graph")
+	sink, ok := graph.EventSinkFromContext(bound)
+	if !ok {
+		t.Fatal("missing graph callback sink")
+	}
+	runtimeCtx := context.WithValue(bound, graphRuntimeContextKey{}, "node-value")
+	sink.Publish(runtimeCtx, graph.Event{Type: graph.EventNodeStart, NodeID: "node"})
+	select {
+	case value := <-seen:
+		if value != "node-value" {
+			t.Fatalf("Handler context value = %#v", value)
+		}
+	default:
+		t.Fatal("graph Handler did not run")
+	}
 }
 
 func (s callbackGraphState) Clone() callbackGraphState {
@@ -117,5 +182,12 @@ func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 	}
 	if childManager == nil || childManager == dispatcher || childTrace.SpanID != childSpanID {
 		t.Fatalf("child callback context manager=%p root=%p trace=%#v childSpan=%q", childManager, dispatcher, childTrace, childSpanID)
+	}
+	sequences := map[uint64]bool{}
+	for _, event := range events {
+		if event.Sequence == 0 || sequences[event.Sequence] {
+			t.Fatalf("duplicate graph callback sequence %d", event.Sequence)
+		}
+		sequences[event.Sequence] = true
 	}
 }

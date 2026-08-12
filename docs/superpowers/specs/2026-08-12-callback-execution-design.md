@@ -76,17 +76,19 @@ Context。Handler 必须尊重 Context 取消；框架不通过后台 Goroutine 
 时使用轻量的 child dispatcher，先向 parent 转发，再执行本地 Handler，保持现有
 scope/trace 关系。
 
-### AsyncObserverManager
+### ErrorSink
 
-异步需求不属于 Agent 默认执行模型。若保留异步观察能力，`AsyncObserverManager` 必须
-作为与 `SyncDispatcher` 完全分离的显式 opt-in 组件，使用独立的 `Observer` 接口和
-配置，不能复用 `callback.Config`，也不能由 `WithCallbacks` 隐式创建。Agent 默认不
-构造它。该组件只负责把克隆后的事件交给用户提供的异步观察器；队列容量、重试、关闭
-和丢弃策略由调用方负责，不承诺无损。
+`callback.ErrorSink.OnError(context.Context, CallbackError)` 是独立的同步旁路错误接口。
+Handler 返回错误或 panic 后，Dispatcher 继续执行后续 Handler，并同步通知所有
+ErrorSink。ErrorSink 自身的 panic 被隔离，不替换 Agent、Graph、LLM 或 Tool 的业务结果。
 
-推荐的应用侧包装保持最小化：一个 Handler 克隆 Event 后启动用户自己的 Goroutine，
-并自行决定缓冲、生命周期、重试和关闭策略。框架不承诺该异步包装的无损递交；需要
-无损的计费/审计必须使用同步 Handler。
+ErrorSink 不属于 `callback.Config`，Agent 通过 `CallbackErrorSinks` 或
+`WithCallbackErrorSink(s)` 显式注册。嵌套 Agent 的 child dispatcher 继承父级 ErrorSink，
+保证任意层级的 Handler 失败均可进入日志、告警或死信处理。
+
+框架不提供 `AsyncObserverManager` 或其他 `go func()` 异步管理器。应用若自行包装 Handler
+或 ErrorSink 为异步执行，必须负责 Event 克隆、持久化 timeout、缓冲、重试和关闭策略；
+这种包装不承诺无损，计费/审计必须使用同步 Handler。
 
 ## 生命周期与流数据
 
@@ -100,9 +102,8 @@ scope/trace 关系。
 ## 错误处理
 
 Callback 错误永远不替换 Agent、LLM、Tool 或 Graph 的业务错误。每个 Handler 独立恢复
-panic；一个 Handler 失败后仍执行同一事件的后续 Handler。同步错误报告入口只用于日志、
-测试或应用自定义告警；框架调用点统一忽略 `Dispatch` 返回值，报告逻辑不再在
-Dispatcher 内部偷偷起 Goroutine。
+panic；一个 Handler 失败后仍执行同一事件的后续 Handler。`Dispatch` 返回聚合错误，
+同时通过独立 ErrorSink 同步旁路报告；框架业务调用点忽略返回值，但错误不会静默丢失。
 
 Context 取消仍会传递给同步 Handler，这是共享执行上下文的必要部分。需要在请求取消
 后继续写入的 Handler 必须显式派生 `context.WithoutCancel`，而不是依赖框架偷偷脱离
@@ -120,7 +121,8 @@ Agent/LLM/Tool/Graph 产生生命周期事件
     |                         |
 Handler 1 -> Handler 2 ...   FilterChunks=true 时跳过 chunk
     |
-    +--> Dispatch 返回 CallbackError（隔离，不回写业务结果）
+    +--> Dispatch 返回 CallbackError + ErrorSink.OnError
+         （隔离，不回写业务结果）
 
 LLM StreamReader ----------------------> 下游模型/Agent
              \-- llm.end 携带最终 Usage/Metrics
@@ -133,7 +135,9 @@ LLM StreamReader ----------------------> 下游模型/Agent
 
 - Dispatch 在 Handler 返回前阻塞，事件不丢失且按注册顺序执行。
 - Handler error/panic 不阻断后续 Handler，`Dispatch` 返回聚合错误但不反向影响业务。
+- ErrorSink 同步感知 Handler 失败，自身 panic 不影响 Handler 或业务结果。
 - `Timeout == 0` 不创建 deadline，正值按协作式 deadline 处理。
+- 父 Context 取消或超时保持原始语义，不包装为 Handler `TimeoutError`。
 - `FilterChunks` 对 Agent/LLM Chunk 生效，end 事件和最终 token 指标仍递交。
 - 取消 Context 的值可见；需要持久化的 Handler 可显式使用 `WithoutCancel`。
 - 嵌套 Agent/Graph 的 parent/child scope、trace 和事件序号保持正确。
@@ -144,6 +148,8 @@ LLM StreamReader ----------------------> 下游模型/Agent
 
 - StateGraph 的 Fan-Out 可能从多个 Goroutine 同时调用同一个 Dispatcher；`Sequence`
   必须通过 `atomic.AddUint64`（或等价原子操作）分配，Handler 实现必须自行保证线程安全。
+- 父子 Dispatcher 共享一次运行的原子序号；Graph 内部状态锁在调用 Handler 前释放。
+- Graph Handler 使用事件发布时的运行 Context，保留节点级 value、trace 和取消信号。
 - `Config.Timeout` 是协作式超时。Handler 必须主动感知并响应 `ctx.Done()`；忽略 Context
   的同步阻塞 I/O 仍可能卡住 Agent，框架不能强行终止该调用。
 - 每个 Handler 收到独立的 Event 深拷贝，Metadata、Metrics.Custom 以及其中的 map/slice

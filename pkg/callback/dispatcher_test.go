@@ -115,6 +115,111 @@ func TestSyncDispatcherTimeoutIsCooperative(t *testing.T) {
 	}
 }
 
+func TestSyncDispatcherDoesNotBlameParentDeadlineOnHandler(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, _ callback.Event) error {
+		return ctx.Err()
+	})}, callback.Config{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchErr := dispatcher.Dispatch(ctx, callback.Event{Type: callback.EventAgentStart})
+	if !errors.Is(dispatchErr, context.DeadlineExceeded) {
+		t.Fatalf("Dispatch error = %v, want context.DeadlineExceeded", dispatchErr)
+	}
+	var timeoutErr *callback.TimeoutError
+	if errors.As(dispatchErr, &timeoutErr) {
+		t.Fatalf("parent cancellation was reported as Handler timeout: %v", dispatchErr)
+	}
+}
+
+func TestSyncDispatcherReportsFailuresToErrorSink(t *testing.T) {
+	sentinel := errors.New("billing unavailable")
+	reported := make(chan callback.CallbackError, 1)
+	dispatcher, err := callback.New(
+		[]callback.Handler{callback.CallbackFunc(func(context.Context, callback.Event) error { return sentinel })},
+		callback.Config{},
+		callback.ErrorSinkFunc(func(_ context.Context, callbackErr callback.CallbackError) {
+			reported <- callbackErr
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Dispatch(context.Background(), callback.Event{Type: callback.EventToolEnd}); !errors.Is(err, sentinel) {
+		t.Fatalf("Dispatch error = %v, want sentinel", err)
+	}
+	select {
+	case callbackErr := <-reported:
+		if callbackErr.Event.Type != callback.EventToolEnd || !errors.Is(callbackErr.Err, sentinel) {
+			t.Fatalf("reported error = %#v", callbackErr)
+		}
+	default:
+		t.Fatal("ErrorSink was not called synchronously")
+	}
+}
+
+func TestSyncDispatcherContainsErrorSinkPanic(t *testing.T) {
+	sentinel := errors.New("audit unavailable")
+	dispatcher, err := callback.New(
+		[]callback.Handler{callback.CallbackFunc(func(context.Context, callback.Event) error { return sentinel })},
+		callback.Config{},
+		callback.ErrorSinkFunc(func(context.Context, callback.CallbackError) { panic("broken alarm") }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Dispatch(context.Background(), callback.Event{Type: callback.EventAgentEnd}); !errors.Is(err, sentinel) {
+		t.Fatalf("Dispatch error = %v, want sentinel", err)
+	}
+}
+
+func TestChildDispatcherSharesSequenceAndInheritsErrorSink(t *testing.T) {
+	var reported atomic.Int32
+	sink := callback.ErrorSinkFunc(func(context.Context, callback.CallbackError) {
+		reported.Add(1)
+	})
+	parent, err := callback.New([]callback.Handler{callback.CallbackFunc(func(context.Context, callback.Event) error {
+		return nil
+	})}, callback.Config{}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := callback.NewChild(parent, []callback.Handler{callback.CallbackFunc(func(context.Context, callback.Event) error {
+		return errors.New("child failed")
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Dispatch(context.Background(), callback.Event{Type: callback.EventToolEnd}); err == nil {
+		t.Fatal("child Dispatch unexpectedly succeeded")
+	}
+	if reported.Load() != 1 {
+		t.Fatalf("ErrorSink reports = %d, want 1", reported.Load())
+	}
+	var sequences []uint64
+	collector := callback.CallbackFunc(func(_ context.Context, event callback.Event) error {
+		sequences = append(sequences, event.Sequence)
+		return nil
+	})
+	parent, err = callback.New([]callback.Handler{collector}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err = callback.NewChild(parent, []callback.Handler{collector})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Dispatch(context.Background(), callback.Event{Type: callback.EventToolEnd}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sequences) != 2 || sequences[0] == sequences[1] {
+		t.Fatalf("parent/child sequences = %v", sequences)
+	}
+}
+
 func TestSyncDispatcherFiltersChunksAndDeliversAllOtherEvents(t *testing.T) {
 	var mu sync.Mutex
 	var got []callback.EventType

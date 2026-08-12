@@ -79,6 +79,18 @@ func WithCallback(value callback.Handler) Option {
 	return func(config *BaseConfig) { config.Callbacks = append(config.Callbacks, value) }
 }
 
+// WithCallbackErrorSinks replaces Agent-wide synchronous callback error sinks.
+func WithCallbackErrorSinks(values ...callback.ErrorSink) Option {
+	return func(config *BaseConfig) {
+		config.CallbackErrorSinks = append([]callback.ErrorSink(nil), values...)
+	}
+}
+
+// WithCallbackErrorSink appends one Agent-wide callback error sink.
+func WithCallbackErrorSink(value callback.ErrorSink) Option {
+	return func(config *BaseConfig) { config.CallbackErrorSinks = append(config.CallbackErrorSinks, value) }
+}
+
 // WithCallbackConfig configures synchronous Handler deadlines and Chunk filtering.
 func WithCallbackConfig(value callback.Config) Option {
 	return func(config *BaseConfig) { config.CallbackConfig = value }

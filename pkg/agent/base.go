@@ -30,6 +30,8 @@ type BaseConfig struct {
 	// Callbacks observe Agent, LLM, retriever and tool lifecycles synchronously.
 	Callbacks      []callback.Handler
 	CallbackConfig callback.Config
+	// CallbackErrorSinks receive isolated Handler failures synchronously.
+	CallbackErrorSinks []callback.ErrorSink
 	// ContextEngine governs role ordering, prompt-cache prefixes and token budgets.
 	ContextEngine runnable.Runnable[contextengine.Request, contextengine.Result]
 	// ContextBuilder is the standard Runnable node used to assemble model
@@ -63,6 +65,7 @@ type Base struct {
 	toolRuntime         *toolruntime.Runtime
 	callbacks           []callback.Handler
 	callbackConfig      callback.Config
+	callbackErrorSinks  []callback.ErrorSink
 	contextEngine       runnable.Runnable[contextengine.Request, contextengine.Result]
 	contextBuilder      runnable.Runnable[contextengine.Request, contextengine.Result]
 	checkpointStore     state.Store
@@ -79,7 +82,7 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		return nil, fmt.Errorf("configure agent %q: %w", cfg.Name, err)
 	}
 	cfg = resolved
-	if _, err := callback.New(cfg.Callbacks, cfg.CallbackConfig); err != nil {
+	if _, err := callback.New(cfg.Callbacks, cfg.CallbackConfig, cfg.CallbackErrorSinks...); err != nil {
 		return nil, fmt.Errorf("configure agent %q callbacks: %w", cfg.Name, err)
 	}
 	if cfg.ContextBuilder == nil {
@@ -112,6 +115,7 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		toolRuntime:         runtime,
 		callbacks:           append([]callback.Handler(nil), cfg.Callbacks...),
 		callbackConfig:      cfg.CallbackConfig,
+		callbackErrorSinks:  append([]callback.ErrorSink(nil), cfg.CallbackErrorSinks...),
 		contextEngine:       cfg.ContextEngine,
 		contextBuilder:      cfg.ContextBuilder,
 		checkpointStore:     cfg.CheckpointStore,

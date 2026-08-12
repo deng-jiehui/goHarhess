@@ -91,30 +91,39 @@ func (s *graphCallbackSink) Publish(ctx context.Context, event graph.Event) {
 	if s == nil || s.dispatcher == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.terminal {
-		return
+	if ctx == nil {
+		ctx = s.ctx
 	}
 	metrics := Metrics{Custom: map[string]any{"step": event.Step, "node_id": event.NodeID}}
-	if s.ctx != nil {
-		ctx = s.ctx
+	var callbackEvent Event
+	var dispatch bool
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
 	}
 	switch event.Type {
 	case graph.EventGraphStart:
 		if !s.started {
 			s.started = true
-			s.dispatcher.Dispatch(ctx, StartEvent(EventGraphStart, s.operation, metrics))
+			callbackEvent = StartEvent(EventGraphStart, s.operation, metrics)
+			dispatch = true
 		}
 	case graph.EventNodeStart, graph.EventNodeOutput, graph.EventNodeEnd:
-		callbackEvent := ProgressEvent(EventGraphNode, s.operation, metrics)
+		callbackEvent = ProgressEvent(EventGraphNode, s.operation, metrics)
 		callbackEvent.Metadata["graph.event_type"] = string(event.Type)
-		s.dispatcher.Dispatch(ctx, callbackEvent)
+		dispatch = true
 	case graph.EventGraphEnd:
 		s.terminal = true
-		s.dispatcher.Dispatch(ctx, EndEvent(EventGraphEnd, s.operation, metrics))
+		callbackEvent = EndEvent(EventGraphEnd, s.operation, metrics)
+		dispatch = true
 	case graph.EventGraphError:
 		s.terminal = true
-		s.dispatcher.Dispatch(ctx, ErrorEvent(EventGraphError, s.operation, event.Err, metrics))
+		callbackEvent = ErrorEvent(EventGraphError, s.operation, event.Err, metrics)
+		dispatch = true
+	}
+	s.mu.Unlock()
+	if dispatch {
+		_ = s.dispatcher.Dispatch(ctx, callbackEvent)
 	}
 }

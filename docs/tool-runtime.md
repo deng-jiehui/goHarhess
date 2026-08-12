@@ -81,11 +81,16 @@ monitor := callback.Funcs{
 }
 
 value, err := agent.New(agent.BaseConfig{
-    Name:      "document-agent",
-    Model:     model,
-    Tools:     tools,
+    Name:           "document-agent",
+    Model:          model,
+    Tools:          tools,
     Callbacks:      []callback.Handler{monitor},
     CallbackConfig: callback.Config{FilterChunks: true},
+    CallbackErrorSinks: []callback.ErrorSink{
+        callback.ErrorSinkFunc(func(ctx context.Context, err callback.CallbackError) {
+            log.Printf("callback failure: %v", err)
+        }),
+    },
 })
 ```
 
@@ -147,9 +152,13 @@ Callback 调度具备以下约束：
 - 每个 Handler 收到独立的 Event 深拷贝，Metadata、`Metrics.Custom` 以及嵌套 map/slice
   不会被前一个 Handler 的修改污染。
 - `Config.Timeout` 是协作式超时。Handler 必须主动感知 `ctx.Done()`；忽略 Context 的
-  阻塞 I/O 仍可能卡住 Agent，框架不能强行终止同步调用。
+  阻塞 I/O 仍可能卡住 Agent，框架不能强行终止同步调用。父 Context 自身取消或超时
+  保持原始错误语义，不会被包装为 Handler `TimeoutError`。
 - Handler 返回错误或 panic 时，`Dispatch` 返回聚合的 `callback.CallbackError`；Agent、
-  LLM、Tool 和 Graph 调用点会隔离并忽略该错误，不替换业务结果，也不阻断后续 Handler。
+  LLM、Tool 和 Graph 调用点不会用它替换业务结果，也不阻断后续 Handler。独立的同步
+  `ErrorSink.OnError` 负责把失败旁路到日志、告警或死信队列，ErrorSink 自身 panic 也会被隔离。
+- Graph 内部状态锁只保护状态变迁，调用 Handler 前会释放；节点事件严格透传发布时的
+  运行 Context，保留节点级 value、trace 和取消信号。
 - 高频 `agent.chunk` 和 `llm.chunk` 可通过 `callback.Config{FilterChunks: true}` 过滤。
   流本身仍走独立 StreamReader，`agent.end`/`llm.end` 保留累计消息、字节和最终 token
   指标。需要异步 Metrics 时，由应用自行包装 Handler 并负责 Goroutine、缓冲、重试和关闭：
@@ -161,7 +170,9 @@ func (h asyncHandler) Handle(ctx context.Context, event callback.Event) error {
     snapshot := event.Clone()
     go func() {
         defer func() { _ = recover() }()
-        _ = h.next.Handle(context.WithoutCancel(ctx), snapshot)
+        persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+        defer cancel()
+        _ = h.next.Handle(persistCtx, snapshot)
     }()
     return nil
 }
@@ -178,6 +189,7 @@ reactAgent, err := agent.NewReactAgent(
     agent.WithTools(tools...),
     agent.WithMiddlewares(rbac, masking, approval),
     agent.WithCallbacks(monitor),
+    agent.WithCallbackErrorSink(alerts),
     agent.WithCallbackConfig(callback.Config{FilterChunks: true}),
     agent.WithMaxDepth(5),
     agent.WithTimeout(10*time.Second),
