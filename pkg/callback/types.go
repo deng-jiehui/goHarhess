@@ -32,9 +32,30 @@ const (
 	EventToolError EventType = "tool.error"
 
 	EventGraphStart EventType = "graph.start"
-	EventGraphNode  EventType = "graph.node"
-	EventGraphEnd   EventType = "graph.end"
-	EventGraphError EventType = "graph.error"
+	// EventGraphNode is the legacy unified node event. New graph sinks emit the
+	// phase-specific EventGraphNode* values below.
+	EventGraphNode       EventType = "graph.node"
+	EventGraphNodeStart  EventType = "graph.node.start"
+	EventGraphNodeOutput EventType = "graph.node.output"
+	EventGraphNodeEnd    EventType = "graph.node.end"
+	EventGraphEnd        EventType = "graph.end"
+	EventGraphError      EventType = "graph.error"
+)
+
+// GraphNodePhase identifies the lifecycle phase of a graph node event.
+type GraphNodePhase string
+
+const (
+	GraphNodePhaseStart  GraphNodePhase = "node_start"
+	GraphNodePhaseOutput GraphNodePhase = "node_output"
+	GraphNodePhaseEnd    GraphNodePhase = "node_end"
+)
+
+// Stable Metadata keys for graph node identity and lifecycle phase.
+const (
+	MetadataGraphNodeID    = "graph.node_id"
+	MetadataGraphStep      = "graph.step"
+	MetadataGraphNodePhase = "graph.node_phase"
 )
 
 // Component is the kind of operation that produced an event.
@@ -176,7 +197,9 @@ func (e Event) Clone() Event {
 }
 
 func cloneMetrics(metrics Metrics) Metrics {
-	metrics.Custom = CloneMetadata(metrics.Custom)
+	if metrics.Custom != nil {
+		metrics.Custom = CloneMetadata(metrics.Custom)
+	}
 	return metrics
 }
 

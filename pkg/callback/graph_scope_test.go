@@ -2,6 +2,7 @@ package callback_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,10 @@ type graphRuntimeContextKey struct{}
 type callbackGraphState struct {
 	Messages []schema.Message
 }
+
+type callbackSpanState struct{}
+
+func (callbackSpanState) Clone() callbackSpanState { return callbackSpanState{} }
 
 func TestGraphCallbackReleasesStateLockBeforeHandler(t *testing.T) {
 	var sink graph.EventSink
@@ -54,7 +59,7 @@ func TestGraphCallbackReleasesStateLockBeforeHandler(t *testing.T) {
 func TestGraphCallbackUsesPublishedRuntimeContext(t *testing.T) {
 	seen := make(chan any, 1)
 	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, event callback.Event) error {
-		if event.Type == callback.EventGraphNode {
+		if event.Type == callback.EventGraphNode || event.Type == callback.EventGraphNodeStart || event.Type == callback.EventGraphNodeOutput || event.Type == callback.EventGraphNodeEnd {
 			seen <- ctx.Value(graphRuntimeContextKey{})
 		}
 		return nil
@@ -77,6 +82,236 @@ func TestGraphCallbackUsesPublishedRuntimeContext(t *testing.T) {
 		}
 	default:
 		t.Fatal("graph Handler did not run")
+	}
+}
+
+func TestGraphNodeEventsUseTypedPhasesAndIndependentSpans(t *testing.T) {
+	var mu sync.Mutex
+	var events []callback.Event
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(_ context.Context, event callback.Event) error {
+		mu.Lock()
+		events = append(events, event.Clone())
+		mu.Unlock()
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.BindGraph(callback.WithDispatcher(context.Background(), dispatcher), "parent.graph")
+	sink, ok := graph.EventSinkFromContext(ctx)
+	if !ok {
+		t.Fatal("missing graph callback sink")
+	}
+	for _, event := range []graph.Event{
+		{Type: graph.EventGraphStart},
+		{Type: graph.EventNodeStart, NodeID: "retriever", Step: 3},
+		{Type: graph.EventNodeStart, NodeID: "retriever", Step: 3},
+		{Type: graph.EventNodeOutput, NodeID: "retriever", Step: 3},
+		{Type: graph.EventNodeEnd, NodeID: "retriever", Step: 3},
+		{Type: graph.EventGraphEnd},
+	} {
+		sink.Publish(ctx, event)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var graphSpan string
+	var nodeSpan string
+	phases := []callback.GraphNodePhase{}
+	for _, event := range events {
+		if event.Type == callback.EventGraphStart {
+			graphSpan = event.Trace.SpanID
+		}
+		if event.Component != callback.ComponentGraph || event.Metadata[callback.MetadataGraphNodeID] != "retriever" {
+			continue
+		}
+		if event.Metrics.Custom != nil {
+			t.Fatalf("node event retained identity in Metrics.Custom: %#v", event.Metrics.Custom)
+		}
+		if event.Metadata[callback.MetadataGraphStep] != 3 {
+			t.Fatalf("node step metadata = %#v", event.Metadata[callback.MetadataGraphStep])
+		}
+		phase, ok := event.Metadata[callback.MetadataGraphNodePhase].(callback.GraphNodePhase)
+		if !ok {
+			t.Fatalf("node phase metadata type = %T", event.Metadata[callback.MetadataGraphNodePhase])
+		}
+		phases = append(phases, phase)
+		if nodeSpan == "" {
+			nodeSpan = event.Trace.SpanID
+		}
+		if event.Trace.SpanID != nodeSpan {
+			t.Fatalf("node event span changed: %q -> %q", nodeSpan, event.Trace.SpanID)
+		}
+		if event.Trace.ParentSpanID != graphSpan {
+			t.Fatalf("node parent span = %q, want graph %q", event.Trace.ParentSpanID, graphSpan)
+		}
+		if event.Type == callback.EventGraphNodeEnd && event.Duration < 0 {
+			t.Fatalf("node duration = %s", event.Duration)
+		}
+	}
+	want := []callback.GraphNodePhase{callback.GraphNodePhaseStart, callback.GraphNodePhaseOutput, callback.GraphNodePhaseEnd}
+	if fmt.Sprint(phases) != fmt.Sprint(want) {
+		t.Fatalf("node phases = %v, want %v", phases, want)
+	}
+}
+
+func TestGraphNodeExecutionContextUsesNodeSpan(t *testing.T) {
+	var nodeTrace callback.Trace
+	var childOperation callback.Operation
+	value := graph.NewStateGraph[callbackSpanState, callbackSpanState, callbackSpanState](
+		"node-context",
+		func(_ context.Context, input callbackSpanState) callbackSpanState { return input },
+	)
+	node := runnable.Func[callbackSpanState, callbackSpanState](func(ctx context.Context, state callbackSpanState, _ ...runnable.Option) (callbackSpanState, error) {
+		nodeTrace, _ = callback.TraceFromContext(ctx)
+		_, childOperation = callback.Begin(ctx, callback.ComponentLLM, "inside-node", nil)
+		return state, nil
+	})
+	if err := graph.AddNode(value, "work", node); err != nil {
+		t.Fatal(err)
+	}
+	if err := value.AddEdge(graph.Start, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := value.AddEdge("work", graph.End); err != nil {
+		t.Fatal(err)
+	}
+
+	var nodeEvent callback.Event
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(_ context.Context, event callback.Event) error {
+		if event.Type == callback.EventGraphNodeStart && event.Metadata[callback.MetadataGraphNodeID] == "work" {
+			nodeEvent = event.Clone()
+		}
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.BindGraph(callback.WithDispatcher(context.Background(), dispatcher), "node-context.graph")
+	if _, err := value.Invoke(ctx, callbackSpanState{}); err != nil {
+		t.Fatal(err)
+	}
+	if nodeEvent.Trace.SpanID == "" || nodeTrace != nodeEvent.Trace {
+		t.Fatalf("node execution trace = %#v, node event trace = %#v", nodeTrace, nodeEvent.Trace)
+	}
+	if childOperation.Trace.ParentSpanID != nodeEvent.Trace.SpanID {
+		t.Fatalf("child operation parent = %q, want node span %q", childOperation.Trace.ParentSpanID, nodeEvent.Trace.SpanID)
+	}
+}
+
+func TestGraphErrorClosesActiveNodeSpan(t *testing.T) {
+	var mu sync.Mutex
+	var events []callback.Event
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, event callback.Event) error {
+		trace, ok := callback.TraceFromContext(ctx)
+		if !ok || trace != event.Trace {
+			t.Errorf("event %s context trace = %#v, event trace = %#v", event.Type, trace, event.Trace)
+		}
+		mu.Lock()
+		events = append(events, event.Clone())
+		mu.Unlock()
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.BindGraph(callback.WithDispatcher(context.Background(), dispatcher), "error.graph")
+	sink, ok := graph.EventSinkFromContext(ctx)
+	if !ok {
+		t.Fatal("missing graph callback sink")
+	}
+	sink.Publish(ctx, graph.Event{Type: graph.EventGraphStart})
+	nodeStartEvent := graph.Event{Type: graph.EventNodeStart, NodeID: "broken", Step: 1}
+	binder, ok := sink.(interface {
+		BindEventContext(context.Context, graph.Event) context.Context
+	})
+	if !ok {
+		t.Fatal("graph callback sink does not bind node context")
+	}
+	nodeCtx := binder.BindEventContext(ctx, nodeStartEvent)
+	sink.Publish(nodeCtx, nodeStartEvent)
+	sink.Publish(nodeCtx, graph.Event{Type: graph.EventGraphError, Err: fmt.Errorf("node failed")})
+
+	mu.Lock()
+	defer mu.Unlock()
+	var nodeStart *callback.Event
+	var nodeEnd *callback.Event
+	nodeEndIndex, graphErrorIndex := -1, -1
+	for index := range events {
+		event := events[index]
+		if event.Type == callback.EventGraphNodeStart && event.Metadata[callback.MetadataGraphNodeID] == "broken" {
+			nodeStart = &event
+		}
+		if event.Type == callback.EventGraphNodeEnd && event.Metadata[callback.MetadataGraphNodeID] == "broken" {
+			nodeEnd = &event
+			nodeEndIndex = index
+		}
+		if event.Type == callback.EventGraphError {
+			graphErrorIndex = index
+		}
+	}
+	if nodeStart == nil || nodeEnd == nil {
+		t.Fatal("graph error left active node span open")
+	}
+	if nodeEnd.Status != callback.StatusError || nodeEnd.ErrorText != "node failed" || nodeEnd.Duration < 0 {
+		t.Fatalf("node error event = %#v", *nodeEnd)
+	}
+	if nodeEnd.Trace.SpanID != nodeStart.Trace.SpanID || nodeEndIndex < 0 || graphErrorIndex <= nodeEndIndex {
+		t.Fatalf("node error ordering/span start=%#v end=%#v nodeEndIndex=%d graphErrorIndex=%d", *nodeStart, *nodeEnd, nodeEndIndex, graphErrorIndex)
+	}
+}
+
+func TestGraphCallbackSerializesConcurrentLifecycleDispatch(t *testing.T) {
+	startEntered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var mu sync.Mutex
+	var phases []callback.GraphNodePhase
+	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(_ context.Context, event callback.Event) error {
+		phase, _ := event.Metadata[callback.MetadataGraphNodePhase].(callback.GraphNodePhase)
+		if phase == "" {
+			return nil
+		}
+		if phase == callback.GraphNodePhaseStart {
+			close(startEntered)
+			<-releaseStart
+		}
+		mu.Lock()
+		phases = append(phases, phase)
+		mu.Unlock()
+		return nil
+	})}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.BindGraph(callback.WithDispatcher(context.Background(), dispatcher), "concurrent.graph")
+	sink, ok := graph.EventSinkFromContext(ctx)
+	if !ok {
+		t.Fatal("missing graph callback sink")
+	}
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		sink.Publish(ctx, graph.Event{Type: graph.EventNodeStart, NodeID: "node", Step: 1})
+	}()
+	<-startEntered
+	outputDone := make(chan struct{})
+	go func() {
+		defer close(outputDone)
+		sink.Publish(ctx, graph.Event{Type: graph.EventNodeOutput, NodeID: "node", Step: 1})
+	}()
+	select {
+	case <-outputDone:
+		t.Fatal("node output returned before the queued start callback completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseStart)
+	<-startDone
+	<-outputDone
+	mu.Lock()
+	defer mu.Unlock()
+	want := []callback.GraphNodePhase{callback.GraphNodePhaseStart, callback.GraphNodePhaseOutput}
+	if fmt.Sprint(phases) != fmt.Sprint(want) {
+		t.Fatalf("concurrent phases = %v, want %v", phases, want)
 	}
 }
 
@@ -151,7 +386,7 @@ func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 	defer mu.Unlock()
 	parentEnds, childEnds := 0, 0
 	parentEndIndex, childEndIndex := -1, -1
-	parentSpanID, childSpanID, childParentSpanID := "", "", ""
+	parentSpanID, parentNodeSpanID, childSpanID, childNodeSpanID, childParentSpanID := "", "", "", "", ""
 	for index, event := range events {
 		if event.Type == callback.EventGraphStart {
 			switch event.Name {
@@ -160,6 +395,14 @@ func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 			case "child-graph":
 				childSpanID = event.Trace.SpanID
 				childParentSpanID = event.Trace.ParentSpanID
+			}
+		}
+		if event.Type == callback.EventGraphNodeStart {
+			switch event.Name {
+			case "child-graph":
+				parentNodeSpanID = event.Trace.SpanID
+			case "child-node":
+				childNodeSpanID = event.Trace.SpanID
 			}
 		}
 		if event.Type != callback.EventGraphEnd {
@@ -177,11 +420,11 @@ func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 	if parentEnds != 1 || childEnds != 1 || childEndIndex < 0 || parentEndIndex <= childEndIndex {
 		t.Fatalf("graph end scopes parent=%d child=%d parentIndex=%d childIndex=%d events=%#v", parentEnds, childEnds, parentEndIndex, childEndIndex, events)
 	}
-	if parentSpanID == "" || childParentSpanID != parentSpanID {
-		t.Fatalf("child graph parent span = %q, want %q", childParentSpanID, parentSpanID)
+	if parentSpanID == "" || parentNodeSpanID == "" || childParentSpanID != parentNodeSpanID {
+		t.Fatalf("child graph parent span = %q, want parent node %q (graph %q)", childParentSpanID, parentNodeSpanID, parentSpanID)
 	}
-	if childManager == nil || childManager == dispatcher || childTrace.SpanID != childSpanID {
-		t.Fatalf("child callback context manager=%p root=%p trace=%#v childSpan=%q", childManager, dispatcher, childTrace, childSpanID)
+	if childManager == nil || childManager == dispatcher || childTrace.SpanID != childNodeSpanID || childTrace.ParentSpanID != childSpanID {
+		t.Fatalf("child callback context manager=%p root=%p trace=%#v childGraphSpan=%q childNodeSpan=%q", childManager, dispatcher, childTrace, childSpanID, childNodeSpanID)
 	}
 	sequences := map[uint64]bool{}
 	for _, event := range events {

@@ -97,6 +97,56 @@ func TestSyncDispatcherRunsInlineAndAggregatesFailures(t *testing.T) {
 	}
 }
 
+func TestFuncsProvidesTypedGraphNodePhaseHandlers(t *testing.T) {
+	var calls []string
+	handler := callback.Funcs{
+		OnNodeStart: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "start")
+			return nil
+		},
+		OnNodeOutput: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "output")
+			return nil
+		},
+		OnNodeEnd: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "end")
+			return nil
+		},
+		OnNode: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "node")
+			return nil
+		},
+		OnGraphNode: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "graph-node")
+			return nil
+		},
+		OnEvent: func(_ context.Context, event callback.Event) error {
+			calls = append(calls, "event")
+			return nil
+		},
+	}
+	dispatcher, err := callback.New([]callback.Handler{handler}, callback.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []callback.GraphNodePhase{callback.GraphNodePhaseStart, callback.GraphNodePhaseOutput, callback.GraphNodePhaseEnd} {
+		if err := dispatcher.Dispatch(context.Background(), callback.Event{
+			Type:     callback.EventGraphNode,
+			Metadata: map[string]any{callback.MetadataGraphNodePhase: phase},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{
+		"start", "node", "graph-node", "event",
+		"output", "node", "graph-node", "event",
+		"end", "node", "graph-node", "event",
+	}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("typed phase calls = %v, want %v", calls, want)
+	}
+}
+
 func TestSyncDispatcherTimeoutIsCooperative(t *testing.T) {
 	dispatcher, err := callback.New([]callback.Handler{callback.CallbackFunc(func(ctx context.Context, _ callback.Event) error {
 		<-ctx.Done()

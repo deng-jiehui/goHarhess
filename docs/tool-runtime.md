@@ -58,12 +58,33 @@ Middleware 不能绕过框架 semaphore、并发组和取消链。`tool.Deny` �
 | LLM | `llm.start`、`llm.chunk`、`llm.end`、`llm.error` |
 | Retriever | `retriever.start`、`retriever.end`、`retriever.error` |
 | Tool | `tool.start`、`tool.end`、`tool.error` |
+| Graph | `graph.start`、`graph.node.start`、`graph.node.output`、`graph.node.end`、`graph.end`、`graph.error` |
+
+Graph 还会为每个节点发送 `graph.node.start`、`graph.node.output` 和
+`graph.node.end`。节点事件拥有独立的子 Span，父 Span 是当前 Graph Span，因而
+APM 可以直接绘制节点级耗时瀑布图。节点身份和阶段属于结构元数据，不放入指标：
+
+- `callback.MetadataGraphNodeID`：节点名称；
+- `callback.MetadataGraphStep`：步骤编号；
+- `callback.MetadataGraphNodePhase`：`callback.GraphNodePhaseStart`、
+  `callback.GraphNodePhaseOutput` 或 `callback.GraphNodePhaseEnd`。
+
+`Metrics` 只用于耗时、消息数、字节数和 token 等数值指标。`EventGraphNode` 保留为
+旧统一事件入口；新代码应使用阶段事件和对应的强类型常量。
 
 用户可以实现统一的同步 `callback.Handler`，也可以使用只声明所需钩子的 `callback.Funcs`：
 
 ```go
 monitor := callback.Funcs{
     CallbackName: "metrics-and-logs",
+    OnNodeStart: func(ctx context.Context, event callback.Event) error {
+        log.Printf("node started: %s", event.Metadata[callback.MetadataGraphNodeID])
+        return nil
+    },
+    OnNodeEnd: func(ctx context.Context, event callback.Event) error {
+        log.Printf("node latency: %s", event.Duration)
+        return nil
+    },
     OnLLMEnd: func(ctx context.Context, event callback.Event) error {
         log.Printf(
             "trace=%s model=%s latency=%s tokens=%d",

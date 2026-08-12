@@ -133,6 +133,7 @@ func TestCallbackLifecyclePropagatesTraceContextAndMetadata(t *testing.T) {
 	counts := map[callback.EventType]int{}
 	var agentSpan string
 	var graphSpan string
+	nodeSpans := map[string]bool{}
 	var runID string
 	for _, event := range got {
 		counts[event.Type]++
@@ -156,16 +157,23 @@ func TestCallbackLifecyclePropagatesTraceContextAndMetadata(t *testing.T) {
 		if event.Type == callback.EventGraphStart {
 			graphSpan = event.Trace.SpanID
 		}
+		if event.Type == callback.EventGraphNodeStart {
+			nodeSpans[event.Trace.SpanID] = true
+		}
 	}
 	for _, event := range got {
 		switch event.Component {
 		case callback.ComponentGraph:
-			if event.Trace.ParentSpanID != agentSpan {
-				t.Fatalf("event %s parent span = %q, want agent span %q", event.Type, event.Trace.ParentSpanID, agentSpan)
+			wantParent := agentSpan
+			if event.Type == callback.EventGraphNodeStart || event.Type == callback.EventGraphNodeOutput || event.Type == callback.EventGraphNodeEnd {
+				wantParent = graphSpan
+			}
+			if event.Trace.ParentSpanID != wantParent {
+				t.Fatalf("event %s parent span = %q, want %q", event.Type, event.Trace.ParentSpanID, wantParent)
 			}
 		case callback.ComponentLLM, callback.ComponentTool, callback.ComponentRetriever:
-			if event.Trace.ParentSpanID != graphSpan {
-				t.Fatalf("event %s parent span = %q, want graph span %q", event.Type, event.Trace.ParentSpanID, graphSpan)
+			if !nodeSpans[event.Trace.ParentSpanID] {
+				t.Fatalf("event %s parent span = %q, want one of node spans %#v", event.Type, event.Trace.ParentSpanID, nodeSpans)
 			}
 		}
 	}

@@ -76,6 +76,23 @@ Context。Handler 必须尊重 Context 取消；框架不通过后台 Goroutine 
 时使用轻量的 child dispatcher，先向 parent 转发，再执行本地 Handler，保持现有
 scope/trace 关系。
 
+### Graph 节点事件
+
+Graph 节点生命周期拆分为 `EventGraphNodeStart`、`EventGraphNodeOutput` 和
+`EventGraphNodeEnd`。每个节点开始时创建一个以 Graph Span 为父级的独立
+`Operation`，输出和结束事件复用该 Span；节点结束事件携带该节点的实际
+`Duration`，因此 OpenTelemetry、Jaeger 和 Datadog 可以展示节点级 waterfall。
+
+节点 ID、步骤和阶段通过 `MetadataGraphNodeID`、`MetadataGraphStep` 和
+`MetadataGraphNodePhase` 传递，阶段值使用 `GraphNodePhaseStart`、
+`GraphNodePhaseOutput`、`GraphNodePhaseEnd`。这些字段不进入 `Metrics.Custom`，后者
+仅保留数值型业务指标。`callback.Funcs` 提供 `OnNodeStart`、`OnNodeOutput`、
+`OnNodeEnd` 和统一的 `OnNode`，并继续调用兼容入口 `OnGraphNode`。
+
+节点事件处理沿用发布时的运行时 Context；Graph 内部状态锁在调用 Handler 前释放。
+节点执行发生 Graph 错误时，活动节点会先收到带错误状态的结束事件，随后才分发
+Graph 错误事件，确保不会遗留未关闭的节点 Span。
+
 ### ErrorSink
 
 `callback.ErrorSink.OnError(context.Context, CallbackError)` 是独立的同步旁路错误接口。

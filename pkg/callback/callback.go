@@ -59,6 +59,10 @@ type Funcs struct {
 	OnToolError CallbackFunc
 
 	OnGraphStart CallbackFunc
+	OnNodeStart  CallbackFunc
+	OnNodeOutput CallbackFunc
+	OnNodeEnd    CallbackFunc
+	OnNode       CallbackFunc
 	OnGraphNode  CallbackFunc
 	OnGraphEnd   CallbackFunc
 	OnGraphError CallbackFunc
@@ -68,6 +72,8 @@ func (f Funcs) Name() string { return f.CallbackName }
 
 func (f Funcs) Handle(ctx context.Context, event Event) error {
 	var specific CallbackFunc
+	var node CallbackFunc
+	var graphNode CallbackFunc
 	switch event.Type {
 	case EventAgentStart:
 		specific = f.OnAgentStart
@@ -99,8 +105,18 @@ func (f Funcs) Handle(ctx context.Context, event Event) error {
 		specific = f.OnToolError
 	case EventGraphStart:
 		specific = f.OnGraphStart
-	case EventGraphNode:
-		specific = f.OnGraphNode
+	case EventGraphNode, EventGraphNodeStart, EventGraphNodeOutput, EventGraphNodeEnd:
+		phase := graphNodePhase(event)
+		switch phase {
+		case GraphNodePhaseStart:
+			specific = f.OnNodeStart
+		case GraphNodePhaseOutput:
+			specific = f.OnNodeOutput
+		case GraphNodePhaseEnd:
+			specific = f.OnNodeEnd
+		}
+		node = f.OnNode
+		graphNode = f.OnGraphNode
 	case EventGraphEnd:
 		specific = f.OnGraphEnd
 	case EventGraphError:
@@ -110,8 +126,33 @@ func (f Funcs) Handle(ctx context.Context, event Event) error {
 	if specific != nil {
 		specificErr = specific(ctx, event)
 	}
-	if f.OnEvent == nil {
-		return specificErr
+	var nodeErr error
+	if node != nil {
+		nodeErr = node(ctx, event)
 	}
-	return errors.Join(specificErr, f.OnEvent(ctx, event))
+	var graphNodeErr error
+	if graphNode != nil {
+		graphNodeErr = graphNode(ctx, event)
+	}
+	var eventErr error
+	if f.OnEvent != nil {
+		eventErr = f.OnEvent(ctx, event)
+	}
+	return errors.Join(specificErr, nodeErr, graphNodeErr, eventErr)
+}
+
+func graphNodePhase(event Event) GraphNodePhase {
+	if phase, ok := event.Metadata[MetadataGraphNodePhase].(GraphNodePhase); ok && phase != "" {
+		return phase
+	}
+	switch event.Type {
+	case EventGraphNodeStart:
+		return GraphNodePhaseStart
+	case EventGraphNodeOutput:
+		return GraphNodePhaseOutput
+	case EventGraphNodeEnd:
+		return GraphNodePhaseEnd
+	default:
+		return ""
+	}
 }
