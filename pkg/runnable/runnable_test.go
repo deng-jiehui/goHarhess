@@ -161,23 +161,23 @@ func TestOptionPlanDoesNotLeakOpaqueGlobalValueToNodeScope(t *testing.T) {
 	}
 }
 
-func TestLambdaWrappersImplementTypedAndErasedRunnableContracts(t *testing.T) {
+func TestLambdaWrappersImplementCompleteExecutionContract(t *testing.T) {
 	invokable := runnable.InvokableLambda(func(_ context.Context, value int) (int, error) {
 		return value + 1, nil
 	})
 	var typed runnable.Runnable[int, int] = invokable
-	var erased runnable.AnyRunnable = invokable
 	value, err := typed.Invoke(context.Background(), 2)
 	if err != nil || value != 3 {
 		t.Fatalf("typed lambda = %d, %v", value, err)
 	}
-	anyValue, err := erased.InvokeAny(context.Background(), 4)
-	if err != nil || anyValue != 5 {
-		t.Fatalf("erased lambda = %#v, %v", anyValue, err)
-	}
 
-	streamable := runnable.StreamableLambda(func(ctx context.Context, value int) (runnable.Stream[int], error) {
-		return runnable.Single(ctx, value*2, nil), nil
+	streamable := runnable.StreamableLambda(func(ctx context.Context, value int) (*runnable.StreamReader[int], error) {
+		reader, writer := runnable.Pipe[int](ctx)
+		go func() {
+			_ = writer.Send(value * 2)
+			_ = writer.Close()
+		}()
+		return reader, nil
 	})
 	value, err = streamable.Invoke(context.Background(), 3)
 	if err != nil || value != 6 {

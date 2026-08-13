@@ -101,12 +101,13 @@ Commit: `feat(runnable): 添加背压流读取器与自动归约`
 - Modify: `pkg/runnable/runnable_test.go`
 
 **Interfaces:**
-- Produces final `Runnable[I, O]` with `Invoke`, `Stream`, `Collect`, and `Transform`
-- Produces: `Adapt[I, O](any) (Runnable[I, O], error)`
+- Produces `Adapter[I, O]` with `Invoke`, `Stream`, `Collect`, and `Transform`
+- Produces: `Adapt[I, O](any) (*Adapter[I, O], error)`
 - Produces: `InvokableLambda`, `StreamableLambda`, and `TransformableLambda`
-- Removes: `AnyRunnable`, `InvokeAny`, `Erase`, `Stream[T]`, `Item[T]`, and `CollectableLambda`
+- Removes now: `AnyRunnable`, `InvokeAny`, and `Erase`
+- Defers until Task 9 cutover: broadening `Runnable` and removing `Stream[T]`/`Item[T]`
 
-- [ ] **Step 1: Write the adapter matrix tests**
+- [x] **Step 1: Write the adapter matrix tests**
 
 Create one native type per capability and assert every cell of this matrix:
 
@@ -118,11 +119,11 @@ Transform native: Box->Transform->Concat | Box->Transform | Transform->Concat | 
 
 Also assert native methods win when a value implements more than one method.
 
-- [ ] **Step 2: Verify tests fail because Adapt and TransformableLambda are absent**
+- [x] **Step 2: Verify tests fail because Adapt and TransformableLambda are absent**
 
 Run: `go test ./pkg/runnable -run 'TestAdapt|TestTransformableLambda' -count=1`
 
-- [ ] **Step 3: Implement Adapter with closures bound once**
+- [x] **Step 3: Implement Adapter with closures bound once**
 
 ```go
 type Runnable[I, O any] interface {
@@ -133,23 +134,28 @@ type Runnable[I, O any] interface {
 }
 ```
 
-`Adapt` detects exact typed method interfaces once and fills missing closures
+Keep the existing Invoke-only `Runnable` constraint until Task 9 so existing
+core components remain assignable between commits. `Adapter` already exposes
+the final four methods. `Adapt` detects exact typed method interfaces once and fills missing closures
 from Box and Concat. It rejects nil/typed-nil values and a value with no native
 capability.
 
-- [ ] **Step 4: Rewrite Lambda constructors on Adapter**
+- [x] **Step 4: Rewrite Lambda constructors on Adapter**
 
 Each constructor wraps its function in a private native type, calls the typed
 adapter constructor without reflection, and returns a complete Runnable.
 
-- [ ] **Step 5: Migrate package tests and remove old stream APIs**
+- [x] **Step 5: Migrate package tests and remove old stream APIs**
 
-Update all runnable tests to `StreamReader.Recv`; remove type-erasure tests and
+Update Lambda tests to `StreamReader.Recv`; remove type-erasure tests and
 assert the removed symbols have no repository consumers with:
 
-Run: `rg -n 'AnyRunnable|InvokeAny|Erase|runnable\.Item|runnable\.Stream\[' --glob '*.go'`
+Run: `rg -n 'AnyRunnable|InvokeAny|Erase' --glob '*.go'`
 
-- [ ] **Step 6: Verify and commit**
+Task 9 migrates remaining channel streams and then broadens `Runnable` to the
+four-method interface in the same compiling commit.
+
+- [x] **Step 6: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/runnable`
 
