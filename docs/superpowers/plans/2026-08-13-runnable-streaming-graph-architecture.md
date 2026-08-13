@@ -40,7 +40,7 @@
 - Produces: `(*StreamWriter[T]).Send(T) error`, `Close() error`, and `CloseWithError(error) error`
 - Produces: `Concat[T](context.Context, *StreamReader[T]) (T, error)` and internal Reader Concat binding
 
-- [ ] **Step 1: Write failing StreamReader lifecycle tests**
+- [x] **Step 1: Write failing StreamReader lifecycle tests**
 
 ```go
 func TestPipePreservesOrderAndEndsWithEOF(t *testing.T) {
@@ -62,30 +62,30 @@ func TestReaderCloseCancelsBlockedWriter(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify missing APIs fail compilation**
+- [x] **Step 2: Run the tests and verify missing APIs fail compilation**
 
 Run: `go test ./pkg/runnable -run 'TestPipe' -count=1`
 
 Expected: FAIL because `Pipe` and `StreamReader` are undefined.
 
-- [ ] **Step 3: Implement the bounded, single-consumer pipe**
+- [x] **Step 3: Implement the bounded, single-consumer pipe**
 
 Use one unbuffered value channel, one terminal state guarded by `sync.Once`, and
 one child cancellation Context. `Recv` returns the stored terminal error once,
 then `io.EOF`; early Reader close sets `context.Canceled` and cancels the writer.
 
-- [ ] **Step 4: Add failing Concat tests**
+- [x] **Step 4: Add failing Concat tests**
 
 Cover `string`, `[]byte`, `[]int`, last-value fallback, empty stream zero value,
 and upstream error. Each test creates a Pipe and calls `runnable.Concat`.
 
-- [ ] **Step 5: Implement default Concat selection**
+- [x] **Step 5: Implement default Concat selection**
 
 Bind a `func(T, T) (T, error)` when the Reader is created. Use direct typed
 paths for string and bytes, reflection only once for arbitrary slices, and
 last-value semantics otherwise.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/runnable`
 
