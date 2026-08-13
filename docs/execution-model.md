@@ -139,15 +139,32 @@ checkpoints persist the complete `CursorStack`; resume consumes the matching
 top frame without rebuilding a Go call stack. Runtime objects such as contexts,
 goroutines, clients and tool batches are never stored.
 
-A resumed runtime State can enter only a node with a PreHandler. Arbitrary
-heterogeneous edge values are not serialized. Attempting to resume another
-node fails with `graph.resume.type_mismatch`.
+A resumable Graph requires a State Codec and a PreHandler for every possible
+resume target. Arbitrary heterogeneous edge values are not serialized. Graph
+validates the checkpoint schema, graph name, deterministic revision, Codec and
+resume node before invoking user code.
 
-Built-in Agent recipes request `graph.StateCheckpointFromContext` only after a
-Breakpointer chooses to interrupt. Normal sequential runs therefore perform no
-State encoding. Agent prompts are injected immediately before each model call;
-the durable State contains caller-owned conversation history, not an old Agent
-instance's system prompt.
+Only a typed `control.InterruptRequest` returned by a component or installed as
+the cause of `context.WithCancelCause` creates a Continuation. Plain cancellation
+and deadlines never save one. Configure persistence per invocation and resume
+with the same application-owned key:
+
+```go
+output, err := g.Invoke(ctx, input, graph.WithCheckpoint(store, key))
+if errors.Is(err, graph.ErrInterrupted) {
+    output, err = g.Resume(context.Background(), graph.WithCheckpoint(store, key))
+}
+```
+
+Recovery is at-least-once. A node interrupted during execution and every branch
+of an interrupted parallel node may run again. The framework deliberately does
+not provide leases, distributed locks, fencing or one-time checkpoint deletion;
+multi-replica applications must serialize Resume before entering Graph.
+
+Built-in Agent recipes use this same Graph Continuation. Normal sequential runs
+perform no State encoding. Agent prompts are injected immediately before each
+model call, so durable State contains caller-owned conversation history rather
+than an old Agent instance's prompt or credentials.
 
 ## Options and Context
 
@@ -156,9 +173,9 @@ Provider- or node-specific options use `runnable.NodeOption`; graph-local node
 options use `graph.WithNodeOptions`. State handlers are Graph options and are
 never forwarded to the pure node.
 
-Cancellation, deadlines, Trace, Callback, identity and Checkpoint values remain
-in `context.Context`. They are not copied into `OptionSet` or persisted as
-runtime State.
+Cancellation, deadlines, Trace, Callback and identity remain in
+`context.Context`. Graph checkpoint configuration is an invocation option and
+is consumed by Graph rather than forwarded to pure nodes.
 
 ## Agent recipes
 

@@ -51,74 +51,64 @@ saved, err := store.Save(ctx, checkpoint)
 
 所有 Store 都会克隆消息与 Values，调用方修改返回值不会污染已保存状态。
 
-## Interrupt 与 Resume
+## Graph Interrupt 与 Resume
 
-Checkpoint 是可传输的数据，不保存 goroutine、`context.Context`、HTTP/Redis client、Callback、模型对象、API Key 或任何运行时闭包。公开结构包含：
+会话历史与执行恢复是两个独立契约：
 
-- `schema_version`、`conversation_id`、`version`、`status` 和时间戳。
-- 已完成回合的 `messages` 与 JSON 可序列化 `values`。
-- 中断时的 `continuation`：Agent 类型、安全点、工作消息、已完成响应、计数、cursor 和用户元数据。
+| 用途 | 接口 | key | 内容 |
+| --- | --- | --- | --- |
+| 跨轮会话 | `state.Store` | `conversation_id` | 已完成消息、Values、乐观版本 |
+| 执行恢复 | `control.CheckpointStore` | 应用自定义 run key | Graph Continuation 字节 |
 
-Store 保存和 `Checkpoint.JSON()` 都会验证这些字段可 JSON 序列化；函数、channel、client、context 等运行时对象会被拒绝。
+`state.Checkpoint` 不包含执行状态、status 或 continuation。Graph Continuation 保存 State
+快照、下一节点、步骤/访问计数、cursor、Graph revision 和中断元数据；不保存 goroutine、
+`context.Context`、HTTP/Redis client、Callback、模型、API Key 或函数。
 
-用户可以实现同步的私有 `Breakpointer`，在一致性安全点决定是否保存中断：
+执行 Store 只需实现两个字节方法：
 
 ```go
-approval := agent.BreakpointFunc(func(ctx context.Context, point agent.Breakpoint) (agent.InterruptDecision, error) {
-    if point.Point == agent.BreakpointBeforeLLM && point.LLMCalls >= 1 {
-        return agent.InterruptDecision{
-            Interrupt: true,
-            Reason:    "awaiting human approval",
-            Metadata:  map[string]any{"ticket": "SUP-42"},
-        }, nil
-    }
-    return agent.InterruptDecision{}, nil
-})
-
-value, err := agent.New(agent.BaseConfig{
-    Model:           model,
-    CheckpointStore: store,
-    Breakpointers:   []agent.Breakpointer{approval},
-})
+type CheckpointStore interface {
+    Save(ctx context.Context, key string, data []byte) error
+    Load(ctx context.Context, key string) ([]byte, bool, error)
+}
 ```
 
-安全点为：
-
-- `before_llm`：上一轮工具结果已完整写入工作消息后。
-- `before_round`：GroupChat 的完整轮次之间。
-- `before_commit`：最终响应已经获得但尚未提交 Checkpoint；适合客户端在流结束前断开连接。
-
-也可以由其他 goroutine 发出信号，框架会在下一个安全点消费它：
+外部暂停由应用持有取消权。只有 typed `control.InterruptRequest` 会请求持久化；普通
+`context.Canceled` 和 deadline 只结束运行，不会生成 Continuation：
 
 ```go
-signal := agent.NewInterruptSignal()
+runCtx, cancel := context.WithCancelCause(ctx)
 go func() {
-    <-clientDisconnected
-    signal.Interrupt("client disconnected", map[string]any{"transport": "websocket"})
+    <-pauseRequested
+    cancel(control.RequestInterrupt("用户暂停", map[string]any{
+        "operator": "user-42",
+    }))
 }()
 
-stream, err := value.Stream(
-    ctx,
-    messages,
-    agent.WithConversationID(sessionID),
-    agent.WithInterruptSignal(signal),
+output, err := assistant.Invoke(runCtx, input,
+    agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
 )
+if errors.Is(err, graph.ErrInterrupted) {
+    output, err = agent.Resume(context.Background(), assistant,
+        agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+    )
+}
 ```
 
-中断表现为可用 `errors.Is(err, agent.ErrInterrupted)` 判断的 `*agent.InterruptedError`。该错误携带 `PortableCheckpoint()`，可直接 JSON 传给其他进程或设备。
+高危工具审批使用 `agent.WithBeforeToolBatch`。Hook 在完整调用批次解析后、任何 Tool worker
+启动前同步执行；返回 `control.RequestInterrupt` 时整批 Tool 执行数为零。批准后再次 Resume，
+Hook 会重新执行并读取应用提供的批准凭证。
 
-恢复时创建新的 Agent 实例即可，因此可替换模型、Provider Endpoint 或 API Key；这些连接身份不在 Checkpoint 内：
+Graph 只在成功保存后返回可由 `errors.Is(err, graph.ErrInterrupted)` 识别的
+`*graph.InterruptedError`。编码或 Store 保存失败会透传真实错误，不能当作已挂起。
 
-```go
-replacement, err := agent.New(agent.BaseConfig{
-    Model:           replacementModel, // new provider / new key
-    CheckpointStore: store,
-})
+恢复可换用同名、同拓扑和兼容 Codec 的新 Agent/Graph 实例，因此 Provider Endpoint、模型
+或 API Key 可以变化；Graph revision 或 Codec 不兼容会在任何用户节点运行前被拒绝。
 
-messages, err := agent.Resume(ctx, replacement, sessionID)
-```
-
-同一 `conversation_id` 的未完成 continuation 必须通过 `Resume` 恢复，普通 `Invoke` 会返回 `agent.ErrResumeRequired`，避免误把新输入追加到中断的工具回合。`before_commit` 恢复只提交已保存的最终响应，不会再次调用模型；`before_llm` 恢复会从已保存的工具结果继续下一次模型调用。
+恢复语义是 at-least-once。中断时正在运行的节点、以及并行节点的全部分支可能重新执行；
+有副作用的节点和 Tool 必须由应用保证幂等。框架不提供 Lease、Redis 锁、fencing、CAS
+消费或 exactly-once。多副本应用应在 Gateway、任务队列或数据库事务中自行串行化同一 key
+的 Resume，例如在进入框架前使用 Redis SETNX。
 
 ## Context Engine
 

@@ -26,6 +26,7 @@ func main() {
 		Edge("review", graph.End).
 		Build()
 	must(err)
+	must(team.Compile())
 
 	messages, err := team.Invoke(context.Background(), []schema.Message{schema.UserMessage("analyze the topic")})
 	must(err)

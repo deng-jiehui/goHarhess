@@ -3,7 +3,13 @@ package graph_test
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -232,5 +238,100 @@ func TestAddNodeMountsChildGraphWithStateMappings(t *testing.T) {
 	output, err := parent.Invoke(context.Background(), "parent")
 	if err != nil || output != "1:parent:child" {
 		t.Fatalf("output=%q err=%v", output, err)
+	}
+}
+
+func TestRecoveryArchitectureBoundaries(t *testing.T) {
+	root := repositoryRoot(t)
+	forbidden := map[string]struct{}{
+		"Breakpointer": {}, "InterruptSignal": {}, "InterruptDecision": {},
+		"WithRunBreakpointer": {}, "WithInterruptSignal": {}, "EngineCheckpoint": {},
+		"LeaseProvider": {}, "FencingToken": {}, "WithGraphStateCheckpoint": {},
+		"GraphStateCheckpointFromContext": {},
+	}
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == "docs" || name == ".worktrees" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || filepath.Base(path) == "architecture_test.go" || len(path) >= len("_test.go") && path[len(path)-len("_test.go"):] == "_test.go" {
+			return nil
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if _, blocked := forbidden[identifier.Name]; blocked {
+				t.Errorf("forbidden recovery identifier %q in %s", identifier.Name, path)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPackageImportsNoProjectPackage(t, filepath.Join(root, "pkg", "control"))
+	assertPackageDoesNotImport(t, filepath.Join(root, "pkg", "graph"), "goharness/pkg/tool")
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, current, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate architecture test source")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(current), "..", ".."))
+}
+
+func assertPackageImportsNoProjectPackage(t *testing.T, directory string) {
+	t.Helper()
+	assertImports(t, directory, func(path string) bool {
+		return len(path) >= len("goharness/") && path[:len("goharness/")] == "goharness/"
+	})
+}
+
+func assertPackageDoesNotImport(t *testing.T, directory, forbidden string) {
+	t.Helper()
+	assertImports(t, directory, func(path string) bool { return path == forbidden })
+}
+
+func assertImports(t *testing.T, directory string, forbidden func(string) bool) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || len(entry.Name()) >= len("_test.go") && entry.Name()[len(entry.Name())-len("_test.go"):] == "_test.go" {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, imported := range file.Imports {
+			value := imported.Path.Value
+			if len(value) >= 2 {
+				value = value[1 : len(value)-1]
+			}
+			if forbidden(value) {
+				t.Errorf("forbidden import %q in %s", value, path)
+			}
+		}
 	}
 }

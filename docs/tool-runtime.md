@@ -48,6 +48,43 @@ rbac := tool.MiddlewareFuncs{
 
 Middleware 不能绕过框架 semaphore、并发组和取消链。`tool.Deny` 返回的业务拒绝支持 `errors.Is(err, tool.ErrPermissionDenied)`。
 
+## PreTool 整批挂起
+
+需要在任何副作用发生前审批整批 Tool Call 时，使用 `tool.BeforeBatchHook`。框架会先完成
+所有调用的名称解析和严格 JSON 参数解析，构造防御性快照，按注册顺序同步运行 Hook，
+全部通过后才创建 worker 或申请 semaphore：
+
+```go
+approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
+    for _, call := range batch.Calls {
+        if !call.Spec.IsReadOnly && !approved(ctx, call.ID) {
+            return control.RequestInterrupt("等待高危工具审批", map[string]any{
+                "tool_call_id": call.ID,
+                "tool":         call.Spec.Name,
+            })
+        }
+    }
+    return nil
+})
+
+assistant, err := agent.New(agent.BaseConfig{Model: model, Tools: tools},
+    agent.WithBeforeToolBatch(approval),
+)
+
+toolsNode, err := tool.NewToolsNode(tool.ToolNodeConfig{
+    Tools:       tools,
+    BeforeBatch: []tool.BeforeBatchHook{approval},
+})
+```
+
+`BatchCall` 包含复制后的 `Spec`、原始/解析参数、调用 ID 和 Metadata；`Batch.Subject` 来自
+运行 Context。Hook 不能改写真实调用，第一个 error 会停止后续 Hook。返回 typed interrupt
+时整批执行数为零，由外层 Graph 保存 Continuation；普通 error 直接令批次失败。Resume 会
+重新运行 Hook，应用应在 Context 或自己的审批存储中提供已批准凭证。
+
+这是控制平面切面，不替代 Middleware。PreTool 负责整批准入/挂起；Middleware 仍负责每次
+执行时的授权、转换、重试包装和审计。
+
 ## Callback 生命周期
 
 `pkg/callback` 声明以下稳定事件：

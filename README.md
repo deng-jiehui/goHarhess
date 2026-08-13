@@ -13,7 +13,7 @@ Basic、ReAct、Routing 和 GroupChat 预置图配方。
 - 本地 Tool、独立 ToolsNode、MCP 动态工具发现与统一函数调用消息协议
 - 工具参数校验、并发调度、Middleware、身份信息和托管 HTTP 客户端
 - Token 裁切、Prompt Cache 对齐和上下文构建
-- 会话 Checkpoint、断点续跑和 Redis 持久化扩展
+- Graph Continuation、整批工具审批和独立的会话历史持久化
 - 分块、批量索引、混合检索和重排
 - Callback 生命周期和运行时错误隔离
 
@@ -45,6 +45,23 @@ messages, err := assistant.Invoke(ctx, []schema.Message{
 })
 ```
 
+需要暂停/审批后释放执行栈时，为本次运行提供独立的执行 Checkpoint key。只有 typed
+`control.InterruptRequest` 会落盘，恢复使用相同 key：
+
+```go
+messages, err = assistant.Invoke(ctx, input,
+    agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+)
+if errors.Is(err, graph.ErrInterrupted) {
+    messages, err = agent.Resume(context.Background(), assistant,
+        agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+    )
+}
+```
+
+恢复是 at-least-once。框架不提供 Lease 或分布式锁；多副本应用在进入 Resume 前自行
+串行化同一 key。
+
 需要审批、检索分支、并行任务或领域状态时，使用 `graph.NewGraph[I, O]` 直接组合
 ChatModel、ToolsNode、MCP 节点或其他 Runnable。图只声明公开输入输出；每次运行的
 `*State` 由 State Factory 创建，通过 Pre/Post Handler 与纯节点衔接。完整说明见
@@ -62,7 +79,8 @@ ChatModel、ToolsNode、MCP 节点或其他 Runnable。图只声明公开输入�
 | `pkg/agent` | Basic、ReAct、Routing 和 GroupChat Agent |
 | `pkg/tool` | 工具接口、参数解析、并发策略和 ToolsNode |
 | `pkg/contextengine` | Token 预算、上下文裁切和 Prompt Cache 对齐 |
-| `pkg/state` | Checkpoint、断点续跑和状态版本控制 |
+| `pkg/control` | typed 挂起请求与最小字节 CheckpointStore 契约 |
+| `pkg/state` | 会话历史 Checkpoint 和乐观版本控制 |
 | `pkg/retrieval` | 分块、索引、检索和重排 |
 | `pkg/framework` | 可选的多 Runnable 注册和统一调用入口 |
 | `internal/toolruntime` | 框架内部的工具执行、超时、重试和安全控制 |
