@@ -119,6 +119,18 @@ func (g *Graph[I, O]) invokeRuntimeWithPlan(ctx context.Context, input I, plan r
 	if err != nil {
 		return zero, fmt.Errorf("enter graph callback scope: %w", err)
 	}
+	resumeMode := ResumeModeInvoke
+	if continuation != nil {
+		resumeMode = ResumeModeResume
+	}
+	revision, _ := g.recoveryMetadata()
+	ctx = bindCallbacks(ctx, RunInfo{
+		Name:       g.Name(),
+		Revision:   revision,
+		InputType:  typeName(g.inputType),
+		OutputType: typeName(g.outputType),
+		ResumeMode: resumeMode,
+	})
 
 	var runtimeState any
 	if g.stateFactory != nil {

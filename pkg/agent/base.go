@@ -30,11 +30,6 @@ type BaseConfig struct {
 	BeforeToolBatch []tool.BeforeBatchHook
 	// Middlewares run in order inside the fixed system runtime.
 	Middlewares []tool.Middleware
-	// Callbacks observe Agent, LLM, retriever and tool lifecycles synchronously.
-	Callbacks      []callback.Handler
-	CallbackConfig callback.Config
-	// CallbackErrorSinks receive isolated Handler failures synchronously.
-	CallbackErrorSinks []callback.ErrorSink
 	// ContextEngine governs role ordering, prompt-cache prefixes and token budgets.
 	ContextEngine runnable.Runnable[contextengine.Request, contextengine.Result]
 	// ContextBuilder is the standard Runnable node used to assemble model
@@ -65,9 +60,6 @@ type Base struct {
 	toolOrder           []string
 	toolRuntime         *toolruntime.Runtime
 	beforeToolBatch     []tool.BeforeBatchHook
-	callbacks           []callback.Handler
-	callbackConfig      callback.Config
-	callbackErrorSinks  []callback.ErrorSink
 	contextEngine       runnable.Runnable[contextengine.Request, contextengine.Result]
 	contextBuilder      runnable.Runnable[contextengine.Request, contextengine.Result]
 	checkpointStore     state.Store
@@ -83,9 +75,6 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		return nil, fmt.Errorf("configure agent %q: %w", cfg.Name, err)
 	}
 	cfg = resolved
-	if _, err := callback.New(cfg.Callbacks, cfg.CallbackConfig, cfg.CallbackErrorSinks...); err != nil {
-		return nil, fmt.Errorf("configure agent %q callbacks: %w", cfg.Name, err)
-	}
 	if cfg.ContextBuilder == nil {
 		cfg.ContextBuilder = cfg.ContextEngine
 	}
@@ -110,9 +99,6 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		tools:               map[string]*toolruntime.Binding{},
 		toolRuntime:         runtime,
 		beforeToolBatch:     append([]tool.BeforeBatchHook(nil), cfg.BeforeToolBatch...),
-		callbacks:           append([]callback.Handler(nil), cfg.Callbacks...),
-		callbackConfig:      cfg.CallbackConfig,
-		callbackErrorSinks:  append([]callback.ErrorSink(nil), cfg.CallbackErrorSinks...),
 		contextEngine:       cfg.ContextEngine,
 		contextBuilder:      cfg.ContextBuilder,
 		checkpointStore:     cfg.CheckpointStore,
@@ -224,12 +210,10 @@ func (b *Base) callLLM(ctx context.Context, messages []schema.Message, functions
 		return nil, fmt.Errorf("assemble LLM context: %w", err)
 	}
 	messages = assembled.Messages
-	llmCtx, operation, dispatcher, metrics := b.beginLLMCall(ctx, messages, functions, opts, assembled.Stats)
 	nodePlan, err := runnable.NewOptionPlan(nodeOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("resolve model options: %w", err)
 	}
-	llmCtx = runnable.WithOptionPlan(llmCtx, nodePlan)
 	cfg := llm.MergeGenerateConfig(b.extraGenerateConfig, nil)
 	if opts.Seed != nil {
 		cfg["seed"] = *opts.Seed
@@ -242,21 +226,20 @@ func (b *Base) callLLM(ctx context.Context, messages []schema.Message, functions
 		DeltaStream:         opts.DeltaStream,
 		ExtraGenerateConfig: cfg,
 	}
-	stream, err := b.model.Stream(llmCtx, llm.Request{Messages: schema.CloneMessages(messages), Options: chatOptions}, nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)...)
+	request := llm.Request{Messages: schema.CloneMessages(messages), Options: chatOptions}
+	llmCtx, operation := b.beginLLMCall(ctx, request, opts, assembled.Stats)
+	llmCtx = runnable.WithOptionPlan(llmCtx, nodePlan)
+	stream, err := b.model.Stream(llmCtx, request, nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)...)
 	if err != nil {
-		if dispatcher != nil {
-			_ = dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
-		}
+		llm.ErrorCallback(llmCtx, operation, err)
 		return nil, err
 	}
 	if stream == nil {
 		err := errors.New("llm model returned a nil stream")
-		if dispatcher != nil {
-			_ = dispatcher.Dispatch(llmCtx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
-		}
+		llm.ErrorCallback(llmCtx, operation, err)
 		return nil, err
 	}
-	observed := observeLLMStream(llmCtx, stream, dispatcher, operation, metrics)
+	observed := observeLLMStream(llmCtx, stream, operation, opts.DeltaStream)
 	return runnable.Buffer(llmCtx, observed, opts.StreamBufferSize), nil
 }
 

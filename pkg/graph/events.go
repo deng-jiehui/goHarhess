@@ -155,3 +155,21 @@ func (s *MultiEventSink) Publish(ctx context.Context, event Event) {
 		}()
 	}
 }
+
+func (s *MultiEventSink) BindEventContext(ctx context.Context, event Event) context.Context {
+	if s == nil {
+		return ctx
+	}
+	s.mu.RLock()
+	sinks := append([]EventSink(nil), s.sinks...)
+	s.mu.RUnlock()
+	bound := ctx
+	for _, sink := range sinks {
+		binder, ok := sink.(eventContextBinder)
+		if !ok {
+			continue
+		}
+		bound = binder.BindEventContext(bound, event)
+	}
+	return bound
+}

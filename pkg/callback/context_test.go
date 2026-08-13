@@ -13,8 +13,8 @@ func TestBeginPropagatesTraceAndClonesMetadata(t *testing.T) {
 		"tenant": "tenant-a",
 		"nested": map[string]any{"value": "original"},
 	})
-	agentCtx, agentOperation := callback.Begin(ctx, callback.ComponentAgent, "assistant", map[string]any{"request": "r-1"})
-	toolCtx, toolOperation := callback.Begin(agentCtx, callback.ComponentTool, "search", map[string]any{"tool.read_only": true})
+	agentCtx, agentOperation := callback.Begin(ctx, "graph", "assistant", map[string]any{"request": "r-1"})
+	toolCtx, toolOperation := callback.Begin(agentCtx, "tool", "search", map[string]any{"tool.read_only": true})
 
 	if agentOperation.Trace.TraceID != "trace-upstream" || toolOperation.Trace.TraceID != "trace-upstream" {
 		t.Fatalf("trace IDs = %#v / %#v", agentOperation.Trace, toolOperation.Trace)
@@ -36,19 +36,19 @@ func TestBeginPropagatesTraceAndClonesMetadata(t *testing.T) {
 	}
 }
 
-func TestNestedScopesReuseOneDispatcherOwnershipTree(t *testing.T) {
-	dispatcher, err := callback.New(nil, callback.Config{})
+func TestNestedScopesReuseOneManagerOwnershipTree(t *testing.T) {
+	manager, err := callback.NewManager(callback.Config{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	root, rootScope := callback.EnterScope(context.Background())
-	root = callback.WithDispatcher(root, dispatcher)
+	root = callback.WithManager(root, manager)
 	child, childScope := callback.EnterScope(root)
-	resolved, ok := callback.DispatcherFromContext(child)
+	resolved, ok := callback.ManagerFromContext(child)
 	if !rootScope.Root || rootScope.Depth != 0 || childScope.Root || childScope.Depth != 1 {
 		t.Fatalf("root=%#v child=%#v", rootScope, childScope)
 	}
-	if !ok || resolved != dispatcher {
-		t.Fatal("nested scope replaced the root dispatcher")
+	if !ok || resolved != manager {
+		t.Fatal("nested scope replaced the root Manager")
 	}
 }

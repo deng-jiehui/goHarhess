@@ -39,6 +39,13 @@ type Request struct {
 	Options  ChatOptions
 }
 
+func (r Request) Clone() Request {
+	r.Messages = schema.CloneMessages(r.Messages)
+	r.Options.Functions = cloneFunctionDefinitions(r.Options.Functions)
+	r.Options.ExtraGenerateConfig = GenerateConfig(cloneAnyMap(r.Options.ExtraGenerateConfig))
+	return r
+}
+
 // Response is the fully reduced result of one model invocation.
 type Response struct {
 	Messages     []schema.Message
@@ -248,6 +255,15 @@ func cloneAnyMap(input map[string]any) map[string]any {
 	cloned := make(map[string]any, len(input))
 	for key, value := range input {
 		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneFunctionDefinitions(input []schema.FunctionDefinition) []schema.FunctionDefinition {
+	cloned := make([]schema.FunctionDefinition, len(input))
+	for index, definition := range input {
+		definition.Parameters = cloneAnyMap(definition.Parameters)
+		cloned[index] = definition
 	}
 	return cloned
 }

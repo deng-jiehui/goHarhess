@@ -5,16 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
 func TestRunLifecycleRejectsStreamWithoutDone(t *testing.T) {
-	dispatcher, err := callback.New(nil, callback.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
 	stream := make(chan runnable.Item[schema.MessageEvent], 1)
 	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{
 		Kind:     schema.MessageEventSnapshot,
@@ -22,7 +17,7 @@ func TestRunLifecycleRejectsStreamWithoutDone(t *testing.T) {
 	}}
 	close(stream)
 
-	lifecycle := &runLifecycle{ctx: context.Background(), dispatcher: dispatcher}
+	lifecycle := &runLifecycle{ctx: context.Background()}
 	wrapped := lifecycle.wrap(stream, 1)
 	var sawError bool
 	var sawDone bool

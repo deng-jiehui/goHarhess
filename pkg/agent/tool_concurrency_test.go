@@ -384,16 +384,16 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 	var startCalled atomic.Bool
 	var errorCalled atomic.Bool
 	callbackDone := make(chan struct{}, 1)
-	audit := callback.Funcs{
+	audit := tool.CallbackFuncs{
 		CallbackName: "audit",
-		OnToolStart: func(context.Context, callback.Event) error {
+		Start: func(context.Context, tool.Spec, tool.CallInput) error {
 			startCalled.Store(true)
 			return nil
 		},
-		OnToolError: func(_ context.Context, event callback.Event) error {
+		Error: func(_ context.Context, _ tool.Spec, _ tool.CallInput, callErr error) error {
 			errorCalled.Store(true)
-			if !errors.Is(event.Error, tool.ErrPermissionDenied) {
-				return fmt.Errorf("audit expected permission denial, got %v", event.Error)
+			if !errors.Is(callErr, tool.ErrPermissionDenied) {
+				return fmt.Errorf("audit expected permission denial, got %v", callErr)
 			}
 			callbackDone <- struct{}{}
 			return nil
@@ -413,17 +413,20 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 		Model:       model,
 		Tools:       []tool.Tool{deleteTool},
 		Middlewares: []tool.Middleware{rbac},
-		Callbacks:   []callback.Handler{audit},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runCtx := tool.WithSubject(context.Background(), tool.Subject{
+	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{audit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx := callback.WithManager(tool.WithSubject(context.Background(), tool.Subject{
 		ID:       "viewer-1",
 		TenantID: "tenant-a",
 		Roles:    []tool.Role{"viewer"},
-	})
+	}), manager)
 	messages, err := value.Invoke(
 		runCtx,
 		[]schema.Message{schema.UserMessage("delete it")},

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -13,10 +13,8 @@ const maxTimeout = 5 * time.Minute
 
 var errHandlerTimeout = errors.New("callback Handler timeout")
 
-// Config controls synchronous callback execution.
 type Config struct {
-	Timeout      time.Duration
-	FilterChunks bool
+	Timeout time.Duration
 }
 
 type handlerEntry struct {
@@ -24,143 +22,135 @@ type handlerEntry struct {
 	value Handler
 }
 
-// SyncDispatcher invokes handlers inline in the caller's goroutine. It has no
-// queue, worker or flush lifecycle, so accepted events cannot be dropped.
-type SyncDispatcher struct {
+// Manager owns immutable Handler and ErrorSink registrations.
+type Manager struct {
 	handlers   []handlerEntry
 	errorSinks []ErrorSink
-	parent     *SyncDispatcher
 	config     Config
-	sequence   *atomic.Uint64
 }
 
-// New validates handlers and creates a synchronous dispatcher.
-func New(handlers []Handler, config Config, errorSinks ...ErrorSink) (*SyncDispatcher, error) {
+func NewManager(config Config, handlers []Handler, errorSinks ...ErrorSink) (*Manager, error) {
 	if config.Timeout < 0 || config.Timeout > maxTimeout {
 		return nil, fmt.Errorf("callback timeout must be zero or at most %s: %s", maxTimeout, config.Timeout)
 	}
-	dispatcher := &SyncDispatcher{config: config, sequence: &atomic.Uint64{}}
+	manager := &Manager{config: config}
 	for index, value := range handlers {
-		if value == nil {
+		if isNil(value) {
 			return nil, fmt.Errorf("callback at index %d cannot be nil", index)
 		}
-		name, err := readName(value, index)
+		name, err := handlerName(value, index)
 		if err != nil {
 			return nil, err
 		}
-		dispatcher.handlers = append(dispatcher.handlers, handlerEntry{name: name, value: value})
+		manager.handlers = append(manager.handlers, handlerEntry{name: name, value: value})
 	}
 	for index, sink := range errorSinks {
-		if sink == nil {
+		if isNil(sink) {
 			return nil, fmt.Errorf("callback error sink at index %d cannot be nil", index)
 		}
-		dispatcher.errorSinks = append(dispatcher.errorSinks, sink)
+		manager.errorSinks = append(manager.errorSinks, sink)
 	}
-	return dispatcher, nil
+	return manager, nil
 }
 
-// NewChild creates a local synchronous callback scope. Accepted events are
-// forwarded to parent before local handlers execute.
-func NewChild(parent *SyncDispatcher, handlers []Handler, errorSinks ...ErrorSink) (*SyncDispatcher, error) {
-	if parent == nil {
-		return New(handlers, Config{}, errorSinks...)
-	}
-	inherited := append([]ErrorSink(nil), parent.errorSinks...)
-	inherited = append(inherited, errorSinks...)
-	child, err := New(handlers, parent.config, inherited...)
-	if err != nil {
-		return nil, err
-	}
-	child.parent = parent
-	child.sequence = parent.sequence
-	return child, nil
-}
-
-// Dispatch synchronously invokes every handler in registration order. Handler
-// failures are aggregated and returned; callers inside framework business
-// paths deliberately ignore this error so observation cannot alter results.
-func (d *SyncDispatcher) Dispatch(ctx context.Context, event Event) error {
-	if d == nil {
-		return nil
-	}
+// Dispatch invokes registered Handlers that implement T in registration order.
+func Dispatch[T Handler](ctx context.Context, invocation Invocation, invoke func(context.Context, T) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	manager, ok := ManagerFromContext(ctx)
+	if !ok || invoke == nil {
+		return nil
+	}
 	var failures []error
-	if d.parent != nil {
-		if err := d.parent.Dispatch(ctx, event); err != nil {
-			failures = append(failures, err)
+	for _, entry := range manager.handlers {
+		typed, matches := entry.value.(T)
+		if !matches {
+			continue
 		}
-	}
-	if d.config.FilterChunks && isChunkEvent(event.Type) {
-		return errors.Join(failures...)
-	}
-	if len(d.handlers) == 0 {
-		return errors.Join(failures...)
-	}
-	event.Sequence = d.sequence.Add(1)
-	for _, entry := range d.handlers {
-		handlerEvent := event.Clone()
-		handlerCtx := ctx
-		var cancel context.CancelFunc
-		if d.config.Timeout > 0 {
-			handlerCtx, cancel = context.WithTimeoutCause(ctx, d.config.Timeout, errHandlerTimeout)
-		}
-		err, panicked := invoke(entry, handlerCtx, handlerEvent)
-		timedOut := d.config.Timeout > 0 && errors.Is(context.Cause(handlerCtx), errHandlerTimeout)
-		if cancel != nil {
-			cancel()
-		}
-		if timedOut {
-			timeoutErr := &TimeoutError{Callback: entry.name, Timeout: d.config.Timeout}
-			if err == nil {
-				err = timeoutErr
-			} else if !panicked {
-				err = errors.Join(err, timeoutErr)
-			}
-		}
+		callInvocation := invocation.Clone()
+		callCtx := withInvocation(ctx, callInvocation)
+		err := manager.invoke(callCtx, entry.name, callInvocation, func(current context.Context) error {
+			return invoke(current, typed)
+		})
 		if err != nil {
-			callbackErr := CallbackError{Callback: entry.name, Event: handlerEvent.Clone(), Err: err}
-			failures = append(failures, callbackErr)
-			d.report(ctx, callbackErr)
+			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)
 }
 
-func (d *SyncDispatcher) report(ctx context.Context, callbackErr CallbackError) {
-	for _, sink := range d.errorSinks {
+func (m *Manager) invoke(ctx context.Context, name string, invocation Invocation, invoke func(context.Context) error) error {
+	callCtx := ctx
+	var cancel context.CancelFunc
+	if m != nil && m.config.Timeout > 0 {
+		callCtx, cancel = context.WithTimeoutCause(ctx, m.config.Timeout, errHandlerTimeout)
+	}
+	err, panicked := invokeIsolated(name, callCtx, invoke)
+	timedOut := m != nil && m.config.Timeout > 0 && errors.Is(context.Cause(callCtx), errHandlerTimeout)
+	if cancel != nil {
+		cancel()
+	}
+	if timedOut {
+		timeoutErr := &TimeoutError{Handler: name, Timeout: m.config.Timeout}
+		if err == nil {
+			err = timeoutErr
+		} else if !panicked {
+			err = errors.Join(err, timeoutErr)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	failure := CallbackError{Handler: name, Invocation: invocation.Clone(), Err: err}
+	m.report(ctx, failure)
+	return failure
+}
+
+func (m *Manager) report(ctx context.Context, failure CallbackError) {
+	if m == nil {
+		return
+	}
+	for _, sink := range m.errorSinks {
 		func() {
 			defer func() { _ = recover() }()
-			sink.OnError(ctx, callbackErr)
+			sink.OnError(ctx, failure)
 		}()
 	}
 }
 
-func isChunkEvent(eventType EventType) bool {
-	return eventType == EventAgentChunk || eventType == EventLLMChunk
-}
-
-func invoke(entry handlerEntry, ctx context.Context, event Event) (err error, panicked bool) {
+func invokeIsolated(name string, ctx context.Context, invoke func(context.Context) error) (err error, panicked bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			panicked = true
-			err = &PanicError{Callback: entry.name, Value: recovered}
+			err = &PanicError{Handler: name, Value: recovered}
 		}
 	}()
-	return entry.value.Handle(ctx, event), false
+	return invoke(ctx), false
 }
 
-func readName(value Handler, index int) (name string, err error) {
+func handlerName(value Handler, index int) (name string, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("read callback name at index %d: %v", index, recovered)
 		}
 	}()
-	if named, ok := value.(NamedHandler); ok {
-		if name = strings.TrimSpace(named.Name()); name != "" {
-			return name, nil
-		}
+	name = strings.TrimSpace(value.Name())
+	if name == "" {
+		return "", fmt.Errorf("callback at index %d has an empty name", index)
 	}
-	return fmt.Sprintf("callback[%d]", index), nil
+	return name, nil
+}
+
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }

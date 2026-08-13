@@ -18,6 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/httpclient"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -151,17 +152,23 @@ func (c *Client) Initialize(ctx context.Context) error {
 		c.initialized = true
 		return nil
 	}
-	if err := c.sdk.Start(ctx); err != nil {
+	callbackRequest := CallbackRequest{Operation: OperationInitialize, Initialize: &InitializeRequest{ClientName: c.clientName, ClientVersion: c.clientVersion}}
+	operationCtx, invocation := beginCallback(ctx, callbackRequest)
+	if err := c.sdk.Start(operationCtx); err != nil {
+		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return fmt.Errorf("start MCP client: %w", err)
 	}
 	request := sdkmcp.InitializeRequest{}
 	request.Params.ProtocolVersion = sdkmcp.LATEST_PROTOCOL_VERSION
 	request.Params.ClientInfo = sdkmcp.Implementation{Name: c.clientName, Version: c.clientVersion}
 	request.Params.Capabilities = sdkmcp.ClientCapabilities{}
-	if _, err := c.sdk.Initialize(ctx, request); err != nil {
+	result, err := c.sdk.Initialize(operationCtx, request)
+	if err != nil {
+		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return fmt.Errorf("initialize MCP client: %w", err)
 	}
 	c.initialized = true
+	endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationInitialize, Initialize: &InitializeResponse{ProtocolVersion: result.ProtocolVersion}})
 	return nil
 }
 
@@ -187,8 +194,11 @@ func (c *Client) RefreshTools(ctx context.Context) ([]tool.BaseTool, error) {
 	// Clear before the request so a list_changed notification received during
 	// the request remains dirty and triggers one more refresh.
 	c.dirty.Store(false)
-	result, err := c.sdk.ListTools(ctx, sdkmcp.ListToolsRequest{})
+	callbackRequest := CallbackRequest{Operation: OperationListTools, ListTools: &ListToolsRequest{Refresh: true}}
+	operationCtx, invocation := beginCallback(ctx, callbackRequest)
+	result, err := c.sdk.ListTools(operationCtx, sdkmcp.ListToolsRequest{})
 	if err != nil {
+		errorCallback(operationCtx, invocation, callbackRequest, err)
 		c.dirty.Store(true)
 		return nil, fmt.Errorf("list MCP tools: %w", err)
 	}
@@ -204,6 +214,11 @@ func (c *Client) RefreshTools(ctx context.Context) ([]tool.BaseTool, error) {
 	c.mu.Lock()
 	c.tools = append([]tool.BaseTool(nil), values...)
 	c.mu.Unlock()
+	specs := make([]tool.Spec, len(values))
+	for index, value := range values {
+		specs[index] = value.Spec()
+	}
+	endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationListTools, ListTools: &ListToolsResponse{Tools: specs}})
 	return append([]tool.BaseTool(nil), values...), nil
 }
 
@@ -346,21 +361,29 @@ func (t *MCPTool) Invoke(ctx context.Context, input tool.CallInput, _ ...runnabl
 	if ctx == nil {
 		return tool.Result{}, errors.New("MCP tool context cannot be nil")
 	}
-	result, err := t.client.sdk.CallTool(ctx, sdkmcp.CallToolRequest{Params: sdkmcp.CallToolParams{
+	callbackRequest := CallbackRequest{Operation: OperationCallTool, CallTool: &CallToolRequest{Name: t.name, Args: callback.CloneMetadata(input.Args)}}
+	operationCtx, invocation := beginCallback(ctx, callbackRequest)
+	result, err := t.client.sdk.CallTool(operationCtx, sdkmcp.CallToolRequest{Params: sdkmcp.CallToolParams{
 		Name:      t.name,
 		Arguments: input.Args,
 	}})
 	if err != nil {
+		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return tool.Result{}, fmt.Errorf("call MCP tool %q: %w", t.name, err)
 	}
 	content, err := resultContent(result)
 	if err != nil {
+		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return tool.Result{}, fmt.Errorf("decode MCP tool %q result: %w", t.name, err)
 	}
 	if result.IsError {
-		return tool.ErrorResult(content), nil
+		value := tool.ErrorResult(content)
+		endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationCallTool, CallTool: &CallToolResponse{Result: value}})
+		return value, nil
 	}
-	return tool.Result{Content: content}, nil
+	value := tool.Result{Content: content}
+	endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationCallTool, CallTool: &CallToolResponse{Result: value}})
+	return value, nil
 }
 
 func inputSchema(definition sdkmcp.Tool) (map[string]any, error) {

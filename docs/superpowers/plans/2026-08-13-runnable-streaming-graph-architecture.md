@@ -179,7 +179,7 @@ Commit: `refactor(runnable)!: 统一四种执行范式`
 - Retains: synchronous `ErrorSink` with typed `CallbackError`
 - Removes: generic `Event`, `Funcs`, component/event string constants, and `FilterChunks`
 
-- [ ] **Step 1: Write failing typed dispatch tests**
+- [x] **Step 1: Write failing typed dispatch tests**
 
 ```go
 type auditHandler interface {
@@ -201,22 +201,22 @@ Add cases for one Handler implementing two domain interfaces, panic isolation,
 aggregate errors, ErrorSink panic, metadata cloning, caller cancellation versus
 manager timeout, and concurrent dispatch sequence safety.
 
-- [ ] **Step 2: Verify tests fail because Manager and generic Dispatch are absent**
+- [x] **Step 2: Verify tests fail because Manager and generic Dispatch are absent**
 
 Run: `go test ./pkg/callback -run 'TestDispatch|TestManager' -count=1`
 
-- [ ] **Step 3: Implement Context-only Manager**
+- [x] **Step 3: Implement Context-only Manager**
 
 Store immutable registrations. `Dispatch[T]` filters with a type assertion,
 binds a cloned `Invocation` to the current Context, invokes synchronously, and
 reports isolated failures. Do not use a queue or goroutine.
 
-- [ ] **Step 4: Implement timeout classification**
+- [x] **Step 4: Implement timeout classification**
 
 Use `context.WithTimeoutCause` per Handler. Only the Manager's own timeout cause
 produces `TimeoutError`; parent cancellation retains its original cause.
 
-- [ ] **Step 5: Migrate every old Handler call site in the same task**
+- [x] **Step 5: Migrate every old Handler call site in the same task**
 
 Because old `callback.Handler` means `Handle(Event)` and the final Handler means
 `Name() string`, they cannot coexist under one exported name. Replace Agent
@@ -227,7 +227,7 @@ and rewrite their tests before deleting `SyncDispatcher`, `Event`, `Funcs`,
 temporary domain-local closures with the final public domain interfaces without
 reintroducing a generic event.
 
-- [ ] **Step 6: Verify and commit the vertical Manager migration**
+- [x] **Step 6: Verify and commit the vertical Manager migration**
 
 Run: `go test -race -count=1 ./pkg/callback`
 
@@ -244,22 +244,22 @@ Commit: `refactor(callback)!: 改用上下文强类型回调管理器`
 - Produces: `WithStreamCallbacks(context.Context, ...StreamCallback) context.Context`
 - Produces: `EmitStream[T](context.Context, T)`
 
-- [ ] **Step 1: Write failing routing and isolation tests**
+- [x] **Step 1: Write failing routing and isolation tests**
 
 Test exact-type routing, multiple sinks of one type in order, unrelated types,
 typed nil payloads, panic/error to ErrorSink, and parent cancellation.
 
-- [ ] **Step 2: Verify the API is absent**
+- [x] **Step 2: Verify the API is absent**
 
 Run: `go test ./pkg/callback -run TestEventStream -count=1`
 
-- [ ] **Step 3: Implement opaque registrations**
+- [x] **Step 3: Implement opaque registrations**
 
 Use an unexported type key derived from `reflect.TypeFor[T]`. Store cloned
 immutable registrations in Context. `EmitStream[T]` synchronously invokes exact
 type matches through the Manager's common isolation helper.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/callback`
 
@@ -284,35 +284,35 @@ Commit: `feat(callback): 添加强类型实时事件流`
 - Produces `CallbackFuncs` in each domain package
 - Consumes: `callback.Dispatch[T]`, `Invocation`, and Context Manager
 
-- [ ] **Step 1: Write compile-time interface and clone-isolation tests**
+- [x] **Step 1: Write compile-time interface and clone-isolation tests**
 
 For each domain, construct a `CallbackFuncs`, register it once in a Manager,
 dispatch Start/End/Error, and assert typed input, invocation phase, call order,
 and defensive cloning.
 
-- [ ] **Step 2: Verify all domain tests fail on missing interfaces**
+- [x] **Step 2: Verify all domain tests fail on missing interfaces**
 
 Run: `go test ./pkg/llm ./pkg/tool ./pkg/retrieval ./pkg/graph -run Callback -count=1`
 
 Run: `cd extensions; go test ./mcp -run Callback -count=1`
 
-- [ ] **Step 3: Implement ChatModel and Tool callbacks**
+- [x] **Step 3: Implement ChatModel and Tool callbacks**
 
 Use the exact three-method interfaces in the design. A returned model-visible
 Tool error is End; a Go/transport error is Error.
 
-- [ ] **Step 4: Implement Retriever and MCP tagged values**
+- [x] **Step 4: Implement Retriever and MCP tagged values**
 
 Constructors validate exactly one active field for the operation. Deep clone
 maps, slices, messages, specs, arguments, hits, and results per Handler. MCP
 types contain no `mark3labs/mcp-go` value.
 
-- [ ] **Step 5: Implement Graph callback values**
+- [x] **Step 5: Implement Graph callback values**
 
 Expose node ID and step as direct fields. `CallbackFuncs.OnNode` follows the
 phase-specific function; remove magic phase strings.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/callback ./pkg/llm ./pkg/tool ./pkg/retrieval ./pkg/graph`
 

@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 
 	"goharness/pkg/callback"
 	"goharness/pkg/contextengine"
@@ -13,92 +12,27 @@ import (
 	"goharness/pkg/schema"
 )
 
+// runLifecycle owns only Agent message-stream integrity and conversation
+// commit. Agent execution lifecycle is the lifecycle of its compiled Graph.
 type runLifecycle struct {
-	base       *Base
-	ctx        context.Context
-	dispatcher *callback.SyncDispatcher
-	operation  callback.Operation
-	terminal   atomic.Bool
-	metrics    callback.Metrics
-	session    *conversationSession
-	opts       RunOptions
+	ctx     context.Context
+	session *conversationSession
 }
 
-func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
+func (b *Base) beginRun(ctx context.Context, _ []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
 	if ctx == nil {
 		return nil, nil, errors.New("agent run context cannot be nil")
 	}
-	ctx, scope := callback.EnterScope(ctx)
-	dispatcher, exists := callback.DispatcherFromContext(ctx)
-	if !exists {
-		callbacks := make([]callback.Handler, 0, len(b.callbacks)+len(opts.Callbacks))
-		callbacks = append(callbacks, b.callbacks...)
-		callbacks = append(callbacks, opts.Callbacks...)
-		var err error
-		dispatcher, err = callback.New(callbacks, b.callbackConfig, b.callbackErrorSinks...)
-		if err != nil {
-			return nil, nil, err
-		}
-		ctx = callback.WithDispatcher(ctx, dispatcher)
-	} else if len(b.callbacks) > 0 || len(opts.Callbacks) > 0 {
-		callbacks := make([]callback.Handler, 0, len(b.callbacks)+len(opts.Callbacks))
-		callbacks = append(callbacks, b.callbacks...)
-		callbacks = append(callbacks, opts.Callbacks...)
-		var err error
-		dispatcher, err = callback.NewChild(dispatcher, callbacks, b.callbackErrorSinks...)
-		if err != nil {
-			return nil, nil, err
-		}
-		ctx = callback.WithDispatcher(ctx, dispatcher)
-	}
+	ctx, _ = callback.EnterScope(ctx)
 	ctx = callback.WithMetadata(ctx, opts.Metadata)
-	metadata := map[string]any{
-		"agent.description":        b.description,
-		"agent.language":           opts.Lang,
-		"agent.delta_stream":       opts.DeltaStream,
-		"agent.max_llm_calls":      opts.MaxLLMCalls,
-		"agent.max_parallel_tools": opts.MaxParallelTools,
-		"agent.tool_timeout_ms":    opts.ToolCallTimeout.Milliseconds(),
-		"agent.stream_buffer_size": opts.StreamBufferSize,
-		"callback.scope_depth":     scope.Depth,
-		"callback.scope_root":      scope.Root,
-	}
-	ctx, operation := callback.Begin(ctx, callback.ComponentAgent, b.name, metadata)
-	agentCtx := ctx
-	ctx = callback.BindGraph(ctx, recipeName(b, string(opts.agentKind))+".graph")
-	lifecycle := &runLifecycle{
-		base:       b,
-		ctx:        agentCtx,
-		dispatcher: dispatcher,
-		operation:  operation,
-		opts:       opts,
-		metrics: callback.Metrics{
-			InputMessages: len(messages),
-			InputBytes:    messageBytes(messages),
-		},
-	}
-	_ = dispatcher.Dispatch(agentCtx, callback.StartEvent(callback.EventAgentStart, operation, lifecycle.metrics))
-	return ctx, lifecycle, nil
+	return ctx, &runLifecycle{ctx: ctx}, nil
 }
 
-func (l *runLifecycle) fail(err error) {
-	if l == nil || !l.terminal.CompareAndSwap(false, true) {
-		return
-	}
-	_ = l.dispatcher.Dispatch(l.ctx, callback.ErrorEvent(callback.EventAgentError, l.operation, err, l.metrics))
-}
-
-func (l *runLifecycle) finish() {
-	if l == nil || !l.terminal.CompareAndSwap(false, true) {
-		return
-	}
-	_ = l.dispatcher.Dispatch(l.ctx, callback.EndEvent(callback.EventAgentEnd, l.operation, l.metrics))
-}
+func (*runLifecycle) fail(error) {}
 
 func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferSize int) runnable.Stream[schema.MessageEvent] {
 	if stream == nil {
 		err := errors.New("agent returned a nil stream")
-		l.fail(err)
 		out := make(chan runnable.Item[schema.MessageEvent], 1)
 		out <- runnable.Item[schema.MessageEvent]{Err: err}
 		close(out)
@@ -110,12 +44,10 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 	out := make(chan runnable.Item[schema.MessageEvent], bufferSize)
 	go func() {
 		defer close(out)
-		chunkIndex := 0
 		var finalMessages []schema.Message
 		sawDone := false
 		for item := range stream {
 			if item.Err != nil {
-				l.fail(item.Err)
 				if isPersistedInterruption(item.Err) || interruptCauseRequested(l.ctx) {
 					out <- item
 				} else {
@@ -123,51 +55,32 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 				}
 				return
 			}
-			// The lifecycle owns the terminal event. Upstream completion only
-			// starts the breakpoint/checkpoint commit phase below.
 			if item.Value.Kind == schema.MessageEventDone {
 				sawDone = true
 				continue
 			}
-			chunkIndex++
-			chunkMetrics := callback.Metrics{
-				Chunks:         1,
-				OutputMessages: len(item.Value.Messages),
-				OutputBytes:    messageBytes(item.Value.Messages),
-			}
-			l.metrics.Chunks++
-			l.metrics.OutputMessages += len(item.Value.Messages)
-			l.metrics.OutputBytes += chunkMetrics.OutputBytes
 			if item.Value.Kind == schema.MessageEventSnapshot {
 				finalMessages = schema.CloneMessages(item.Value.Messages)
 			}
-			event := callback.ProgressEvent(callback.EventAgentChunk, l.operation, chunkMetrics)
-			event.Metadata["agent.chunk_index"] = chunkIndex
-			_ = l.dispatcher.Dispatch(l.ctx, event)
+			callback.EmitStream(l.ctx, item.Value.Clone())
 			if !emitMessageItem(l.ctx, out, item) {
 				if _, interrupted := control.AsInterrupt(context.Cause(l.ctx)); interrupted {
 					continue
 				}
-				l.fail(l.ctx.Err())
 				return
 			}
 		}
 		if err := l.ctx.Err(); err != nil {
-			l.fail(err)
 			return
 		}
 		if !sawDone {
-			err := errors.New("agent stream closed without done event")
-			l.fail(err)
-			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: err})
+			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: errors.New("agent stream closed without done event")})
 			return
 		}
 		if err := l.session.commit(l.ctx, finalMessages); err != nil {
-			l.fail(err)
 			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: err})
 			return
 		}
-		l.finish()
 		emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventDone}})
 	}()
 	return out
@@ -175,12 +88,10 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 
 func (b *Base) beginLLMCall(
 	ctx context.Context,
-	messages []schema.Message,
-	functions []schema.FunctionDefinition,
+	request llm.Request,
 	opts RunOptions,
 	contextStats contextengine.Stats,
-) (context.Context, callback.Operation, *callback.SyncDispatcher, callback.Metrics) {
-	dispatcher, _ := callback.DispatcherFromContext(ctx)
+) (context.Context, callback.Invocation) {
 	info := llm.DescribeModel(b.model)
 	name := info.Name
 	if name == "" {
@@ -193,7 +104,7 @@ func (b *Base) beginLLMCall(
 		"llm.endpoint":                 info.Endpoint,
 		"llm.streaming":                true,
 		"llm.delta_stream":             opts.DeltaStream,
-		"llm.function_count":           len(functions),
+		"llm.function_count":           len(request.Options.Functions),
 		"llm.capabilities.streaming":   capabilities.Streaming,
 		"llm.capabilities.tool_calls":  capabilities.ToolCalls,
 		"llm.capabilities.vision":      capabilities.Vision,
@@ -212,119 +123,67 @@ func (b *Base) beginLLMCall(
 	if len(info.Attributes) > 0 {
 		metadata["llm.attributes"] = info.Attributes
 	}
-	llmCtx, operation := callback.Begin(ctx, callback.ComponentLLM, name, metadata)
-	metrics := callback.Metrics{
-		InputMessages: len(messages),
-		InputBytes:    messageBytes(messages),
-		ToolCalls:     len(functions),
-	}
-	if dispatcher != nil {
-		_ = dispatcher.Dispatch(llmCtx, callback.StartEvent(callback.EventLLMStart, operation, metrics))
-	}
-	return llmCtx, operation, dispatcher, metrics
+	return llm.BeginCallback(ctx, name, metadata, request)
 }
 
 func observeLLMStream(
 	ctx context.Context,
 	stream runnable.Stream[llm.Event],
-	dispatcher *callback.SyncDispatcher,
-	operation callback.Operation,
-	metrics callback.Metrics,
+	invocation callback.Invocation,
+	deltas bool,
 ) runnable.Stream[llm.Event] {
 	out := make(chan runnable.Item[llm.Event])
 	go func() {
 		defer close(out)
-		chunkIndex := 0
-		sawDone := false
+		accumulator := llm.NewDeltaAccumulator(deltas)
+		response := llm.Response{}
 		for {
 			select {
 			case <-ctx.Done():
-				if dispatcher != nil {
-					_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
-				}
+				llm.ErrorCallback(ctx, invocation, ctx.Err())
 				return
 			case item, ok := <-stream:
 				if !ok {
-					if !sawDone {
-						err := errors.New("llm stream closed without done event")
-						if dispatcher != nil {
-							_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
-						}
-						emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
-						return
-					}
-					if dispatcher != nil {
-						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
-					}
+					err := errors.New("llm stream closed without done event")
+					llm.ErrorCallback(ctx, invocation, err)
+					emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
 					return
 				}
 				if item.Err != nil {
-					if dispatcher != nil {
-						_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, item.Err, metrics))
-					}
+					llm.ErrorCallback(ctx, invocation, item.Err)
 					emitLLMEvent(ctx, out, item)
 					return
 				}
-				eventValue := item.Value
-				if eventValue.Kind == llm.EventDone {
-					sawDone = true
-					if dispatcher != nil {
-						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
-					}
-					emitLLMEvent(ctx, out, item)
-					return
+				event := item.Value
+				if event.Usage != nil {
+					response.Usage = event.Clone().Usage
 				}
-				if eventValue.Kind == llm.EventUsage {
-					applyUsageMetrics(&metrics, eventValue.Usage)
-					if !emitLLMEvent(ctx, out, item) {
-						if dispatcher != nil {
-							_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
-						}
+				if event.FinishReason != "" {
+					response.FinishReason = event.FinishReason
+				}
+				if event.Kind == llm.EventDelta && len(event.Messages) > 0 {
+					messages, err := accumulator.Apply(event)
+					if err != nil {
+						llm.ErrorCallback(ctx, invocation, err)
+						emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
 						return
 					}
-					continue
+					response.Messages = messages
+					callback.EmitStream(ctx, response.Clone())
 				}
-				chunkIndex++
-				chunkMetrics := callback.Metrics{
-					Chunks:         1,
-					OutputMessages: len(eventValue.Messages),
-					OutputBytes:    messageBytes(eventValue.Messages),
-				}
-				metrics.Chunks++
-				metrics.OutputMessages += len(eventValue.Messages)
-				metrics.OutputBytes += chunkMetrics.OutputBytes
-				if eventValue.Usage != nil {
-					applyUsageMetrics(&metrics, eventValue.Usage)
-					chunkMetrics.PromptTokens = eventValue.Usage.PromptTokens
-					chunkMetrics.CompletionTokens = eventValue.Usage.CompletionTokens
-					chunkMetrics.TotalTokens = eventValue.Usage.TotalTokens
-					chunkMetrics.ReasoningTokens = eventValue.Usage.ReasoningTokens
-				}
-				if dispatcher != nil {
-					event := callback.ProgressEvent(callback.EventLLMChunk, operation, chunkMetrics)
-					event.Metadata["llm.chunk_index"] = chunkIndex
-					_ = dispatcher.Dispatch(ctx, event)
+				if event.Kind == llm.EventDone {
+					llm.EndCallback(ctx, invocation, response)
+					emitLLMEvent(ctx, out, item)
+					return
 				}
 				if !emitLLMEvent(ctx, out, item) {
-					if dispatcher != nil {
-						_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, ctx.Err(), metrics))
-					}
+					llm.ErrorCallback(ctx, invocation, ctx.Err())
 					return
 				}
 			}
 		}
 	}()
 	return out
-}
-
-func applyUsageMetrics(metrics *callback.Metrics, usage *llm.Usage) {
-	if metrics == nil || usage == nil {
-		return
-	}
-	metrics.PromptTokens = usage.PromptTokens
-	metrics.CompletionTokens = usage.CompletionTokens
-	metrics.TotalTokens = usage.TotalTokens
-	metrics.ReasoningTokens = usage.ReasoningTokens
 }
 
 func emitLLMEvent(ctx context.Context, out chan<- runnable.Item[llm.Event], event runnable.Item[llm.Event]) bool {
@@ -334,16 +193,4 @@ func emitLLMEvent(ctx context.Context, out chan<- runnable.Item[llm.Event], even
 	case out <- event:
 		return true
 	}
-}
-
-func messageBytes(messages []schema.Message) int64 {
-	var total int64
-	for _, message := range messages {
-		total += int64(len(message.Text()))
-		total += int64(len(message.ReasoningContent.String()))
-		if message.FunctionCall != nil {
-			total += int64(len(message.FunctionCall.Name) + len(message.FunctionCall.Arguments))
-		}
-	}
-	return total
 }

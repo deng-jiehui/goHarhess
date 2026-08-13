@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"goharness/pkg/callback"
 	"goharness/pkg/contextengine"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
@@ -75,33 +74,6 @@ func WithMiddlewares(values ...tool.Middleware) Option {
 
 func WithMiddleware(value tool.Middleware) Option {
 	return func(config *BaseConfig) { config.Middlewares = append(config.Middlewares, value) }
-}
-
-// WithCallbacks replaces the Agent-wide synchronous lifecycle Handlers.
-func WithCallbacks(values ...callback.Handler) Option {
-	return func(config *BaseConfig) { config.Callbacks = append([]callback.Handler(nil), values...) }
-}
-
-// WithCallback appends one Agent-wide synchronous lifecycle Handler.
-func WithCallback(value callback.Handler) Option {
-	return func(config *BaseConfig) { config.Callbacks = append(config.Callbacks, value) }
-}
-
-// WithCallbackErrorSinks replaces Agent-wide synchronous callback error sinks.
-func WithCallbackErrorSinks(values ...callback.ErrorSink) Option {
-	return func(config *BaseConfig) {
-		config.CallbackErrorSinks = append([]callback.ErrorSink(nil), values...)
-	}
-}
-
-// WithCallbackErrorSink appends one Agent-wide callback error sink.
-func WithCallbackErrorSink(value callback.ErrorSink) Option {
-	return func(config *BaseConfig) { config.CallbackErrorSinks = append(config.CallbackErrorSinks, value) }
-}
-
-// WithCallbackConfig configures synchronous Handler deadlines and Chunk filtering.
-func WithCallbackConfig(value callback.Config) Option {
-	return func(config *BaseConfig) { config.CallbackConfig = value }
 }
 
 // WithContextEngine replaces the default context assembler.

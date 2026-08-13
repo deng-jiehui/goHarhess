@@ -13,9 +13,9 @@ import (
 
 type traceIDContextKey struct{}
 type traceContextKey struct{}
-type operationContextKey struct{}
 type metadataContextKey struct{}
-type dispatcherContextKey struct{}
+type managerContextKey struct{}
+type invocationContextKey struct{}
 type scopeContextKey struct{}
 
 var fallbackID atomic.Uint64
@@ -25,8 +25,7 @@ type Scope struct {
 	Root  bool
 }
 
-// EnterScope establishes one callback ownership tree. Only the root creates a
-// dispatcher; nested Agent/Graph/model/tool operations reuse it as child spans.
+// EnterScope establishes one callback ownership tree.
 func EnterScope(ctx context.Context) (context.Context, Scope) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -92,7 +91,7 @@ func MetadataFromContext(ctx context.Context) map[string]any {
 
 // Begin creates a child operation and returns the context that must be passed
 // to nested model, retriever and tool calls.
-func Begin(ctx context.Context, component Component, name string, metadata map[string]any) (context.Context, Operation) {
+func Begin(ctx context.Context, component, name string, metadata map[string]any) (context.Context, Invocation) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -116,59 +115,64 @@ func Begin(ctx context.Context, component Component, name string, metadata map[s
 	for key, value := range metadata {
 		merged[key] = cloneValue(value)
 	}
-	operation := Operation{
+	invocation := Invocation{
 		Component: component,
-		Name:      strings.TrimSpace(name),
+		Operation: strings.TrimSpace(name),
 		Trace:     trace,
 		StartedAt: time.Now(),
+		Timestamp: time.Now(),
+		Phase:     PhaseStart,
 		Metadata:  merged,
 	}
 	ctx = context.WithValue(ctx, traceContextKey{}, trace)
-	ctx = context.WithValue(ctx, operationContextKey{}, operation)
+	ctx = context.WithValue(ctx, invocationContextKey{}, invocation)
 	ctx = context.WithValue(ctx, metadataContextKey{}, CloneMetadata(merged))
-	return ctx, operation
+	return ctx, invocation
 }
 
 // bindOperation overlays an already-created operation onto an execution
 // context without discarding graph cursor, option, cancellation or data-sink
 // values installed by other packages.
-func bindOperation(ctx context.Context, operation Operation) context.Context {
+func bindOperation(ctx context.Context, invocation Invocation) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx = context.WithValue(ctx, traceContextKey{}, operation.Trace)
-	ctx = context.WithValue(ctx, operationContextKey{}, operation)
-	return context.WithValue(ctx, metadataContextKey{}, CloneMetadata(operation.Metadata))
+	ctx = context.WithValue(ctx, traceContextKey{}, invocation.Trace)
+	ctx = context.WithValue(ctx, invocationContextKey{}, invocation.Clone())
+	return context.WithValue(ctx, metadataContextKey{}, CloneMetadata(invocation.Metadata))
 }
 
-// OperationFromContext returns the current operation snapshot.
-func OperationFromContext(ctx context.Context) (Operation, bool) {
+func withInvocation(ctx context.Context, invocation Invocation) context.Context {
+	return bindOperation(ctx, invocation)
+}
+
+// InvocationFromContext returns the current lifecycle snapshot.
+func InvocationFromContext(ctx context.Context) (Invocation, bool) {
 	if ctx == nil {
-		return Operation{}, false
+		return Invocation{}, false
 	}
-	operation, ok := ctx.Value(operationContextKey{}).(Operation)
-	if !ok || operation.Trace.SpanID == "" {
-		return Operation{}, false
+	invocation, ok := ctx.Value(invocationContextKey{}).(Invocation)
+	if !ok {
+		return Invocation{}, false
 	}
-	operation.Metadata = CloneMetadata(operation.Metadata)
-	return operation, true
+	return invocation.Clone(), true
 }
 
-// WithDispatcher exposes a synchronous dispatcher to nested framework components.
-func WithDispatcher(ctx context.Context, dispatcher *SyncDispatcher) context.Context {
+// WithManager exposes one synchronous Manager to nested framework components.
+func WithManager(ctx context.Context, manager *Manager) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, dispatcherContextKey{}, dispatcher)
+	return context.WithValue(ctx, managerContextKey{}, manager)
 }
 
-// DispatcherFromContext resolves the synchronous callback dispatcher for the current run.
-func DispatcherFromContext(ctx context.Context) (*SyncDispatcher, bool) {
+// ManagerFromContext resolves the callback Manager for the current run.
+func ManagerFromContext(ctx context.Context) (*Manager, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	dispatcher, ok := ctx.Value(dispatcherContextKey{}).(*SyncDispatcher)
-	return dispatcher, ok && dispatcher != nil
+	manager, ok := ctx.Value(managerContextKey{}).(*Manager)
+	return manager, ok && manager != nil
 }
 
 // CloneMetadata recursively clones common mutable metadata containers.
@@ -191,6 +195,16 @@ func cloneValue(value any) any {
 	return cloned.Interface()
 }
 
+// CloneValue recursively clones common mutable maps, slices, arrays, and
+// interface containers while preserving their concrete Go types.
+func CloneValue(value any) any { return cloneValue(value) }
+
+// BindInvocation overlays an existing operation on the current runtime
+// Context while preserving values installed by other framework packages.
+func BindInvocation(ctx context.Context, invocation Invocation) context.Context {
+	return bindOperation(ctx, invocation)
+}
+
 const maxMetadataCloneDepth = 64
 
 func cloneReflectValue(value reflect.Value, depth int) reflect.Value {
@@ -198,6 +212,32 @@ func cloneReflectValue(value reflect.Value, depth int) reflect.Value {
 		return value
 	}
 	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneReflectValue(value.Elem(), depth+1)
+		if !cloned.IsValid() || !cloned.Type().AssignableTo(value.Type().Elem()) {
+			return value
+		}
+		pointer := reflect.New(value.Type().Elem())
+		pointer.Elem().Set(cloned)
+		return pointer
+	case reflect.Struct:
+		cloned := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.NumField(); index++ {
+			source := value.Field(index)
+			target := cloned.Field(index)
+			if !source.CanInterface() || !target.CanSet() {
+				return value
+			}
+			field := cloneReflectValue(source, depth+1)
+			if !field.IsValid() || !field.Type().AssignableTo(target.Type()) {
+				return value
+			}
+			target.Set(field)
+		}
+		return cloned
 	case reflect.Interface:
 		if value.IsNil() {
 			return reflect.Zero(value.Type())

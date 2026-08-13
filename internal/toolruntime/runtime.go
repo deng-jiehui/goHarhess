@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/tool"
 )
@@ -245,61 +244,10 @@ func (r *Runtime) invoke(
 
 	ctx, cleanup := bindContext(control, control, state)
 	defer cleanup()
-	ctx, operation, dispatcher := beginToolCallback(ctx, spec, input)
-	defer func() { finishToolCallback(ctx, dispatcher, operation, result, err) }()
+	ctx, invocation := tool.BeginCallback(ctx, spec, input)
+	defer func() { tool.EndCallback(ctx, invocation, spec, input, result, err) }()
 	defer recoverPanic("user extension zone", &result, &err)
 	return r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
-}
-
-func beginToolCallback(
-	ctx context.Context,
-	spec tool.Spec,
-	input tool.CallInput,
-) (context.Context, callback.Operation, *callback.SyncDispatcher) {
-	dispatcher, ok := callback.DispatcherFromContext(ctx)
-	if !ok {
-		return ctx, callback.Operation{}, nil
-	}
-	policy := spec.Concurrency.Normalize()
-	metadata := callback.CloneMetadata(input.Metadata)
-	metadata["tool.description"] = spec.Description
-	metadata["tool.read_only"] = spec.IsReadOnly
-	metadata["tool.file_access"] = spec.FileAccess
-	metadata["tool.concurrency_group"] = policy.Group
-	metadata["tool.max_parallel"] = policy.MaxParallel
-	toolCtx, operation := callback.Begin(ctx, callback.ComponentTool, spec.Name, metadata)
-	_ = dispatcher.Dispatch(toolCtx, callback.StartEvent(callback.EventToolStart, operation, callback.Metrics{
-		InputMessages: len(input.Messages),
-		InputBytes:    int64(len(input.RawArgs)),
-		Custom: map[string]any{
-			"argument_count": len(input.Args),
-			"file_count":     len(input.Files),
-		},
-	}))
-	return toolCtx, operation, dispatcher
-}
-
-func finishToolCallback(
-	ctx context.Context,
-	dispatcher *callback.SyncDispatcher,
-	operation callback.Operation,
-	result tool.Result,
-	callErr error,
-) {
-	if dispatcher == nil || operation.Trace.SpanID == "" {
-		return
-	}
-	metrics := callback.Metrics{}
-	if !result.Content.IsZero() {
-		metrics.OutputBytes = int64(len(result.Content.String()))
-	} else if result.Data != nil {
-		metrics.OutputBytes = int64(len(fmt.Sprint(result.Data)))
-	}
-	if callErr != nil {
-		_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventToolError, operation, callErr, metrics))
-		return
-	}
-	_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventToolEnd, operation, metrics))
 }
 
 func (r *Runtime) invokeMiddleware(

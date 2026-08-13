@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"goharness/pkg/callback"
 	"goharness/pkg/control"
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
@@ -39,7 +38,6 @@ type RunOptions struct {
 	Metadata            map[string]any
 	GlobalOptions       []runnable.Option
 	NodeOptions         []runnable.Option
-	Callbacks           []callback.Handler
 	ConversationID      string
 	ContextWindowTokens int
 	StateValues         map[string]any
@@ -166,18 +164,6 @@ func WithMetadata(key string, value any) RunOption {
 	return func(opts *RunOptions) {
 		opts.Metadata[key] = value
 	}
-}
-
-// WithRunCallbacks adds synchronous lifecycle Handlers for one Agent run.
-func WithRunCallbacks(values ...callback.Handler) RunOption {
-	return func(opts *RunOptions) {
-		opts.Callbacks = append(opts.Callbacks, values...)
-	}
-}
-
-// WithRunCallback adds one synchronous lifecycle Handler for one Agent run.
-func WithRunCallback(value callback.Handler) RunOption {
-	return WithRunCallbacks(value)
 }
 
 // WithConversationID loads and saves a versioned conversation checkpoint.
