@@ -22,6 +22,7 @@ type ToolCall struct {
 	Name       string
 	Arguments  string
 	FunctionID string
+	Metadata   map[string]any
 }
 
 // ToolNodeConfig configures the runnable ToolsNode.
@@ -29,6 +30,7 @@ type ToolNodeConfig struct {
 	Name           string
 	Description    string
 	Tools          []BaseTool
+	BeforeBatch    []BeforeBatchHook
 	MaxConcurrency int
 }
 
@@ -44,6 +46,7 @@ type ToolsNode struct {
 	maxConcurrency int
 	semaphore      chan struct{}
 	scheduler      *toolNodeScheduler
+	beforeBatch    []BeforeBatchHook
 }
 
 func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
@@ -65,6 +68,7 @@ func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
 		maxConcurrency: config.MaxConcurrency,
 		semaphore:      make(chan struct{}, config.MaxConcurrency),
 		scheduler:      newToolNodeScheduler(),
+		beforeBatch:    append([]BeforeBatchHook(nil), config.BeforeBatch...),
 	}
 	if node.description == "" {
 		node.description = "append-only tool execution node"
@@ -143,6 +147,7 @@ func TailToolCalls(messages []schema.Message) []ToolCall {
 			Name:       message.FunctionCall.Name,
 			Arguments:  message.FunctionCall.Arguments,
 			FunctionID: message.FunctionID(fmt.Sprintf("call-%d", index+1)),
+			Metadata:   cloneAnyMap(message.Extra),
 		})
 	}
 	for left, right := 0, len(calls)-1; left < right; left, right = left+1, right-1 {
@@ -182,6 +187,30 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 	calls := TailToolCalls(messages)
 	if len(calls) == 0 {
 		return nil, nil
+	}
+	batch := Batch{Calls: make([]BatchCall, 0, len(calls))}
+	batch.Subject, _ = SubjectFromContext(ctx)
+	for _, call := range calls {
+		value, exists := n.tools[call.Name]
+		if !exists {
+			continue
+		}
+		args, parseErr := ParseArgsStrict(call.Arguments)
+		if parseErr != nil {
+			continue
+		}
+		batch.Calls = append(batch.Calls, BatchCall{
+			ID:       call.FunctionID,
+			Spec:     cloneSpec(value.Spec()),
+			RawArgs:  call.Arguments,
+			Args:     cloneAnyMap(args),
+			Metadata: cloneAnyMap(call.Metadata),
+		})
+	}
+	if len(batch.Calls) > 0 {
+		if err := RunBeforeBatchHooks(ctx, n.beforeBatch, batch); err != nil {
+			return nil, err
+		}
 	}
 	type indexedResult struct {
 		index   int

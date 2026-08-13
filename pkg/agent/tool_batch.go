@@ -54,18 +54,6 @@ func (b *Base) newToolTaskBatch(ctx context.Context, opts RunOptions) *toolTaskB
 	}
 }
 
-func (b *Base) isToolCallReady(call toolCallRequest) bool {
-	if !b.isToolCallComplete(call) {
-		return false
-	}
-	for name := range b.tools {
-		if name != call.Name && len(name) > len(call.Name) && name[:len(call.Name)] == call.Name {
-			return false
-		}
-	}
-	return true
-}
-
 func (b *Base) isToolCallComplete(call toolCallRequest) bool {
 	if call.Name == "" {
 		return false
@@ -147,30 +135,41 @@ func (b *toolTaskBatch) Join(calls []toolCallRequest) []toolCallResult {
 	return results
 }
 
-func (b *Base) submitReadyToolCalls(
-	batch *toolTaskBatch,
+// Admit validates the final model batch, runs the synchronous control hooks,
+// and only then creates tool execution tasks.
+func (b *toolTaskBatch) Admit(
 	calls []toolCallRequest,
 	messages []schema.Message,
-) {
-	for index, call := range calls {
-		if b.isToolCallReady(call) {
-			batch.Submit(index, call, messages)
+) error {
+	batch := tool.Batch{Calls: make([]tool.BatchCall, 0, len(calls))}
+	batch.Subject, _ = tool.SubjectFromContext(b.ctx)
+	for _, call := range calls {
+		binding, exists := b.base.tools[call.Name]
+		args, parseErr := tool.ParseArgsStrict(call.Arguments)
+		if !exists || call.Name == "" || parseErr != nil {
+			continue
+		}
+		batch.Calls = append(batch.Calls, tool.BatchCall{
+			ID:       call.FunctionID,
+			Spec:     binding.Spec(),
+			RawArgs:  call.Arguments,
+			Args:     args,
+			Metadata: b.opts.Metadata,
+		})
+	}
+	if len(batch.Calls) > 0 {
+		if err := tool.RunBeforeBatchHooks(b.ctx, b.base.beforeToolBatch, batch); err != nil {
+			return err
 		}
 	}
-}
-
-func (b *Base) resolveUnsubmittedToolCalls(
-	batch *toolTaskBatch,
-	calls []toolCallRequest,
-	messages []schema.Message,
-) {
 	for index, call := range calls {
-		if b.isToolCallComplete(call) {
-			batch.Submit(index, call, messages)
+		if b.base.isToolCallComplete(call) {
+			b.Submit(index, call, messages)
 		} else {
-			batch.ResolveIncomplete(index, b.unresolvedToolCallResult(call))
+			b.ResolveIncomplete(index, b.base.unresolvedToolCallResult(call))
 		}
 	}
+	return nil
 }
 
 func (b *Base) unresolvedToolCallResult(call toolCallRequest) toolCallResult {

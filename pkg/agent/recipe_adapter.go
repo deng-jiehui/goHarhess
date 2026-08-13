@@ -16,19 +16,17 @@ type recipeToolBatch struct {
 	batch *toolTaskBatch
 }
 
-func (b *recipeToolBatch) Observe(calls []agentrecipe.Call, messages []schema.Message) {
-	b.base.submitReadyToolCalls(b.batch, fromRecipeCalls(calls), messages)
-}
-
-func (b *recipeToolBatch) Resolve(calls []agentrecipe.Call, messages []schema.Message) []agentrecipe.ToolResult {
+func (b *recipeToolBatch) Resolve(calls []agentrecipe.Call, messages []schema.Message) ([]agentrecipe.ToolResult, error) {
 	requests := fromRecipeCalls(calls)
-	b.base.resolveUnsubmittedToolCalls(b.batch, requests, messages)
+	if err := b.batch.Admit(requests, messages); err != nil {
+		return nil, err
+	}
 	results := b.batch.Join(requests)
 	converted := make([]agentrecipe.ToolResult, len(results))
 	for i, result := range results {
 		converted[i] = agentrecipe.ToolResult{Call: calls[i], Content: result.Content, Err: result.Err}
 	}
-	return converted
+	return converted, nil
 }
 
 func fromRecipeCalls(calls []agentrecipe.Call) []toolCallRequest {

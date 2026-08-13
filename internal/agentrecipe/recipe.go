@@ -26,8 +26,7 @@ type ToolResult struct {
 }
 
 type ToolBatch interface {
-	Observe([]Call, []schema.Message)
-	Resolve([]Call, []schema.Message) []ToolResult
+	Resolve([]Call, []schema.Message) ([]ToolResult, error)
 }
 
 type RunConfig struct {
@@ -137,10 +136,6 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 		if stream == nil {
 			return nil, errors.New("agent recipe model returned a nil stream")
 		}
-		var batch ToolBatch
-		if tools && hooks.NewToolBatch != nil {
-			batch = hooks.NewToolBatch(ctx)
-		}
 		accumulator := llm.NewDeltaAccumulator(cfg.deltaStream)
 		var output []schema.Message
 		sawDone := false
@@ -160,9 +155,6 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 				return nil, err
 			}
 			output = merged
-			if batch != nil && hooks.DetectCalls != nil {
-				batch.Observe(hooks.DetectCalls(output), appendMessages(messages, output))
-			}
 			kind := schema.MessageEventSnapshot
 			messages := appendMessages(cfg.response, output)
 			if cfg.deltaStream {
@@ -188,9 +180,6 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 		}
 		cfg.calls = append([]Call(nil), calls...)
 		cfg.hasCalls = tools && len(calls) > 0 && cfg.llmCalls < cfg.maxLLMCalls
-		if batch != nil {
-			cfg.batch = batch
-		}
 		return updated, nil
 	})
 	if err := g.AddNode("llm", llmNode,
@@ -226,7 +215,10 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 			if batch == nil {
 				return nil, errors.New("agent recipe tool batch is unavailable")
 			}
-			results := batch.Resolve(calls, messages)
+			results, err := batch.Resolve(calls, messages)
+			if err != nil {
+				return nil, err
+			}
 			observations := make([]schema.Message, 0, len(results))
 			for _, result := range results {
 				if hooks.Observation == nil {

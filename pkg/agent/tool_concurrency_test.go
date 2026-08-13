@@ -12,6 +12,8 @@ import (
 
 	"goharness/pkg/agent"
 	"goharness/pkg/callback"
+	"goharness/pkg/control"
+	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -23,7 +25,7 @@ type agentRunResult struct {
 	err      error
 }
 
-func TestReactAgentStartsToolBeforeLLMStreamEnds(t *testing.T) {
+func TestReactAgentStartsToolOnlyAfterLLMStreamEnds(t *testing.T) {
 	allowArgumentsComplete := make(chan struct{})
 	allowStreamEnd := make(chan struct{})
 	toolStarted := make(chan string, 1)
@@ -70,21 +72,17 @@ func TestReactAgentStartsToolBeforeLLMStreamEnds(t *testing.T) {
 	}
 	assertNoToolStart(t, toolStarted)
 	close(allowArgumentsComplete)
+	assertNoToolStart(t, toolStarted)
+	close(allowStreamEnd)
+	select {
+	case <-firstStreamEnded:
+	case <-time.After(time.Second):
+		t.Fatal("LLM stream did not end")
+	}
 	if name := waitToolName(t, toolStarted); name != "early-tool" {
 		t.Fatalf("started tool = %q", name)
 	}
-	select {
-	case <-firstStreamEnded:
-		t.Fatal("tool started only after LLM stream ended")
-	default:
-	}
 	close(allowToolEnd)
-	select {
-	case <-secondCallStarted:
-		t.Fatal("agent called LLM again before the first stream ended")
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(allowStreamEnd)
 
 	result := waitRunResult(t, done)
 	if result.err != nil {
@@ -92,6 +90,43 @@ func TestReactAgentStartsToolBeforeLLMStreamEnds(t *testing.T) {
 	}
 	if len(result.messages) != 3 || result.messages[1].Name != "early-tool" || result.messages[2].Text() != "done" {
 		t.Fatalf("messages = %#v", result.messages)
+	}
+}
+
+func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
+	var calls atomic.Int32
+	makeTool := func(name string) tool.BaseTool {
+		return tool.NewFunctionTool(tool.Spec{Name: name}, func(context.Context, tool.CallInput) (tool.Result, error) {
+			calls.Add(1)
+			return tool.TextResult(name), nil
+		})
+	}
+	model := llm.NewScriptedModel([]schema.Message{
+		functionCallMessage("read", "read-1"),
+		functionCallMessage("write", "write-1"),
+	})
+	hookCalls := 0
+	value, err := agent.New(agent.BaseConfig{
+		Name:  "approval",
+		Model: model,
+		Tools: []tool.BaseTool{makeTool("read"), makeTool("write")},
+	}, agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
+		hookCalls++
+		if len(batch.Calls) != 2 || batch.Calls[0].ID != "read-1" || batch.Calls[1].ID != "write-1" {
+			t.Fatalf("batch=%#v", batch)
+		}
+		return control.RequestInterrupt("approval required", map[string]any{"tool": "write"})
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = value.Invoke(context.Background(), []schema.Message{schema.UserMessage("run")})
+	if !errors.Is(err, graph.ErrCheckpointRequired) {
+		t.Fatalf("Invoke error=%v", err)
+	}
+	if hookCalls != 1 || calls.Load() != 0 {
+		t.Fatalf("hook calls=%d tool calls=%d", hookCalls, calls.Load())
 	}
 }
 

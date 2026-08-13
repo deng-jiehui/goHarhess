@@ -61,6 +61,14 @@ func WithTool(value tool.BaseTool) Option {
 	return func(config *BaseConfig) { config.Tools = append(config.Tools, value) }
 }
 
+// WithBeforeToolBatch replaces the synchronous whole-batch admission hooks.
+// Hooks run after the model stream completes and before any tool starts.
+func WithBeforeToolBatch(values ...tool.BeforeBatchHook) Option {
+	return func(config *BaseConfig) {
+		config.BeforeToolBatch = append([]tool.BeforeBatchHook(nil), values...)
+	}
+}
+
 func WithMiddlewares(values ...tool.Middleware) Option {
 	return func(config *BaseConfig) { config.Middlewares = append([]tool.Middleware(nil), values...) }
 }

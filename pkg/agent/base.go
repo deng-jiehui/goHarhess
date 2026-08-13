@@ -25,6 +25,9 @@ type BaseConfig struct {
 	SystemMessage string
 	Model         llm.Model
 	Tools         []tool.BaseTool
+	// BeforeToolBatch runs synchronously after a complete tool-call batch is
+	// parsed and before any tool starts.
+	BeforeToolBatch []tool.BeforeBatchHook
 	// Middlewares run in order inside the fixed system runtime.
 	Middlewares []tool.Middleware
 	// Callbacks observe Agent, LLM, retriever and tool lifecycles synchronously.
@@ -63,6 +66,7 @@ type Base struct {
 	tools               map[string]*toolruntime.Binding
 	toolOrder           []string
 	toolRuntime         *toolruntime.Runtime
+	beforeToolBatch     []tool.BeforeBatchHook
 	callbacks           []callback.Handler
 	callbackConfig      callback.Config
 	callbackErrorSinks  []callback.ErrorSink
@@ -113,6 +117,7 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		model:               cfg.Model,
 		tools:               map[string]*toolruntime.Binding{},
 		toolRuntime:         runtime,
+		beforeToolBatch:     append([]tool.BeforeBatchHook(nil), cfg.BeforeToolBatch...),
 		callbacks:           append([]callback.Handler(nil), cfg.Callbacks...),
 		callbackConfig:      cfg.CallbackConfig,
 		callbackErrorSinks:  append([]callback.ErrorSink(nil), cfg.CallbackErrorSinks...),
