@@ -40,7 +40,6 @@ type erasedValue struct {
 }
 
 type graphComponent interface {
-	Compile() error
 	compileGraph(map[uintptr]bool) error
 	graphComponent()
 }

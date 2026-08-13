@@ -87,10 +87,11 @@ func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	compiled := mustCompile(t, g)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := g.Invoke(context.Background(), "base", graph.WithCheckpoint(store, "parallel"))
+		_, err := compiled.Invoke(context.Background(), "base", graph.WithCheckpoint(store, "parallel"))
 		done <- err
 	}()
 	select {
@@ -111,7 +112,7 @@ func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 	}
 
 	interrupt.Store(false)
-	output, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "parallel"))
+	output, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "parallel"))
 	if err != nil {
 		t.Fatal(err)
 	}

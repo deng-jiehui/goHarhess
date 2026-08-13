@@ -87,7 +87,7 @@ func TestMessageStreamSeparatesDataAndControlPlanes(t *testing.T) {
 		control = append(control, event.Type)
 		mu.Unlock()
 	}))
-	stream, err := graph.StreamMessages(ctx, g, []schema.Message{schema.UserMessage("hi")})
+	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("hi")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestStreamDoesNotDuplicateAuthoritativeSnapshot(t *testing.T) {
 	addStreamNode(t, g, "model", node)
 	_ = g.AddEdge(graph.Start, "model")
 	addStreamFinish(t, g, "model")
-	stream, err := graph.StreamMessages(context.Background(), g, nil)
+	stream, err := graph.StreamMessages(context.Background(), mustCompile(t, g), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestStreamEmitsEmptyAuthoritativeFinalSnapshot(t *testing.T) {
 	addStreamNode(t, g, "model", node)
 	_ = g.AddEdge(graph.Start, "model")
 	addStreamFinish(t, g, "model")
-	stream, err := graph.StreamMessages(context.Background(), g, nil)
+	stream, err := graph.StreamMessages(context.Background(), mustCompile(t, g), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestCursorResumeUsesRuntimeStatePreHandler(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "work")
 	addStreamFinish(t, g, "work")
 	ctx := state.WithCursorStack(context.Background(), state.CursorStack{{Graph: "resume", Node: "work", Step: 0, Iteration: 2}})
-	output, err := g.Invoke(ctx, nil)
+	output, err := mustCompile(t, g).Invoke(ctx, nil)
 	if err != nil || depth != 1 || len(output) != 1 {
 		t.Fatalf("depth=%d output=%#v err=%v", depth, output, err)
 	}
@@ -214,7 +214,8 @@ func TestAddNodeMountsChildGraphWithStateMappings(t *testing.T) {
 	_ = child.AddEdge("work", graph.End)
 
 	parent := newTypedGraph[string, string](t, "parent", func(_ context.Context, input string) (*typedState, error) { return &typedState{Text: input}, nil })
-	if err := parent.AddNode("child", child,
+	compiledChild := mustCompile(t, child)
+	if err := parent.AddNode("child", compiledChild,
 		graph.WithPreHandler(func(_ context.Context, current *typedState) (childRequest, error) {
 			return childRequest{Text: current.Text}, nil
 		}),
@@ -235,7 +236,7 @@ func TestAddNodeMountsChildGraphWithStateMappings(t *testing.T) {
 	for _, edge := range [][2]string{{graph.Start, "child"}, {"child", "finish"}, {"finish", graph.End}} {
 		_ = parent.AddEdge(edge[0], edge[1])
 	}
-	output, err := parent.Invoke(context.Background(), "parent")
+	output, err := mustCompile(t, parent).Invoke(context.Background(), "parent")
 	if err != nil || output != "1:parent:child" {
 		t.Fatalf("output=%q err=%v", output, err)
 	}

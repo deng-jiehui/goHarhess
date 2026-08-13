@@ -7,9 +7,9 @@ import (
 	"log"
 
 	"goharness/pkg/agent"
-	"goharness/pkg/compose"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
+	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
@@ -17,16 +17,56 @@ func main() {
 	researcher := mustAgent("researcher", "research completed")
 	reviewer := mustAgent("reviewer", "review completed")
 
-	team, err := compose.NewGraph("research-team").
-		Description("Research, then review").
-		Agent("research", researcher).
-		Agent("review", reviewer).
-		Edge(graph.Start, "research").
-		Edge("research", "review").
-		Edge("review", graph.End).
-		Build()
+	type teamState struct {
+		Messages []schema.Message
+		Output   []schema.Message
+	}
+	builder := graph.NewGraph[[]schema.Message, []schema.Message]("research-team")
+	builder.SetDescription("Research, then review")
+	err := builder.SetStateFactory(func(_ context.Context, input []schema.Message) (*teamState, error) {
+		return &teamState{Messages: schema.CloneMessages(input)}, nil
+	})
+	addAgent := func(name string, value agent.Agent) error {
+		return builder.AddNode(name, value,
+			graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
+				return schema.CloneMessages(state.Messages), nil
+			}),
+			graph.WithPostHandler(func(_ context.Context, state *teamState, output []schema.Message) error {
+				state.Messages = append(state.Messages, schema.CloneMessages(output)...)
+				state.Output = append(state.Output, schema.CloneMessages(output)...)
+				return nil
+			}),
+		)
+	}
+	if err == nil {
+		err = addAgent("research", researcher)
+	}
+	if err == nil {
+		err = addAgent("review", reviewer)
+	}
+	finish := runnable.Func[[]schema.Message, []schema.Message](func(_ context.Context, input []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+		return schema.CloneMessages(input), nil
+	})
+	if err == nil {
+		err = builder.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
+			return schema.CloneMessages(state.Output), nil
+		}))
+	}
+	if err == nil {
+		err = builder.AddEdge(graph.Start, "research")
+	}
+	if err == nil {
+		err = builder.AddEdge("research", "review")
+	}
+	if err == nil {
+		err = builder.AddEdge("review", "finish")
+	}
+	if err == nil {
+		err = builder.AddEdge("finish", graph.End)
+	}
 	must(err)
-	must(team.Compile())
+	team, err := builder.Compile()
+	must(err)
 
 	messages, err := team.Invoke(context.Background(), []schema.Message{schema.UserMessage("analyze the topic")})
 	must(err)

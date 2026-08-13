@@ -120,11 +120,12 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, started, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := g.Invoke(ctx, "input", graph.WithCheckpoint(store, "run-1"))
+		_, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "run-1"))
 		done <- err
 	}()
 	select {
@@ -146,7 +147,7 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 		t.Fatalf("first PostHandler calls=%d", firstPostCalls.Load())
 	}
 
-	output, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "run-1"))
+	output, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "run-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestStreamMessagesDeliversPersistedInterruptionAfterContextCancellation(t *
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
-	stream, err := graph.StreamMessages(ctx, g, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "stream-interrupt"))
+	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "stream-interrupt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestStreamMessagesDeliversCheckpointSaveFailureAfterInterruptRequest(t *tes
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
-	stream, err := graph.StreamMessages(ctx, g, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "failed-stream"))
+	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "failed-stream"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,10 +269,11 @@ func TestGraphOrdinaryCancellationDoesNotSaveCheckpoint(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, started, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := g.Invoke(ctx, "input", graph.WithCheckpoint(store, "run-2"))
+		_, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "run-2"))
 		done <- err
 	}()
 	<-started
@@ -290,7 +292,7 @@ func TestGraphOrdinaryInvokeDoesNotTouchCheckpointStore(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
-	output, err := g.Invoke(context.Background(), "input", graph.WithCheckpoint(store, "run-3"))
+	output, err := mustCompile(t, g).Invoke(context.Background(), "input", graph.WithCheckpoint(store, "run-3"))
 	if err != nil || output != "input-first-second-1" {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
@@ -306,10 +308,11 @@ func TestGraphCheckpointSaveFailureIsNotInterrupted(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(control.RequestInterrupt("pause", nil))
 
-	_, err := g.Invoke(ctx, "input", graph.WithCheckpoint(store, "save-failure"))
+	_, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "save-failure"))
 	if !errors.Is(err, saveErr) || errors.Is(err, graph.ErrInterrupted) {
 		t.Fatalf("Invoke error=%v", err)
 	}
@@ -323,11 +326,12 @@ func TestGraphResumeRejectsMissingAndMalformedCheckpointsBeforeNodes(t *testing.
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 
-	if _, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "missing")); !errors.Is(err, graph.ErrCheckpointNotFound) {
+	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "missing")); !errors.Is(err, graph.ErrCheckpointNotFound) {
 		t.Fatalf("missing Resume error=%v", err)
 	}
-	if _, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "malformed")); !errors.Is(err, graph.ErrInvalidContinuation) {
+	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "malformed")); !errors.Is(err, graph.ErrInvalidContinuation) {
 		t.Fatalf("malformed Resume error=%v", err)
 	}
 	if firstCalls.Load() != 0 || firstPostCalls.Load() != 0 {
@@ -340,9 +344,10 @@ func TestGraphResumeRejectsRevisionMismatchBeforeNodes(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(control.RequestInterrupt("pause", nil))
-	if _, err := g.Invoke(ctx, "input", graph.WithCheckpoint(store, "revision")); !errors.Is(err, graph.ErrInterrupted) {
+	if _, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "revision")); !errors.Is(err, graph.ErrInterrupted) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 	data, found, err := store.Load(context.Background(), "revision")
@@ -362,7 +367,7 @@ func TestGraphResumeRejectsRevisionMismatchBeforeNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "revision")); !errors.Is(err, graph.ErrGraphRevisionMismatch) {
+	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "revision")); !errors.Is(err, graph.ErrGraphRevisionMismatch) {
 		t.Fatalf("Resume error=%v", err)
 	}
 	if firstCalls.Load() != 0 || firstPostCalls.Load() != 0 {
@@ -375,17 +380,18 @@ func TestGraphCheckpointCanBeResumedMoreThanOnce(t *testing.T) {
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
 	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(control.RequestInterrupt("pause", nil))
-	if _, err := g.Invoke(ctx, "input", graph.WithCheckpoint(store, "repeat")); !errors.Is(err, graph.ErrInterrupted) {
+	if _, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "repeat")); !errors.Is(err, graph.ErrInterrupted) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 
-	first, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "repeat"))
+	first, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "repeat"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := g.Resume(context.Background(), graph.WithCheckpoint(store, "repeat"))
+	second, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "repeat"))
 	if err != nil {
 		t.Fatal(err)
 	}

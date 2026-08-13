@@ -219,7 +219,7 @@ func configFromContext(ctx context.Context) (*toolRunState, error) {
 }
 
 type Recipe struct {
-	graph *graph.Graph[[]schema.Message, []schema.Message]
+	graph *graph.CompiledGraph[[]schema.Message, []schema.Message]
 }
 
 func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
@@ -404,7 +404,11 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 			return nil, err
 		}
 	}
-	return &Recipe{graph: g}, nil
+	compiled, err := g.Compile()
+	if err != nil {
+		return nil, err
+	}
+	return &Recipe{graph: compiled}, nil
 }
 
 func (r *Recipe) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {

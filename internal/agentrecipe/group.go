@@ -193,7 +193,11 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	if err := g.SetMaxSteps(hooks.MaxRounds + 2); err != nil {
 		return nil, err
 	}
-	return &Recipe{graph: g}, nil
+	compiled, err := g.Compile()
+	if err != nil {
+		return nil, err
+	}
+	return &Recipe{graph: compiled}, nil
 }
 
 func withSpeaker(messages []schema.Message, speaker string) []schema.Message {

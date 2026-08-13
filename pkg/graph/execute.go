@@ -23,12 +23,10 @@ func graphFailure(ctx context.Context, err error) error {
 
 type messageGraph[I any] interface {
 	runnable.Runnable[I, []schema.Message]
-	Compile() error
 }
 
 type resumableMessageGraph interface {
 	Resume(context.Context, ...runnable.Option) ([]schema.Message, error)
-	Compile() error
 }
 
 // StreamMessages exposes the message data plane for a Graph whose final output
@@ -44,9 +42,6 @@ func StreamMessages[I any](
 	}
 	if g == nil {
 		return nil, errors.New("graph is nil")
-	}
-	if err := g.Compile(); err != nil {
-		return nil, err
 	}
 	out := make(chan runnable.Item[schema.MessageEvent], 16)
 	go func() {
@@ -94,9 +89,6 @@ func ResumeMessages(
 	}
 	if g == nil {
 		return nil, errors.New("graph is nil")
-	}
-	if err := g.Compile(); err != nil {
-		return nil, err
 	}
 	return streamMessageExecution(ctx, func(runCtx context.Context) ([]schema.Message, error) {
 		return g.Resume(runCtx, opts...)

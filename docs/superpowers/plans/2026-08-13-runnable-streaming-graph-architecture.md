@@ -337,27 +337,27 @@ Commit: `feat(callback): 添加领域生命周期接口`
 - Produces: immutable `CompiledGraph[I,O]` implementing complete Runnable
 - Moves: `Invoke`, `Stream`, `Collect`, `Transform`, `Resume`, and `ResumeStream` to CompiledGraph
 
-- [ ] **Step 1: Write failing immutable-snapshot tests**
+- [x] **Step 1: Write failing immutable-snapshot tests**
 
 Compile a graph, mutate the builder, compile again, and prove the first compiled
 graph retains its original nodes and revision. Run both compiled values
 concurrently under `-race`.
 
-- [ ] **Step 2: Verify current Compile signature and builder execution fail the test**
+- [x] **Step 2: Verify current Compile signature and builder execution fail the test**
 
 Run: `go test ./pkg/graph -run 'TestCompiledGraph' -count=1`
 
-- [ ] **Step 3: Extract immutable topology and runtime metadata**
+- [x] **Step 3: Extract immutable topology and runtime metadata**
 
 Copy nodes, edges, options, types, resumability report, and revision into
 CompiledGraph. Builder locks protect only mutation and snapshot creation.
 
-- [ ] **Step 4: Move execution and resume methods**
+- [x] **Step 4: Move execution and resume methods**
 
 Delete builder execution methods and update Graph nesting to compile/mount an
 immutable child. Resume validates against the compiled snapshot revision.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/graph`
 

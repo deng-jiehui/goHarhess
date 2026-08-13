@@ -33,7 +33,11 @@ func TestRuntimeStateTravelsThroughPrivateContextScope(t *testing.T) {
 	}
 	_ = g.AddEdge(Start, "node")
 	_ = g.AddEdge("node", End)
-	if _, err := g.Invoke(context.Background(), "value"); err != nil {
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiled.Invoke(context.Background(), "value"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -99,7 +103,11 @@ func TestParallelBranchesCarryTheirOwnedStateInContext(t *testing.T) {
 	_ = g.AddEdge(Start, "fanout")
 	_ = g.AddEdge("fanout", "finish")
 	_ = g.AddEdge("finish", End)
-	if _, err := g.Invoke(context.Background(), "value"); err != nil {
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiled.Invoke(context.Background(), "value"); err != nil {
 		t.Fatal(err)
 	}
 }

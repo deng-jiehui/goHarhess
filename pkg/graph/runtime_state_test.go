@@ -68,7 +68,7 @@ func TestDefaultStateCodecRejectsPrivateFields(t *testing.T) {
 	if err := g.AddEdge("echo", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	err := g.Compile()
+	_, err := g.Compile()
 	if err == nil || !strings.Contains(err.Error(), "unexported") {
 		t.Fatalf("Compile error = %v", err)
 	}
@@ -93,7 +93,7 @@ func TestDefaultStateCodecRejectsIgnoredFields(t *testing.T) {
 	if err := g.AddEdge("echo", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	err := g.Compile()
+	_, err := g.Compile()
 	if err == nil || !strings.Contains(err.Error(), `json:"-"`) {
 		t.Fatalf("Compile error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestDefaultStateCodecRejectsUnsupportedJSONTypes(t *testing.T) {
 	if err := g.AddEdge("echo", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	err := g.Compile()
+	_, err := g.Compile()
 	if err == nil || !strings.Contains(err.Error(), "complex64") {
 		t.Fatalf("Compile error = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestDefaultStateCodecRejectsDynamicTypeLoss(t *testing.T) {
 	if err := g.AddEdge("checkpoint", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	_, err := g.Invoke(context.Background(), "hello")
+	_, err := mustCompile(t, g).Invoke(context.Background(), "hello")
 	if err == nil || !strings.Contains(err.Error(), "dynamic type") || !strings.Contains(err.Error(), "custom State Codec") {
 		t.Fatalf("Invoke error = %v", err)
 	}
@@ -206,7 +206,7 @@ func TestSequentialGraphDoesNotSnapshotState(t *testing.T) {
 	if err := g.AddEdge("second", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	output, err := g.Invoke(context.Background(), "hello")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestLazyCheckpointWithCustomCodecEncodesWithoutDecoding(t *testing.T) {
 	}
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddEdge("node", graph.End)
-	if _, err := g.Invoke(context.Background(), "value"); err != nil {
+	if _, err := mustCompile(t, g).Invoke(context.Background(), "value"); err != nil {
 		t.Fatal(err)
 	}
 	if encodes.Load() != 1 || decodes.Load() != 0 {
@@ -279,7 +279,7 @@ func TestCompileDoesNotCallStateCodecMetadataUnderGraphLock(t *testing.T) {
 	}
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddEdge("node", graph.End)
-	if err := g.Compile(); err != nil {
+	if _, err := g.Compile(); err != nil {
 		t.Fatal(err)
 	}
 	if calls.Load() != afterSet {

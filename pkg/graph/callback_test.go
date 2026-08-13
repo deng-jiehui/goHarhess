@@ -30,7 +30,7 @@ func TestGraphCallbackClosesFailedNodeBeforeGraphError(t *testing.T) {
 	if err := g.AddEdge("fail", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Invoke(callback.WithManager(context.Background(), manager), 1); err == nil {
+	if _, err := mustCompile(t, g).Invoke(callback.WithManager(context.Background(), manager), 1); err == nil {
 		t.Fatal("Invoke succeeded")
 	}
 	if len(order) != 2 || order[0] != "node_end" || order[1] != "graph_error" {

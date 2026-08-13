@@ -59,7 +59,7 @@ func TestRuntimeStateFactoryRunsOnceAndSequentialHandlersSharePointer(t *testing
 			t.Fatal(err)
 		}
 	}
-	output, err := g.Invoke(context.Background(), "input")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "input")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestWithNodeOptionsForwardsEachOptionOnce(t *testing.T) {
 	}
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddEdge("node", graph.End)
-	if _, err := g.Invoke(context.Background(), "ok"); err != nil {
+	if _, err := mustCompile(t, g).Invoke(context.Background(), "ok"); err != nil {
 		t.Fatal(err)
 	}
 	if applications.Load() != 2 {
@@ -118,7 +118,7 @@ func TestGraphSupportsNilInterfaceNodeValues(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "produce")
 	_ = g.AddEdge("produce", "consume")
 	_ = g.AddEdge("consume", graph.End)
-	output, err := g.Invoke(context.Background(), "input")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "input")
 	if err != nil || output != nil {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
@@ -167,11 +167,12 @@ func TestGraphRuntimeStateAPIUsesPureNodes(t *testing.T) {
 	if err := g.AddEdge("render", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.Compile(); err != nil {
+	compiled, err := g.Compile()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	output, err := g.Invoke(context.Background(), "hello")
+	output, err := compiled.Invoke(context.Background(), "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +230,7 @@ func TestGraphBranchCanReadRuntimeState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, err := g.Invoke(context.Background(), "hello")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "hello")
 	if err != nil {
 		t.Fatal(err)
 	}

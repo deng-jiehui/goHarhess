@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/compose"
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -32,6 +31,15 @@ func newTypedGraph[I, O any](t *testing.T, name string, factory any) *graph.Grap
 	return g
 }
 
+func mustCompile[I, O any](t *testing.T, builder *graph.Graph[I, O]) *graph.CompiledGraph[I, O] {
+	t.Helper()
+	compiled, err := builder.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
 func TestGraphRunsHeterogeneousPureNodes(t *testing.T) {
 	g := graph.NewGraph[string, string]("heterogeneous")
 	length := runnable.Func[string, int](func(_ context.Context, input string, _ ...runnable.Option) (int, error) { return len(input), nil })
@@ -49,7 +57,7 @@ func TestGraphRunsHeterogeneousPureNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	output, err := g.Invoke(context.Background(), "hello")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "hello")
 	if err != nil || output != "length=5" {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
@@ -90,7 +98,7 @@ func TestGraphStateHandlersMapPureNode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	output, err := g.Invoke(context.Background(), "topic")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "topic")
 	if err != nil || output != "1:topic done" {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
@@ -103,7 +111,7 @@ func TestCompileRejectsMismatchedNodeEdgeTypes(t *testing.T) {
 	for _, edge := range [][2]string{{graph.Start, "number"}, {"number", "text"}, {"text", graph.End}} {
 		_ = g.AddEdge(edge[0], edge[1])
 	}
-	err := g.Compile()
+	_, err := g.Compile()
 	if err == nil || !strings.Contains(err.Error(), "edge.type_mismatch") {
 		t.Fatalf("Compile error=%v", err)
 	}
@@ -121,7 +129,7 @@ func TestResumeRequiresStatePreHandler(t *testing.T) {
 		_ = g.AddEdge(edge[0], edge[1])
 	}
 	ctx := state.WithCursorStack(context.Background(), state.CursorStack{{Graph: "resume-mismatch", Node: "second", Step: 1}})
-	_, err := g.Invoke(ctx, "hello")
+	_, err := mustCompile(t, g).Invoke(ctx, "hello")
 	if err == nil || !strings.Contains(err.Error(), "graph.resume.type_mismatch") {
 		t.Fatalf("Invoke error=%v", err)
 	}
@@ -142,13 +150,13 @@ func TestStateBranchLoopUsesPointerState(t *testing.T) {
 	_ = g.AddBranch("step", "step", "again", func(_ context.Context, current *typedState) (bool, error) { return current.Count < 3, nil })
 	_ = g.AddEdge("step", "finish")
 	_ = g.AddEdge("finish", graph.End)
-	output, err := g.Invoke(context.Background(), 0)
+	output, err := mustCompile(t, g).Invoke(context.Background(), 0)
 	if err != nil || output != 3 {
 		t.Fatalf("output=%d err=%v", output, err)
 	}
 }
 
-func TestGraphForwardsOnlyNodeOptionsAndFreezes(t *testing.T) {
+func TestGraphForwardsOnlyNodeOptionsAndKeepsCompiledSnapshot(t *testing.T) {
 	applications := 0
 	global := runnable.GlobalOption(runnable.WithMetadata("tenant", "global"))
 	nodeOption := runnable.NodeOption(runnable.OptionFunc(func(set *runnable.OptionSet) { applications++; set.Metadata["mode"] = "parent" }))
@@ -164,40 +172,35 @@ func TestGraphForwardsOnlyNodeOptionsAndFreezes(t *testing.T) {
 	}
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddEdge("node", graph.End)
-	if _, err := g.Invoke(context.Background(), "ok", global, nodeOption); err != nil {
+	compiled := mustCompile(t, g)
+	if _, err := compiled.Invoke(context.Background(), "ok", global, nodeOption); err != nil {
 		t.Fatal(err)
 	}
 	if applications != 1 || observed.Metadata["tenant"] != nil || observed.Metadata["mode"] != "local" {
 		t.Fatalf("applications=%d options=%#v", applications, observed)
 	}
-	if err := g.AddNode("late", node); err == nil || !strings.Contains(err.Error(), "graph.built") {
-		t.Fatalf("late error=%v", err)
+	if err := g.AddNode("late", node); err != nil {
+		t.Fatalf("late AddNode error=%v", err)
+	}
+	if len(compiled.Snapshot().Nodes) != 1 {
+		t.Fatalf("compiled snapshot changed: %#v", compiled.Snapshot())
 	}
 }
 
-func TestCompileRejectsInvalidFallbackAndNestedCycle(t *testing.T) {
+func TestCompileRejectsInvalidFallbackAndMutableNestedGraph(t *testing.T) {
 	g := graph.NewGraph[string, string]("fallback")
 	node := runnable.Func[string, string](func(_ context.Context, value string, _ ...runnable.Option) (string, error) { return value, nil })
 	_ = g.AddNode("node", node)
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddBranch("node", graph.End, "maybe", func(_ context.Context, _ string) (bool, error) { return true, nil })
-	if err := g.Compile(); err == nil || !strings.Contains(err.Error(), "edge.fallback.required") {
+	if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "edge.fallback.required") {
 		t.Fatalf("Compile error=%v", err)
 	}
 
-	first := graph.NewGraph[string, string]("first")
-	second := graph.NewGraph[string, string]("second")
-	_ = first.AddNode("second", second)
-	_ = second.AddNode("first", first)
-	for _, item := range []struct {
-		g    *graph.Graph[string, string]
-		node string
-	}{{first, "second"}, {second, "first"}} {
-		_ = item.g.AddEdge(graph.Start, item.node)
-		_ = item.g.AddEdge(item.node, graph.End)
-	}
-	if err := first.Compile(); err == nil || !strings.Contains(err.Error(), "graph.cycle") {
-		t.Fatalf("nested cycle error=%v", err)
+	parent := graph.NewGraph[string, string]("parent")
+	child := graph.NewGraph[string, string]("child")
+	if err := parent.AddNode("child", child); err == nil || !strings.Contains(err.Error(), "Invoke") {
+		t.Fatalf("mutable nested graph error=%v", err)
 	}
 }
 
@@ -210,11 +213,52 @@ func (a recordingAgent) Invoke(context.Context, []schema.Message, ...runnable.Op
 }
 
 func TestComposeMessageGraphAdaptsAgents(t *testing.T) {
-	g, err := compose.NewGraph("team").Agent("first", recordingAgent{"first", "one"}).Agent("second", recordingAgent{"second", "two"}).Edge(graph.Start, "first").Edge("first", "second").Edge("second", graph.End).Build()
+	type teamState struct {
+		Messages []schema.Message
+		Output   []schema.Message
+	}
+	g := graph.NewGraph[[]schema.Message, []schema.Message]("team")
+	err := g.SetStateFactory(func(_ context.Context, input []schema.Message) (*teamState, error) {
+		return &teamState{Messages: schema.CloneMessages(input)}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := g.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")})
+	addAgent := func(name string, value recordingAgent) error {
+		return g.AddNode(name, value,
+			graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
+				return schema.CloneMessages(state.Messages), nil
+			}),
+			graph.WithPostHandler(func(_ context.Context, state *teamState, output []schema.Message) error {
+				state.Messages = append(state.Messages, schema.CloneMessages(output)...)
+				state.Output = append(state.Output, schema.CloneMessages(output)...)
+				return nil
+			}),
+		)
+	}
+	if err = addAgent("first", recordingAgent{"first", "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = addAgent("second", recordingAgent{"second", "two"}); err != nil {
+		t.Fatal(err)
+	}
+	finish := runnable.Func[[]schema.Message, []schema.Message](func(_ context.Context, input []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+		return schema.CloneMessages(input), nil
+	})
+	if err = g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
+		return schema.CloneMessages(state.Output), nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	_ = g.AddEdge(graph.Start, "first")
+	_ = g.AddEdge("first", "second")
+	_ = g.AddEdge("second", "finish")
+	_ = g.AddEdge("finish", graph.End)
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := compiled.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")})
 	if err != nil || len(output) != 2 || output[0].Text() != "one" || output[1].Text() != "two" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}

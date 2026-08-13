@@ -98,7 +98,7 @@ func TestRuntimeParallelSnapshotsBranchesAndMergesInDeclarationOrder(t *testing.
 			t.Fatal(err)
 		}
 	}
-	output, err := g.Invoke(context.Background(), "base")
+	output, err := mustCompile(t, g).Invoke(context.Background(), "base")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestRuntimeParallelFailureSkipsMerger(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, err := g.Invoke(context.Background(), "base")
+	_, err := mustCompile(t, g).Invoke(context.Background(), "base")
 	if !errors.Is(err, boom) || merged.Load() {
 		t.Fatalf("Invoke error=%v merged=%t", err, merged.Load())
 	}
@@ -178,7 +178,7 @@ func TestRuntimeParallelRejectsMissingPostHandler(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "fanout")
 	_ = g.AddEdge("fanout", "finish")
 	_ = g.AddEdge("finish", graph.End)
-	if err := g.Compile(); err == nil || !strings.Contains(err.Error(), "PostHandler") {
+	if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "PostHandler") {
 		t.Fatalf("Compile error = %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestRuntimeParallelRejectsDefaultCodecDynamicTypeLoss(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "fanout")
 	_ = g.AddEdge("fanout", "finish")
 	_ = g.AddEdge("finish", graph.End)
-	_, err := g.Invoke(context.Background(), "value")
+	_, err := mustCompile(t, g).Invoke(context.Background(), "value")
 	if err == nil || !strings.Contains(err.Error(), "dynamic type") {
 		t.Fatalf("Invoke error = %v", err)
 	}
@@ -238,44 +238,26 @@ func TestRuntimeParallelRejectsCodecThatSharesStatePointers(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "fanout")
 	_ = g.AddEdge("fanout", "finish")
 	_ = g.AddEdge("finish", graph.End)
-	_, err := g.Invoke(context.Background(), "value")
+	_, err := mustCompile(t, g).Invoke(context.Background(), "value")
 	if err == nil || !strings.Contains(err.Error(), "independent State") {
 		t.Fatalf("Invoke error = %v", err)
 	}
 }
 
-func TestRuntimeParallelNestedGraphParticipatesInCycleDetection(t *testing.T) {
-	build := func(name string) *graph.Graph[string, string] {
-		g := graph.NewGraph[string, string](name)
-		if err := g.SetStateFactory(func(_ context.Context, input string) (*runtimeParallelState, error) {
-			return &runtimeParallelState{Values: []string{input}}, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return g
+func TestRuntimeParallelRejectsMutableGraphBranch(t *testing.T) {
+	child := graph.NewGraph[string, string]("mutable-child")
+	parent := graph.NewGraph[string, string]("parent")
+	if err := parent.SetStateFactory(func(_ context.Context, input string) (*runtimeParallelState, error) {
+		return &runtimeParallelState{Values: []string{input}}, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	first := build("first-parallel")
-	second := build("second-parallel")
-	addChild := func(parent, child *graph.Graph[string, string]) {
-		branch := graph.ParallelBranch{
-			Name: "child", Node: child,
-			Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-			Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil },
-		}
-		if err := parent.AddParallelNode("fanout", []graph.ParallelBranch{branch}, graph.WithStateMerger(func(_ context.Context, _ *runtimeParallelState, _ []*runtimeParallelState) error { return nil })); err != nil {
-			t.Fatal(err)
-		}
-		finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
-		if err := parent.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil })); err != nil {
-			t.Fatal(err)
-		}
-		_ = parent.AddEdge(graph.Start, "fanout")
-		_ = parent.AddEdge("fanout", "finish")
-		_ = parent.AddEdge("finish", graph.End)
-	}
-	addChild(first, second)
-	addChild(second, first)
-	if err := first.Compile(); err == nil || !strings.Contains(err.Error(), "graph.cycle") {
-		t.Fatalf("Compile error = %v", err)
+	err := parent.AddParallelNode("fanout", []graph.ParallelBranch{{
+		Name: "child", Node: child,
+		Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
+		Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil },
+	}}, graph.WithStateMerger(func(_ context.Context, _ *runtimeParallelState, _ []*runtimeParallelState) error { return nil }))
+	if err == nil || !strings.Contains(err.Error(), "Invoke") {
+		t.Fatalf("AddParallelNode error = %v", err)
 	}
 }

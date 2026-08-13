@@ -308,5 +308,9 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	if err := g.SetMaxSteps(hooks.MaxSteps*2 + 2); err != nil {
 		return nil, err
 	}
-	return &Recipe{graph: g}, nil
+	compiled, err := g.Compile()
+	if err != nil {
+		return nil, err
+	}
+	return &Recipe{graph: compiled}, nil
 }

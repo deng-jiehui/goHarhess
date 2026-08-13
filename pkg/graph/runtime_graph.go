@@ -187,9 +187,6 @@ func (g *Graph[I, O]) SetStateFactory(factory any) error {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "state_factory", "built graph cannot be modified")
-	}
 	g.stateType = stateType
 	g.stateFactory = boundFactory
 	return nil
@@ -230,9 +227,6 @@ func (g *Graph[I, O]) AddNode(name string, node any, options ...NodeOption) erro
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "nodes", "built graph cannot be modified")
-	}
 	if _, exists := g.nodes[name]; exists {
 		return validationError("node.id.duplicate", fmt.Sprintf("nodes[%q].id", name), "node ID is already registered")
 	}
@@ -273,9 +267,6 @@ func (g *Graph[I, O]) addRuntimeEdge(from, to, label string, condition *runtimeC
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "edges", "built graph cannot be modified")
-	}
 	g.edges = append(g.edges, runtimeEdge{from: from, to: to, label: strings.TrimSpace(label), condition: condition})
 	return nil
 }
@@ -303,9 +294,7 @@ func (g *Graph[I, O]) SetDescription(value string) {
 		return
 	}
 	g.mu.Lock()
-	if !g.built {
-		g.description = value
-	}
+	g.description = value
 	g.mu.Unlock()
 }
 
@@ -318,9 +307,6 @@ func (g *Graph[I, O]) SetMaxSteps(value int) error {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "max_steps", "built graph cannot be modified")
-	}
 	g.maxSteps = value
 	return nil
 }
@@ -337,9 +323,6 @@ func (g *Graph[I, O]) SetNodeOptions(id string, options ...runnable.Option) erro
 	scoped := nodeScopedOptions(options)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "nodes", "built graph cannot be modified")
-	}
 	node, ok := g.nodes[id]
 	if !ok {
 		return validationError("node.missing", fmt.Sprintf("nodes[%q]", id), "node is not registered")
@@ -348,16 +331,6 @@ func (g *Graph[I, O]) SetNodeOptions(id string, options ...runnable.Option) erro
 	g.nodes[id] = node
 	return nil
 }
-
-func (g *Graph[I, O]) IsBuilt() bool {
-	if g == nil {
-		return false
-	}
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.built
-}
-func (g *Graph[I, O]) Build() error { return g.Compile() }
 
 func (g *Graph[I, O]) Validate() error {
 	if g == nil {
@@ -371,7 +344,33 @@ func (g *Graph[I, O]) Validate() error {
 	return nil
 }
 
-func (g *Graph[I, O]) Compile() error { return g.compileGraph(map[uintptr]bool{}) }
+// Compile validates and freezes one immutable execution snapshot. The Builder
+// remains mutable and can be compiled again.
+func (g *Graph[I, O]) Compile() (*CompiledGraph[I, O], error) {
+	if g == nil {
+		return nil, validationError("graph.nil", "graph", "graph cannot be nil")
+	}
+	runtime := g.cloneBuilder()
+	if err := runtime.compileGraph(map[uintptr]bool{}); err != nil {
+		return nil, err
+	}
+	return &CompiledGraph[I, O]{runtime: runtime}, nil
+}
+
+func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	nodes := make(map[string]runtimeNode, len(g.nodes))
+	for id, node := range g.nodes {
+		node.options = append([]runnable.Option(nil), node.options...)
+		nodes[id] = node
+	}
+	return &Graph[I, O]{
+		name: g.name, description: g.description, inputType: g.inputType, outputType: g.outputType, stateType: g.stateType,
+		stateFactory: g.stateFactory, codec: g.codec, codecID: g.codecID, codecVersion: g.codecVersion, codecType: g.codecType,
+		nodes: nodes, nodeOrder: append([]string(nil), g.nodeOrder...), edges: append([]runtimeEdge(nil), g.edges...), maxSteps: g.maxSteps,
+	}
+}
 
 func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	if g == nil {
@@ -414,17 +413,6 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	}
 	g.built = true
 	return nil
-}
-
-func (*Graph[I, O]) graphComponent() {}
-
-func (g *Graph[I, O]) Invoke(ctx context.Context, input I, options ...runnable.Option) (output O, err error) {
-	return g.invokeRuntime(ctx, input, options...)
-}
-
-// Resume loads and continues a previously interrupted execution.
-func (g *Graph[I, O]) Resume(ctx context.Context, options ...runnable.Option) (output O, err error) {
-	return g.resumeRuntime(ctx, options...)
 }
 
 func (g *Graph[I, O]) Snapshot() Snapshot {
@@ -759,4 +747,4 @@ func reflectArgument(expected reflect.Type, value any) reflect.Value {
 	return reflect.ValueOf(value)
 }
 
-var _ runnable.Runnable[any, any] = (*Graph[any, any])(nil)
+var _ runnable.Runnable[any, any] = (*CompiledGraph[any, any])(nil)

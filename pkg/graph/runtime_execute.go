@@ -25,8 +25,8 @@ func (g *Graph[I, O]) resumeRuntime(ctx context.Context, options ...runnable.Opt
 	if err != nil {
 		return zero, err
 	}
-	if err := g.Compile(); err != nil {
-		return zero, err
+	if !g.built {
+		return zero, errors.New("graph runtime is not compiled")
 	}
 	config, configured, err := checkpointFromPlan(plan)
 	if err != nil {
@@ -66,8 +66,8 @@ func (g *Graph[I, O]) invokeRuntimeWithContinuation(ctx context.Context, input I
 	if err != nil {
 		return zero, err
 	}
-	if err := g.Compile(); err != nil {
-		return zero, err
+	if !g.built {
+		return zero, errors.New("graph runtime is not compiled")
 	}
 	config, configured, err := checkpointFromPlan(plan)
 	if err != nil {
