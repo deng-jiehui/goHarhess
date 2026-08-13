@@ -7,9 +7,34 @@ import (
 	"sync"
 	"testing"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/retrieval"
 	"goharness/pkg/runnable"
 )
+
+func TestHybridSearcherDispatchesLifecycleCallbacksWithoutChangingResults(t *testing.T) {
+	events := make(chan string, 2)
+	observer := retrieval.CallbackFuncs{CallbackName: "retrieval-audit", Start: func(context.Context, retrieval.CallbackInput) error { events <- "start"; return nil }, End: func(context.Context, retrieval.CallbackOutput) error { events <- "end"; return nil }}
+	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	searcher := mustHybridSearcher(t, retrieval.HybridSearchConfig{
+		Embedder: fixedEmbedder{vector: []float32{1}}, VectorStore: &fixedVectorStore{hits: []retrieval.SearchHit{{ID: "a", Score: 1, Text: "A"}}}, KeywordSearch: fixedSearchEngine{hits: []retrieval.SearchHit{{ID: "a", Score: 1, Text: "A"}}}, FinalTopK: 1,
+	})
+	hits, err := searcher.Invoke(callback.WithManager(context.Background(), manager), retrieval.HybridQuery{Text: "query"})
+	if err != nil || len(hits) != 1 || hits[0].ID != "a" {
+		t.Fatalf("hits=%#v err=%v", hits, err)
+	}
+	close(events)
+	var got []string
+	for event := range events {
+		got = append(got, event)
+	}
+	if fmt.Sprint(got) != "[start end]" {
+		t.Fatalf("events=%v", got)
+	}
+}
 
 func TestDocumentIndexerBatchesEmbeddingAndUpsert(t *testing.T) {
 	chunker := fixedChunker{chunks: []retrieval.Chunk{

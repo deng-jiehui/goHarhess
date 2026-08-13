@@ -265,10 +265,12 @@ func (n *ToolsNode) invokeCall(ctx context.Context, call ToolCall, messages []sc
 		HTTPClient: HTTPClient(ctx),
 		Messages:   isolatedMessages,
 	}
+	callbackCtx, invocation := BeginCallback(ctx, value.Spec(), input)
 	policy := n.policies[call.Name]
 	result, err := n.scheduler.execute(ctx, policy, func() (Result, error) {
-		return invokeBaseTool(ctx, call.Name, value, input, options...)
+		return invokeBaseTool(callbackCtx, call.Name, value, input, options...)
 	})
+	EndCallback(callbackCtx, invocation, value.Spec(), input, result, err)
 	if err != nil {
 		return toolErrorMessage(call, err)
 	}

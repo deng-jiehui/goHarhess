@@ -102,3 +102,24 @@ func (o CallbackOutput) Clone() CallbackOutput {
 }
 
 func cloneCallbackValue(value any) any { return callback.CloneValue(value) }
+
+func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, callback.Invocation) {
+	operationCtx, invocation := callback.Begin(ctx, "retrieval", string(input.Operation), nil)
+	_ = callback.Dispatch[Callback](operationCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, handler Callback) error {
+		return handler.OnRetrieverStart(ctx, input.Clone())
+	})
+	return operationCtx, invocation
+}
+
+func EndCallback(ctx context.Context, invocation callback.Invocation, output CallbackOutput, err error) {
+	if err != nil {
+		failure := CallbackFailure{Input: CallbackInput{Operation: output.Operation}, Err: err}
+		_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
+			return handler.OnRetrieverError(ctx, failure)
+		})
+		return
+	}
+	_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, handler Callback) error {
+		return handler.OnRetrieverEnd(ctx, output.Clone())
+	})
+}

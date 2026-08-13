@@ -68,6 +68,13 @@ func (h *HybridSearcher) Invoke(ctx context.Context, query HybridQuery, options 
 	if strings.TrimSpace(query.Text) == "" {
 		return nil, errors.New("hybrid search query cannot be empty")
 	}
+	callbackCtx, invocation := BeginCallback(ctx, CallbackInput{Operation: OperationHybridSearch, Hybrid: &query})
+	ctx = callbackCtx
+	var callbackErr error
+	var callbackHits []SearchHit
+	defer func() {
+		EndCallback(callbackCtx, invocation, CallbackOutput{Operation: OperationHybridSearch, Hits: callbackHits}, callbackErr)
+	}()
 	finalTopK := h.config.FinalTopK
 	if query.TopK > 0 {
 		if query.TopK > maxHybridTopK {
@@ -130,9 +137,11 @@ func (h *HybridSearcher) Invoke(ctx context.Context, query HybridQuery, options 
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		callbackErr = err
 		return nil, err
 	}
 	if len(branchErrors) == 2 || (h.config.RequireBoth && len(branchErrors) > 0) {
+		callbackErr = errors.Join(branchErrors...)
 		return nil, errors.Join(branchErrors...)
 	}
 
@@ -147,10 +156,12 @@ func (h *HybridSearcher) Invoke(ctx context.Context, query HybridQuery, options 
 			return reranked, nil
 		}
 		if h.config.StrictRerank {
+			callbackErr = err
 			return nil, err
 		}
 	}
-	return cloneSearchHits(fused[:min(len(fused), finalTopK)]), nil
+	callbackHits = cloneSearchHits(fused[:min(len(fused), finalTopK)])
+	return callbackHits, nil
 }
 
 var _ runnable.Runnable[HybridQuery, []SearchHit] = (*HybridSearcher)(nil)

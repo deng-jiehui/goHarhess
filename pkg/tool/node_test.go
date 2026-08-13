@@ -2,16 +2,67 @@ package tool_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 	"goharness/pkg/tool"
 )
+
+func TestToolsNodeDispatchesLifecycleCallbacksWithoutChangingResult(t *testing.T) {
+	events := make(chan string, 3)
+	observer := tool.CallbackFuncs{
+		CallbackName: "tool-audit",
+		Start:        func(context.Context, tool.Spec, tool.CallInput) error { events <- "start"; return nil },
+		End:          func(context.Context, tool.Spec, tool.CallInput, tool.Result) error { events <- "end"; return nil },
+	}
+	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		return tool.TextResult("ok"), nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
+	if err != nil || len(output) != 1 || output[0].Text() != "ok" {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+	close(events)
+	var got []string
+	for event := range events {
+		got = append(got, event)
+	}
+	if fmt.Sprint(got) != "[start end]" {
+		t.Fatalf("events=%v", got)
+	}
+}
+
+func TestToolsNodeCallbackFailureDoesNotChangeBusinessResult(t *testing.T) {
+	observer := tool.CallbackFuncs{CallbackName: "broken", Start: func(context.Context, tool.Spec, tool.CallInput) error { return errors.New("audit failed") }}
+	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		return tool.TextResult("ok"), nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
+	if err != nil || len(output) != 1 || output[0].Text() != "ok" {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+}
 
 func TestToolsNodeExecutesOnlyTrailingCallsAndPreservesOrder(t *testing.T) {
 	var mu sync.Mutex
