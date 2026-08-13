@@ -181,7 +181,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 		if !ok {
 			return zero, graphFailure(ctx, &ExecutionError{Code: "graph.resume.node_missing", NodeID: pendingNode, Step: startStep, Err: errors.New("resume node is not present in execution plan")})
 		}
-		if node.pre == nil || runtimeState == nil {
+		if (node.pre == nil && node.parallel == nil) || runtimeState == nil {
 			return zero, graphFailure(ctx, &ExecutionError{
 				Code: "graph.resume.type_mismatch", NodeID: pendingNode, Step: startStep,
 				Err: errors.New("resume requires a runtime State and node PreHandler"),

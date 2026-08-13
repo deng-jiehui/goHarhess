@@ -254,8 +254,8 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			}
 		}
 	}
-	control, cancel := context.WithCancel(ctx)
-	defer cancel()
+	control, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	var workers sync.WaitGroup
 	var firstErr error
 	var errorOnce sync.Once
@@ -267,7 +267,10 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			branchCtx := withRuntimeState(control, inputs[index])
 			branchPlan, err := plan.Cascade(branch.options...)
 			if err != nil {
-				errorOnce.Do(func() { firstErr = fmt.Errorf("parallel branch %q options: %w", branch.name, err); cancel() })
+				errorOnce.Do(func() {
+					firstErr = fmt.Errorf("parallel branch %q options: %w", branch.name, err)
+					cancel(firstErr)
+				})
 				return
 			}
 			branchCtx = runnable.WithOptionPlan(branchCtx, branchPlan)
@@ -275,7 +278,10 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			if branch.pre != nil {
 				input, err = branch.pre.invoke(branchCtx, inputs[index])
 				if err != nil {
-					errorOnce.Do(func() { firstErr = fmt.Errorf("parallel branch %q pre handler: %w", branch.name, err); cancel() })
+					errorOnce.Do(func() {
+						firstErr = fmt.Errorf("parallel branch %q pre handler: %w", branch.name, err)
+						cancel(firstErr)
+					})
 					return
 				}
 			}
@@ -287,12 +293,18 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			}
 			output, err := branch.invoke(invokeCtx, input, branchPlan.ForwardOptionsFor(runnable.OptionScopeNode))
 			if err != nil {
-				errorOnce.Do(func() { firstErr = fmt.Errorf("parallel branch %q: %w", branch.name, err); cancel() })
+				errorOnce.Do(func() {
+					firstErr = fmt.Errorf("parallel branch %q: %w", branch.name, err)
+					cancel(firstErr)
+				})
 				return
 			}
 			if branch.post != nil {
 				if err := branch.post.invoke(branchCtx, inputs[index], output); err != nil {
-					errorOnce.Do(func() { firstErr = fmt.Errorf("parallel branch %q post handler: %w", branch.name, err); cancel() })
+					errorOnce.Do(func() {
+						firstErr = fmt.Errorf("parallel branch %q post handler: %w", branch.name, err)
+						cancel(firstErr)
+					})
 				}
 			}
 		}(index)
