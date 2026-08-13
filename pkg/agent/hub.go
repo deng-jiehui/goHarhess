@@ -8,6 +8,7 @@ import (
 	"reflect"
 
 	"goharness/internal/agentrecipe"
+	"goharness/pkg/callback"
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -168,7 +169,7 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 			childRunnableOpts := runOptionsAsRunnable(childOpts)
 			childRunnableOpts = append(childRunnableOpts, runOpts.GlobalOptions...)
 			childRunnableOpts = append(childRunnableOpts, runOpts.NodeOptions...)
-			childCtx := graph.WithDataSinkIsolated(ctx, nil)
+			childCtx := callback.WithStreamCallbacksIsolated(ctx)
 			childCtx = graph.WithEventSinkIsolated(childCtx, nil)
 			childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
 			stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), childRunnableOpts...)

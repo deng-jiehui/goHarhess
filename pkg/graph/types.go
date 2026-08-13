@@ -1,12 +1,10 @@
 package graph
 
 import (
-	"context"
 	"fmt"
 	"reflect"
 
 	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
 )
 
 const (
@@ -16,23 +14,6 @@ const (
 	DefaultMaxSteps = 100
 	DefaultMaxDepth = 32
 )
-
-// MessageState is the standard runtime State for message-oriented workflows.
-// Graph owns it by pointer; users do not implement Clone methods.
-type MessageState struct {
-	Messages []schema.Message
-	Output   []schema.Message
-}
-
-type MessageGraph = Graph[[]schema.Message, []schema.Message]
-
-func NewMessageGraph(name string) *MessageGraph {
-	g := NewGraph[[]schema.Message, []schema.Message](name)
-	_ = g.SetStateFactory(func(_ context.Context, input []schema.Message) (*MessageState, error) {
-		return &MessageState{Messages: schema.CloneMessages(input)}, nil
-	})
-	return g
-}
 
 type erasedValue struct {
 	typ   reflect.Type

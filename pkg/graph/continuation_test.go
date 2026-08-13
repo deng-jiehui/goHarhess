@@ -24,6 +24,20 @@ type byteCheckpointStore struct {
 	saveErr error
 }
 
+type streamReceiveResult[T any] struct {
+	value T
+	err   error
+}
+
+func receiveStreamMessage[T any](stream *runnable.StreamReader[T]) <-chan streamReceiveResult[T] {
+	result := make(chan streamReceiveResult[T], 1)
+	go func() {
+		value, err := stream.Recv()
+		result <- streamReceiveResult[T]{value: value, err: err}
+	}()
+	return result
+}
+
 func (s *byteCheckpointStore) Save(_ context.Context, key string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,7 +175,7 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 	}
 }
 
-func TestStreamMessagesDeliversPersistedInterruptionAfterContextCancellation(t *testing.T) {
+func TestGraphStreamDeliversPersistedInterruptionAfterContextCancellation(t *testing.T) {
 	store := &byteCheckpointStore{}
 	started := make(chan struct{}, 1)
 	type streamState struct{ Messages []schema.Message }
@@ -194,7 +208,7 @@ func TestStreamMessagesDeliversPersistedInterruptionAfterContextCancellation(t *
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
-	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "stream-interrupt"))
+	stream, err := mustCompile(t, g).Stream(ctx, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "stream-interrupt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,16 +219,16 @@ func TestStreamMessagesDeliversPersistedInterruptionAfterContextCancellation(t *
 	}
 	cancel(control.RequestInterrupt("pause stream", nil))
 	select {
-	case item, ok := <-stream:
-		if !ok || !errors.Is(item.Err, graph.ErrInterrupted) {
-			t.Fatalf("stream item=%#v open=%t", item, ok)
+	case result := <-receiveStreamMessage(stream):
+		if !errors.Is(result.err, graph.ErrInterrupted) {
+			t.Fatalf("stream error=%v", result.err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("stream did not deliver interruption")
 	}
 }
 
-func TestStreamMessagesDeliversCheckpointSaveFailureAfterInterruptRequest(t *testing.T) {
+func TestGraphStreamDeliversCheckpointSaveFailureAfterInterruptRequest(t *testing.T) {
 	saveErr := errors.New("stream checkpoint unavailable")
 	store := &byteCheckpointStore{saveErr: saveErr}
 	started := make(chan struct{}, 1)
@@ -248,16 +262,16 @@ func TestStreamMessagesDeliversCheckpointSaveFailureAfterInterruptRequest(t *tes
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
-	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "failed-stream"))
+	stream, err := mustCompile(t, g).Stream(ctx, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "failed-stream"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-started
 	cancel(control.RequestInterrupt("pause", nil))
 	select {
-	case item, ok := <-stream:
-		if !ok || !errors.Is(item.Err, saveErr) || errors.Is(item.Err, graph.ErrInterrupted) {
-			t.Fatalf("stream item=%#v open=%t", item, ok)
+	case result := <-receiveStreamMessage(stream):
+		if !errors.Is(result.err, saveErr) || errors.Is(result.err, graph.ErrInterrupted) {
+			t.Fatalf("stream error=%v", result.err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("stream did not deliver checkpoint failure")

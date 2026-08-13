@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
@@ -277,9 +278,7 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 			if hooks.NameMessages != nil {
 				messages = hooks.NameMessages(messages)
 			}
-			if !graph.EmitData(ctx, schema.MessageEvent{Kind: kind, Messages: messages}) {
-				return nil, ctx.Err()
-			}
+			callback.EmitStream(ctx, schema.MessageEvent{Kind: kind, Messages: messages})
 		}
 		if !sawDone {
 			return nil, errors.New("agent recipe model stream closed without done event")
@@ -347,7 +346,7 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 			if hooks.NameMessages != nil {
 				emitted = hooks.NameMessages(emitted)
 			}
-			graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
+			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
 			return updated, nil
 		})
 		if err := g.AddNode("tools", toolNode,
@@ -424,7 +423,13 @@ func (r *Recipe) Stream(ctx context.Context, messages []schema.Message, options 
 		return nil, errors.New("agent recipe is not configured")
 	}
 	ctx = withSession(ctx)
-	return graph.StreamMessages(ctx, r.graph, messages, options...)
+	return streamMessageExecution(ctx, func(runCtx context.Context) ([]schema.Message, error) {
+		reader, err := r.graph.Stream(runCtx, messages, options...)
+		if err != nil {
+			return nil, err
+		}
+		return reader.Collect(reader.Context())
+	}), nil
 }
 
 func (r *Recipe) Resume(ctx context.Context, options ...runnable.Option) ([]schema.Message, error) {
@@ -440,7 +445,13 @@ func (r *Recipe) ResumeStream(ctx context.Context, options ...runnable.Option) (
 		return nil, errors.New("agent recipe is not configured")
 	}
 	ctx = withSession(ctx)
-	return graph.ResumeMessages(ctx, r.graph, options...)
+	return streamMessageExecution(ctx, func(runCtx context.Context) ([]schema.Message, error) {
+		reader, err := r.graph.ResumeStream(runCtx, options...)
+		if err != nil {
+			return nil, err
+		}
+		return reader.Collect(reader.Context())
+	}), nil
 }
 
 func withSession(ctx context.Context) context.Context {

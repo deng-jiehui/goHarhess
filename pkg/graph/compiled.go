@@ -85,9 +85,20 @@ func (g *CompiledGraph[I, O]) ResumeStream(ctx context.Context, options ...runna
 	if ctx == nil {
 		return nil, errors.New("graph context cannot be nil")
 	}
-	reader, writer := runnable.Pipe[O](ctx)
+	reader, writer := runnable.Pipe[O](context.WithoutCancel(ctx))
 	go func() {
-		output, err := g.runtime.resumeRuntime(reader.Context(), options...)
+		executionCtx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-reader.Context().Done():
+				cancel(reader.Context().Err())
+			case <-done:
+			}
+		}()
+		defer close(done)
+		output, err := g.runtime.resumeRuntime(executionCtx, options...)
 		if err != nil {
 			_ = writer.CloseWithError(err)
 			return

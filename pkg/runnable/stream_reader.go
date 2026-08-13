@@ -123,6 +123,9 @@ func (r *StreamReader[T]) Close() error {
 		return nil
 	}
 	r.state.finish(context.Canceled)
+	if r.state.cancel != nil {
+		r.state.cancel()
+	}
 	return nil
 }
 
@@ -174,9 +177,6 @@ func (s *pipeState[T]) finish(err error) {
 		s.terminal = err
 		s.mu.Unlock()
 		close(s.done)
-		if s.cancel != nil {
-			s.cancel()
-		}
 	})
 }
 

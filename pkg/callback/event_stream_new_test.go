@@ -49,3 +49,16 @@ func TestEventStreamFailureUsesManagerErrorSink(t *testing.T) {
 		t.Fatalf("reported = %#v", reported)
 	}
 }
+
+func TestEventStreamIsolationStopsInheritedCallbacks(t *testing.T) {
+	var calls int
+	ctx := callback.WithStreamCallbacks(context.Background(), callback.StreamCallbackOf[string]("parent", func(context.Context, string) error {
+		calls++
+		return nil
+	}))
+	callback.EmitStream(ctx, "visible")
+	callback.EmitStream(callback.WithStreamCallbacksIsolated(ctx), "hidden")
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}

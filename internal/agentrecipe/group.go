@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
@@ -133,7 +134,7 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 				roundOutput = schema.CloneMessages(event.Messages)
 			}
 			roundOutput = withSpeaker(roundOutput, selected)
-			graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: appendMessages(run.response, roundOutput)})
+			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: appendMessages(run.response, roundOutput)})
 		}
 		if !sawDone {
 			return nil, fmt.Errorf("group member %q stream closed without done event", selected)

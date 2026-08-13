@@ -420,22 +420,22 @@ Commit: `feat(graph): 编译离散与流式执行计划`
 - Removes: MessageGraph, MessageState, StreamMessages, ResumeMessages, and DataSink
 - Preserves generic Graph EventStream forwarding and control lifecycle
 
-- [ ] **Step 1: Add a failing Graph dependency boundary test**
+- [x] **Step 1: Add a failing Graph dependency boundary test**
 
 Parse imports under `pkg/graph` and reject `schema`, `llm`, `tool`, `retrieval`,
 `agent`, and `extensions/mcp`.
 
-- [ ] **Step 2: Move message adapters to Agent recipe ownership**
+- [x] **Step 2: Move message adapters to Agent recipe ownership**
 
 Translate Agent message streaming to EventStream and final Graph output. Update
 Agent tests to import no message helpers from Graph.
 
-- [ ] **Step 3: Delete framework and compose**
+- [x] **Step 3: Delete framework and compose**
 
 Replace examples with direct Graph compilation and application-owned maps where
 registration is needed.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run: `go test -count=1 ./...`
 

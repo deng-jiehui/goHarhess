@@ -286,7 +286,6 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			}
 			invokeCtx := branchCtx
 			if branch.nestedGraph {
-				invokeCtx = WithDataSinkIsolated(invokeCtx, nil)
 				invokeCtx = withoutRuntimeStateCheckpointProvider(invokeCtx)
 			}
 			output, err := branch.invoke(invokeCtx, input, branchPlan.ForwardOptionsFor(runnable.OptionScopeNode))

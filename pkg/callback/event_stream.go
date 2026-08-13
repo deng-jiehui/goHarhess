@@ -17,6 +17,16 @@ type StreamCallback struct {
 
 type streamCallbacksContextKey struct{}
 
+// WithStreamCallbacksIsolated starts a child observation scope without
+// inheriting parent stream sinks. It is used for nested Graph/Agent runs that
+// explicitly own forwarding of their live data.
+func WithStreamCallbacksIsolated(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, streamCallbacksContextKey{}, []StreamCallback(nil))
+}
+
 // StreamCallbackOf creates a typed stream observer registration.
 func StreamCallbackOf[T any](name string, fn func(context.Context, T) error) StreamCallback {
 	return StreamCallback{

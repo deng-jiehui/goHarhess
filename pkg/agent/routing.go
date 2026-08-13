@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"goharness/internal/agentrecipe"
+	"goharness/pkg/callback"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
@@ -231,7 +232,7 @@ func (a *RoutingAgent) dispatch(ctx context.Context, calls []agentrecipe.Call, m
 		runnableOptions := runOptionsAsRunnable(childOptions)
 		runnableOptions = append(runnableOptions, runOpts.GlobalOptions...)
 		runnableOptions = append(runnableOptions, runOpts.NodeOptions...)
-		childCtx := graph.WithDataSinkIsolated(ctx, nil)
+		childCtx := callback.WithStreamCallbacksIsolated(ctx)
 		childCtx = graph.WithEventSinkIsolated(childCtx, nil)
 		childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
 		stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), runnableOptions...)
@@ -280,8 +281,8 @@ func consumeRoutedStream(ctx context.Context, stream runnable.Stream[schema.Mess
 				return nil, item.Err
 			}
 			event := item.Value
-			if event.Kind != schema.MessageEventDone && !graph.EmitData(ctx, event) {
-				return nil, ctx.Err()
+			if event.Kind != schema.MessageEventDone {
+				callback.EmitStream(ctx, event)
 			}
 			switch event.Kind {
 			case schema.MessageEventDelta:

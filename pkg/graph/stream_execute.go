@@ -36,15 +36,28 @@ func (g *Graph[I, O]) streamRuntime(ctx context.Context, input I, options ...run
 	if err != nil {
 		return nil, fmt.Errorf("resolve graph checkpoint: %w", err)
 	}
-	reader, writer := runnable.Pipe[O](resolvedCtx)
+	// Keep the output transport alive long enough to deliver a typed
+	// interruption/checkpoint error after the caller cancels the run. The
+	// execution context still observes the caller cancellation below.
+	reader, writer := runnable.Pipe[O](context.WithoutCancel(resolvedCtx))
 	go func() {
-		executionCtx := reader.Context()
+		executionCtx, cancel := context.WithCancelCause(resolvedCtx)
+		defer cancel(nil)
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-reader.Context().Done():
+				cancel(reader.Context().Err())
+			case <-done:
+			}
+		}()
+		defer close(done)
 		var output O
 		var runErr error
 		if configured || g.hasParallelNode() {
 			output, runErr = g.invokeRuntimeWithPlan(executionCtx, input, plan, checkpoint, nil)
 		} else {
-			output, runErr = g.executeStreamPlan(executionCtx, input, plan)
+			output, runErr = g.executeStreamPlan(executionCtx, input, plan, checkpoint)
 		}
 		if runErr != nil {
 			_ = writer.CloseWithError(runErr)
@@ -67,7 +80,7 @@ func (g *Graph[I, O]) hasParallelNode() bool {
 	return false
 }
 
-func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runnable.OptionPlan) (O, error) {
+func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runnable.OptionPlan, checkpoint checkpointConfig) (O, error) {
 	var zero O
 	ctx, err := enterGraphExecution(ctx, g.Name())
 	if err != nil {
@@ -96,6 +109,8 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 	current := streamCarrier{value: erasedValue{typ: g.inputType, value: any(input)}}
 	currentNode := Start
 	pending := make([]pendingStreamNode, 0)
+	visits := map[string]int{}
+	cursor := statepkg.CursorStackFromContext(ctx)
 	for step := 0; ; step++ {
 		if step > maxSteps {
 			return zero, graphFailure(ctx, &ExecutionError{Code: "graph.max_steps", NodeID: currentNode, Step: step, Err: fmt.Errorf("maximum of %d node executions exceeded", maxSteps)})
@@ -146,7 +161,7 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 				return zero, graphFailure(ctx, &ExecutionError{Code: "node.collect", NodeID: next, Step: step, Err: err})
 			}
 		}
-		nodeCtx := beginNodeDataScope(ctx)
+		nodeCtx := ctx
 		nodeCtx = bindEventContext(nodeCtx, Event{Type: EventNodeStart, NodeID: next, Step: step})
 		if err := publishControl(nodeCtx, Event{Type: EventNodeStart, NodeID: next, Step: step}); err != nil {
 			return zero, graphFailure(nodeCtx, err)
@@ -157,6 +172,7 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		}
 		nodeCtx = runnable.WithOptionPlan(nodeCtx, nodePlan)
 		forwarded := nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)
+		visits[next]++
 		nodeInput := current.value.value
 		if node.pre != nil {
 			if runtimeState == nil {
@@ -164,6 +180,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 			}
 			nodeInput, err = node.pre.invoke(nodeCtx, runtimeState)
 			if err != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, err); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointBeforeNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.pre", NodeID: next, Step: step, Err: err})
 			}
 		}
@@ -173,6 +192,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		case current.stream != nil && node.transform != nil:
 			stream, transformErr := node.transform(nodeCtx, *current.stream, forwarded)
 			if transformErr != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, transformErr); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointDuringNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.transform", NodeID: next, Step: step, Err: transformErr})
 			}
 			output = streamCarrier{stream: &stream}
@@ -180,6 +202,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		case current.stream != nil && node.collect != nil:
 			value, collectErr := node.collect(nodeCtx, *current.stream, forwarded)
 			if collectErr != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, collectErr); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointDuringNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.collect", NodeID: next, Step: step, Err: collectErr})
 			}
 			finishPendingStreamNodes(&pending)
@@ -190,6 +215,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		case node.stream != nil:
 			stream, streamErr := node.stream(nodeCtx, nodeInput, forwarded)
 			if streamErr != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, streamErr); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointDuringNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.stream", NodeID: next, Step: step, Err: streamErr})
 			}
 			output = streamCarrier{stream: &stream}
@@ -197,6 +225,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		default:
 			value, invokeErr := node.invoke(nodeCtx, nodeInput, forwarded)
 			if invokeErr != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, invokeErr); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointDuringNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.invoke", NodeID: next, Step: step, Err: invokeErr})
 			}
 			output = streamCarrier{value: erasedValue{typ: node.outputType, value: value}}
@@ -213,6 +244,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.post", NodeID: next, Step: step, Err: errors.New("runtime State is unavailable")})
 			}
 			if err := node.post.invoke(context.WithoutCancel(nodeCtx), runtimeState, output.value.value); err != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, err); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointAfterCommit, next, step+1, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.post", NodeID: next, Step: step, Err: err})
 			}
 			finishStreamNode(nodeCtx, next, step)
@@ -274,7 +308,6 @@ func removePendingCurrent(pending *[]pendingStreamNode, id string, step int) {
 }
 
 func finishStreamNode(ctx context.Context, id string, step int) {
-	finishNodeDataScope(ctx, false)
 	_ = publishControl(ctx, Event{Type: EventNodeOutput, NodeID: id, Step: step})
 	_ = publishControl(ctx, Event{Type: EventNodeEnd, NodeID: id, Step: step})
 }

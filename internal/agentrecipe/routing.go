@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
@@ -156,9 +157,7 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 				if hooks.NameMessages != nil {
 					messages = hooks.NameMessages(messages)
 				}
-				if !graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages}) {
-					return nil, ctx.Err()
-				}
+				callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages})
 			}
 		}
 	streamClosed:
@@ -228,9 +227,7 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 			if hooks.NameMessages != nil {
 				messages = hooks.NameMessages(messages)
 			}
-			if !graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages}) {
-				return nil, ctx.Err()
-			}
+			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages})
 			return updated, nil
 		}
 		observations := make([]schema.Message, 0, len(results))
@@ -247,9 +244,7 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		if hooks.NameMessages != nil {
 			emitted = hooks.NameMessages(emitted)
 		}
-		if !graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted}) {
-			return nil, ctx.Err()
-		}
+		callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
 		return updated, nil
 	})
 	if err := g.AddNode("dispatch", dispatch,

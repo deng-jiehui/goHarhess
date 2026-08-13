@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"sync"
 	"testing"
 
 	"goharness/pkg/graph"
@@ -65,101 +64,6 @@ func addStreamFinish(t *testing.T, g *graph.Graph[[]schema.Message, []schema.Mes
 	}
 	if err := g.AddEdge("finish", graph.End); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestMessageStreamSeparatesDataAndControlPlanes(t *testing.T) {
-	g := newStreamGraph(t, "planes")
-	node := runnable.Func[*streamState, *streamState](func(ctx context.Context, current *streamState, _ ...runnable.Option) (*streamState, error) {
-		graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventDelta, Messages: []schema.Message{schema.AssistantMessage("hel")}})
-		message := schema.AssistantMessage("hello")
-		current.Messages = append(current.Messages, message)
-		current.Output = append(current.Output, message)
-		return current, nil
-	})
-	addStreamNode(t, g, "model", node)
-	_ = g.AddEdge(graph.Start, "model")
-	addStreamFinish(t, g, "model")
-	var mu sync.Mutex
-	var control []graph.EventType
-	ctx := graph.WithEventSink(context.Background(), graph.EventSinkFunc(func(_ context.Context, event graph.Event) {
-		mu.Lock()
-		control = append(control, event.Type)
-		mu.Unlock()
-	}))
-	stream, err := graph.StreamMessages(ctx, mustCompile(t, g), []schema.Message{schema.UserMessage("hi")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var data []schema.MessageEventKind
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		data = append(data, item.Value.Kind)
-	}
-	if fmt.Sprint(data) != fmt.Sprint([]schema.MessageEventKind{schema.MessageEventDelta, schema.MessageEventSnapshot, schema.MessageEventDone}) {
-		t.Fatalf("data=%#v", data)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if control[0] != graph.EventGraphStart || control[len(control)-1] != graph.EventGraphEnd {
-		t.Fatalf("control=%#v", control)
-	}
-}
-
-func TestStreamDoesNotDuplicateAuthoritativeSnapshot(t *testing.T) {
-	g := newStreamGraph(t, "snapshot")
-	node := runnable.Func[*streamState, *streamState](func(ctx context.Context, current *streamState, _ ...runnable.Option) (*streamState, error) {
-		current.Output = []schema.Message{schema.AssistantMessage("answer")}
-		graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: current.Output})
-		return current, nil
-	})
-	addStreamNode(t, g, "model", node)
-	_ = g.AddEdge(graph.Start, "model")
-	addStreamFinish(t, g, "model")
-	stream, err := graph.StreamMessages(context.Background(), mustCompile(t, g), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshots := 0
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		if item.Value.Kind == schema.MessageEventSnapshot {
-			snapshots++
-		}
-	}
-	if snapshots != 1 {
-		t.Fatalf("snapshots=%d", snapshots)
-	}
-}
-
-func TestStreamEmitsEmptyAuthoritativeFinalSnapshot(t *testing.T) {
-	g := newStreamGraph(t, "empty-final")
-	node := runnable.Func[*streamState, *streamState](func(ctx context.Context, current *streamState, _ ...runnable.Option) (*streamState, error) {
-		graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: []schema.Message{schema.AssistantMessage("stale")}})
-		return current, nil
-	})
-	addStreamNode(t, g, "model", node)
-	_ = g.AddEdge(graph.Start, "model")
-	addStreamFinish(t, g, "model")
-	stream, err := graph.StreamMessages(context.Background(), mustCompile(t, g), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var snapshots [][]schema.Message
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		if item.Value.Kind == schema.MessageEventSnapshot {
-			snapshots = append(snapshots, item.Value.Messages)
-		}
-	}
-	if len(snapshots) != 2 || len(snapshots[0]) != 1 || len(snapshots[1]) != 0 {
-		t.Fatalf("snapshots=%#v", snapshots)
 	}
 }
 
@@ -286,7 +190,16 @@ func TestRecoveryArchitectureBoundaries(t *testing.T) {
 	}
 
 	assertPackageImportsNoProjectPackage(t, filepath.Join(root, "pkg", "control"))
-	assertPackageDoesNotImport(t, filepath.Join(root, "pkg", "graph"), "goharness/pkg/tool")
+	for _, forbidden := range []string{
+		"goharness/pkg/agent",
+		"goharness/pkg/llm",
+		"goharness/pkg/retrieval",
+		"goharness/pkg/schema",
+		"goharness/pkg/tool",
+		"goharness/extensions/mcp",
+	} {
+		assertPackageDoesNotImport(t, filepath.Join(root, "pkg", "graph"), forbidden)
+	}
 }
 
 func repositoryRoot(t *testing.T) string {

@@ -239,7 +239,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 		visits[next]++
 		frame := statepkg.CursorFrame{Graph: g.Name(), Node: next, Step: step, Iteration: visits[next] - 1}
 		nodeCtx := statepkg.WithCursorStack(ctx, append(cursor.Clone(), frame))
-		nodeCtx = beginNodeDataScope(nodeCtx)
 		nodeStart := Event{Type: EventNodeStart, NodeID: next, Step: step}
 		nodeCtx = bindEventContext(nodeCtx, nodeStart)
 		if err := publishControl(nodeCtx, nodeStart); err != nil {
@@ -267,7 +266,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 				return zero, graphFailure(nodeCtx, err)
 			}
 			current = erasedValue{typ: g.stateType, value: runtimeState}
-			finishNodeDataScope(nodeCtx, false)
 			if err := publishControl(nodeCtx, Event{Type: EventNodeOutput, NodeID: next, Step: step}); err != nil {
 				return zero, graphFailure(nodeCtx, err)
 			}
@@ -307,7 +305,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 		}
 		invokeCtx := nodeCtx
 		if node.nestedGraph {
-			invokeCtx = WithDataSinkIsolated(invokeCtx, nil)
 			invokeCtx = withoutRuntimeStateCheckpointProvider(invokeCtx)
 		}
 		output, invokeErr := node.invoke(invokeCtx, nodeInput, nodePlan.ForwardOptionsFor(runnable.OptionScopeNode))
@@ -333,7 +330,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 			}
 		}
 		current = erasedValue{typ: node.outputType, value: output}
-		finishNodeDataScope(nodeCtx, false)
 		if err := publishControl(nodeCtx, Event{Type: EventNodeOutput, NodeID: next, Step: step}); err != nil {
 			return zero, graphFailure(nodeCtx, err)
 		}
