@@ -138,16 +138,6 @@ func WithCheckpointTimeout(value time.Duration) Option {
 	return func(config *BaseConfig) { config.CheckpointTimeout = value }
 }
 
-// WithBreakpointers replaces the Agent-wide durable breakpoint policies.
-func WithBreakpointers(values ...Breakpointer) Option {
-	return func(config *BaseConfig) { config.Breakpointers = append([]Breakpointer(nil), values...) }
-}
-
-// WithBreakpointer appends one Agent-wide durable breakpoint policy.
-func WithBreakpointer(value Breakpointer) Option {
-	return func(config *BaseConfig) { config.Breakpointers = append(config.Breakpointers, value) }
-}
-
 func WithExtraGenerateConfig(value llm.GenerateConfig) Option {
 	return func(config *BaseConfig) {
 		config.ExtraGenerateConfig = llm.MergeGenerateConfig(value, nil)

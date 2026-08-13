@@ -43,8 +43,6 @@ type BaseConfig struct {
 	// CheckpointStore enables durable conversations when a run supplies a conversation ID.
 	CheckpointStore   state.Store
 	CheckpointTimeout time.Duration
-	// Breakpointers synchronously turn framework safe points into durable interrupts.
-	Breakpointers []Breakpointer
 	// Numeric execution limits can also be set with Agent initialization Options.
 	MaxDepth            int
 	Timeout             time.Duration
@@ -74,7 +72,6 @@ type Base struct {
 	contextBuilder      runnable.Runnable[contextengine.Request, contextengine.Result]
 	checkpointStore     state.Store
 	checkpointTimeout   time.Duration
-	breakpointers       []Breakpointer
 	limits              agentLimits
 	extraGenerateConfig llm.GenerateConfig
 }
@@ -94,11 +91,6 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 	}
 	if cfg.ContextBuilder == nil {
 		cfg.ContextBuilder = contextengine.NewDefaultContextBuilder()
-	}
-	for index, breakpointer := range cfg.Breakpointers {
-		if breakpointer == nil {
-			return nil, fmt.Errorf("configure agent %q: breakpointer at index %d cannot be nil", cfg.Name, index)
-		}
 	}
 	runtime, err := toolruntime.New(cfg.Middlewares, toolruntime.Config{
 		MaxDepth:       cfg.MaxDepth,
@@ -125,7 +117,6 @@ func NewBase(cfg BaseConfig, opts ...Option) (*Base, error) {
 		contextBuilder:      cfg.ContextBuilder,
 		checkpointStore:     cfg.CheckpointStore,
 		checkpointTimeout:   cfg.CheckpointTimeout,
-		breakpointers:       append([]Breakpointer(nil), cfg.Breakpointers...),
 		limits:              limitsFromConfig(cfg),
 		extraGenerateConfig: cfg.ExtraGenerateConfig,
 	}

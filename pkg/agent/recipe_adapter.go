@@ -37,16 +37,15 @@ func fromRecipeCalls(calls []agentrecipe.Call) []toolCallRequest {
 	return result
 }
 
-func reactRecipe(base *Base) (*agentrecipe.Recipe, error) {
+func reactRecipe(base *Base, prepareModelMessages func([]schema.Message) []schema.Message) (*agentrecipe.Recipe, error) {
 	return agentrecipe.NewToolRecipe(string(AgentKindReact), agentrecipe.Hooks{
 		Name: base.Name(),
 		CallModel: func(ctx context.Context, messages []schema.Message) (runnable.Stream[llm.Event], error) {
 			opts, _ := resolvedRunOptionsFromContext(ctx)
+			if prepareModelMessages != nil {
+				messages = prepareModelMessages(messages)
+			}
 			return base.callLLM(ctx, messages, base.toolDefinitions(), opts)
-		},
-		CheckBreakpoint: func(ctx context.Context, messages, response []schema.Message, calls int) error {
-			opts, _ := resolvedRunOptionsFromContext(ctx)
-			return base.checkBreakpoint(ctx, opts.session, opts, AgentKindReact, BreakpointBeforeLLM, messages, response, calls, nil, nil)
 		},
 		NewToolBatch: func(ctx context.Context) agentrecipe.ToolBatch {
 			opts, _ := resolvedRunOptionsFromContext(ctx)

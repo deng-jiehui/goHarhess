@@ -7,6 +7,7 @@ import (
 
 	"goharness/pkg/callback"
 	"goharness/pkg/contextengine"
+	"goharness/pkg/control"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -21,7 +22,6 @@ type runLifecycle struct {
 	metrics    callback.Metrics
 	session    *conversationSession
 	opts       RunOptions
-	initial    []schema.Message
 }
 
 func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
@@ -72,7 +72,6 @@ func (b *Base) beginRun(ctx context.Context, messages []schema.Message, opts Run
 		dispatcher: dispatcher,
 		operation:  operation,
 		opts:       opts,
-		initial:    schema.CloneMessages(messages),
 		metrics: callback.Metrics{
 			InputMessages: len(messages),
 			InputBytes:    messageBytes(messages),
@@ -117,7 +116,11 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 		for item := range stream {
 			if item.Err != nil {
 				l.fail(item.Err)
-				emitMessageItem(l.ctx, out, item)
+				if isPersistedInterruption(item.Err) || interruptCauseRequested(l.ctx) {
+					out <- item
+				} else {
+					emitMessageItem(l.ctx, out, item)
+				}
 				return
 			}
 			// The lifecycle owns the terminal event. Upstream completion only
@@ -142,6 +145,9 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 			event.Metadata["agent.chunk_index"] = chunkIndex
 			_ = l.dispatcher.Dispatch(l.ctx, event)
 			if !emitMessageItem(l.ctx, out, item) {
+				if _, interrupted := control.AsInterrupt(context.Cause(l.ctx)); interrupted {
+					continue
+				}
 				l.fail(l.ctx.Err())
 				return
 			}
@@ -152,15 +158,6 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 		}
 		if !sawDone {
 			err := errors.New("agent stream closed without done event")
-			l.fail(err)
-			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: err})
-			return
-		}
-		working := appendMessages(l.initial, finalMessages)
-		if err := l.base.checkBreakpoint(
-			l.ctx, l.session, l.opts, l.opts.agentKind, BreakpointBeforeCommit,
-			working, finalMessages, 0, nil, nil,
-		); err != nil {
 			l.fail(err)
 			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: err})
 			return

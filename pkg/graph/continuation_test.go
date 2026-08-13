@@ -12,6 +12,7 @@ import (
 	"goharness/pkg/control"
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
+	"goharness/pkg/schema"
 )
 
 type byteCheckpointStore struct {
@@ -155,6 +156,109 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 	loads, saves := store.counts()
 	if loads != 1 || saves != 1 {
 		t.Fatalf("store loads=%d saves=%d", loads, saves)
+	}
+}
+
+func TestStreamMessagesDeliversPersistedInterruptionAfterContextCancellation(t *testing.T) {
+	store := &byteCheckpointStore{}
+	started := make(chan struct{}, 1)
+	type streamState struct{ Messages []schema.Message }
+	g := graph.NewGraph[[]schema.Message, []schema.Message]("interruptible-message-stream")
+	if err := g.SetStateFactory(func(_ context.Context, input []schema.Message) (*streamState, error) {
+		return &streamState{Messages: schema.CloneMessages(input)}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	node := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err := g.AddNode("model", node,
+		graph.WithPreHandler(func(_ context.Context, state *streamState) ([]schema.Message, error) {
+			return schema.CloneMessages(state.Messages), nil
+		}),
+		graph.WithPostHandler(func(_ context.Context, state *streamState, output []schema.Message) error {
+			state.Messages = schema.CloneMessages(output)
+			return nil
+		}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(graph.Start, "model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge("model", graph.End); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stream, err := graph.StreamMessages(ctx, g, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "stream-interrupt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("graph node did not start")
+	}
+	cancel(control.RequestInterrupt("pause stream", nil))
+	select {
+	case item, ok := <-stream:
+		if !ok || !errors.Is(item.Err, graph.ErrInterrupted) {
+			t.Fatalf("stream item=%#v open=%t", item, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream did not deliver interruption")
+	}
+}
+
+func TestStreamMessagesDeliversCheckpointSaveFailureAfterInterruptRequest(t *testing.T) {
+	saveErr := errors.New("stream checkpoint unavailable")
+	store := &byteCheckpointStore{saveErr: saveErr}
+	started := make(chan struct{}, 1)
+	type streamState struct{ Messages []schema.Message }
+	g := graph.NewGraph[[]schema.Message, []schema.Message]("failed-message-checkpoint")
+	if err := g.SetStateFactory(func(_ context.Context, input []schema.Message) (*streamState, error) {
+		return &streamState{Messages: schema.CloneMessages(input)}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	node := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err := g.AddNode("model", node,
+		graph.WithPreHandler(func(_ context.Context, state *streamState) ([]schema.Message, error) {
+			return schema.CloneMessages(state.Messages), nil
+		}),
+		graph.WithPostHandler(func(_ context.Context, state *streamState, output []schema.Message) error {
+			state.Messages = schema.CloneMessages(output)
+			return nil
+		}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(graph.Start, "model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge("model", graph.End); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stream, err := graph.StreamMessages(ctx, g, []schema.Message{schema.UserMessage("input")}, graph.WithCheckpoint(store, "failed-stream"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancel(control.RequestInterrupt("pause", nil))
+	select {
+	case item, ok := <-stream:
+		if !ok || !errors.Is(item.Err, saveErr) || errors.Is(item.Err, graph.ErrInterrupted) {
+			t.Fatalf("stream item=%#v open=%t", item, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream did not deliver checkpoint failure")
 	}
 }
 

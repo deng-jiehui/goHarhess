@@ -156,13 +156,6 @@ func normalizeCheckpoint(checkpoint corestate.Checkpoint) corestate.Checkpoint {
 	if checkpoint.SchemaVersion == 0 {
 		checkpoint.SchemaVersion = corestate.CurrentCheckpointSchemaVersion
 	}
-	if checkpoint.Status == "" {
-		if checkpoint.Continuation != nil {
-			checkpoint.Status = corestate.CheckpointStatusInterrupted
-		} else {
-			checkpoint.Status = corestate.CheckpointStatusReady
-		}
-	}
 	return checkpoint
 }
 

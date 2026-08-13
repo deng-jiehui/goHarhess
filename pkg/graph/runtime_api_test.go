@@ -2,14 +2,12 @@ package graph_test
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
-	"goharness/pkg/state"
 )
 
 type runtimeAPIState struct {
@@ -67,71 +65,6 @@ func TestRuntimeStateFactoryRunsOnceAndSequentialHandlersSharePointer(t *testing
 	}
 	if output != "input:first:second" || factoryCalls.Load() != 1 {
 		t.Fatalf("output=%q factory calls=%d", output, factoryCalls.Load())
-	}
-}
-
-func TestRuntimeStateResumeDecodesOnceAndRequiresPreHandler(t *testing.T) {
-	var factoryCalls atomic.Int32
-	var decodes atomic.Int32
-	codec, err := graph.NewStateCodec[*runtimeAPIState](
-		"runtime-api-state",
-		1,
-		func(_ context.Context, current *runtimeAPIState) ([]byte, error) { return json.Marshal(current) },
-		func(_ context.Context, data []byte) (*runtimeAPIState, error) {
-			decodes.Add(1)
-			var current runtimeAPIState
-			return &current, json.Unmarshal(data, &current)
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpointData, err := json.Marshal(&runtimeAPIState{Text: "restored"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := state.GraphStateCheckpoint{CodecID: "runtime-api-state", Version: 1, Data: checkpointData}
-
-	build := func(withPre bool) *graph.Graph[string, string] {
-		g := graph.NewGraph[string, string]("runtime-resume")
-		if err := g.SetStateFactory(func(_ context.Context, input string) (*runtimeAPIState, error) {
-			factoryCalls.Add(1)
-			return &runtimeAPIState{Text: input}, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := g.SetStateCodec(codec); err != nil {
-			t.Fatal(err)
-		}
-		node := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
-		var options []graph.NodeOption
-		if withPre {
-			options = append(options, graph.WithPreHandler(func(_ context.Context, current *runtimeAPIState) (string, error) {
-				return current.Text, nil
-			}))
-		}
-		if err := g.AddNode("work", node, options...); err != nil {
-			t.Fatal(err)
-		}
-		if err := g.AddEdge(graph.Start, "work"); err != nil {
-			t.Fatal(err)
-		}
-		if err := g.AddEdge("work", graph.End); err != nil {
-			t.Fatal(err)
-		}
-		return g
-	}
-
-	ctx := state.WithGraphStateCheckpoint(context.Background(), checkpoint)
-	ctx = state.WithCursorStack(ctx, state.CursorStack{{Graph: "runtime-resume", Node: "work", Step: 0}})
-	output, err := build(true).Invoke(ctx, "ignored")
-	if err != nil || output != "restored" || factoryCalls.Load() != 0 || decodes.Load() != 1 {
-		t.Fatalf("output=%q factory=%d decodes=%d err=%v", output, factoryCalls.Load(), decodes.Load(), err)
-	}
-
-	_, err = build(false).Invoke(ctx, "ignored")
-	if err == nil || !strings.Contains(err.Error(), "graph.resume.type_mismatch") {
-		t.Fatalf("resume without PreHandler error = %v", err)
 	}
 }
 

@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"goharness/pkg/callback"
+	"goharness/pkg/control"
+	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
-	"goharness/pkg/state"
 )
 
 type resolvedRunOptionsKey struct{}
@@ -43,14 +44,10 @@ type RunOptions struct {
 	ContextWindowTokens int
 	StateValues         map[string]any
 	CheckpointBypass    bool
-	Breakpointers       []Breakpointer
-	InterruptSignal     *InterruptSignal
+	GraphOptions        []runnable.Option
 	resume              bool
-	continuation        *state.Continuation
 	agentKind           AgentKind
-	interruptBypass     bool
 	session             *conversationSession
-	graphState          *state.GraphStateCheckpoint
 }
 
 type RunOption func(*RunOptions)
@@ -188,6 +185,14 @@ func WithConversationID(value string) RunOption {
 	return func(opts *RunOptions) { opts.ConversationID = value }
 }
 
+// WithCheckpoint enables Graph-owned execution interruption and recovery.
+// Its key is independent from WithConversationID and is owned by the caller.
+func WithCheckpoint(store control.CheckpointStore, key string) RunOption {
+	return func(opts *RunOptions) {
+		opts.GraphOptions = append(opts.GraphOptions, graph.WithCheckpoint(store, key))
+	}
+}
+
 // WithContextWindowTokens overrides the configured context window for one run.
 func WithContextWindowTokens(value int) RunOption {
 	return func(opts *RunOptions) { opts.ContextWindowTokens = value }
@@ -210,14 +215,4 @@ func WithStateValues(values map[string]any) RunOption {
 // WithCheckpointBypass prevents nested Agents from loading or saving state.
 func WithCheckpointBypass() RunOption {
 	return func(opts *RunOptions) { opts.CheckpointBypass = true }
-}
-
-// WithRunBreakpointer adds a durable breakpoint policy for one run.
-func WithRunBreakpointer(value Breakpointer) RunOption {
-	return func(opts *RunOptions) { opts.Breakpointers = append(opts.Breakpointers, value) }
-}
-
-// WithInterruptSignal checks an externally controlled signal at safe points.
-func WithInterruptSignal(value *InterruptSignal) RunOption {
-	return func(opts *RunOptions) { opts.InterruptSignal = value }
 }

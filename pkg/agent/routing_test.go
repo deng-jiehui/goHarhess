@@ -11,7 +11,6 @@ import (
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 func routingCall(name string) schema.Message {
@@ -172,69 +171,6 @@ func TestRoutingAgentRejectsUnknownMode(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported routing mode") {
 		t.Fatalf("invalid mode error = %v", err)
-	}
-}
-
-func TestRoutingAgentResumeDoesNotRepeatCompletedSubAgent(t *testing.T) {
-	store := state.NewMemoryStore()
-	var childCalls atomic.Int32
-	worker, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "worker",
-		Model: llm.NewHandlerModel(func(context.Context, []schema.Message, llm.ChatOptions) ([]schema.Message, error) {
-			childCalls.Add(1)
-			return []schema.Message{schema.AssistantMessage("worker result")}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:            "supervisor",
-			Model:           llm.NewScriptedModel([]schema.Message{routingCall("worker")}),
-			CheckpointStore: store,
-			Breakpointers: []agent.Breakpointer{agent.BreakpointFunc(func(_ context.Context, point agent.Breakpoint) (agent.InterruptDecision, error) {
-				return agent.InterruptDecision{Interrupt: point.LLMCalls == 1, Reason: "replace supervisor"}, nil
-			})},
-		},
-		SubAgents:     []agent.Agent{worker},
-		Mode:          agent.RoutingModeSupervisor,
-		ReturnControl: true,
-		MaxSteps:      3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = first.Invoke(context.Background(), []schema.Message{schema.UserMessage("investigate")}, agent.WithConversationID("routing-resume"))
-	if !errors.Is(err, agent.ErrInterrupted) || childCalls.Load() != 1 {
-		t.Fatalf("initial err=%v child calls=%d", err, childCalls.Load())
-	}
-	checkpoint, found, err := store.Load(context.Background(), "routing-resume")
-	if err != nil || !found || checkpoint.Continuation == nil || checkpoint.Continuation.Engine == nil {
-		t.Fatalf("routing checkpoint=%#v found=%t err=%v", checkpoint, found, err)
-	}
-	if checkpoint.Continuation.Engine.LLMCalls != 1 || checkpoint.Continuation.LLMCalls != 1 {
-		t.Fatalf("routing engine checkpoint=%#v continuation=%#v", checkpoint.Continuation.Engine, checkpoint.Continuation)
-	}
-
-	second, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:            "replacement",
-			Model:           llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("final after reconnect")}),
-			CheckpointStore: store,
-		},
-		SubAgents: []agent.Agent{worker},
-		Mode:      agent.RoutingModeSupervisor,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := agent.Resume(context.Background(), second, "routing-resume")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if childCalls.Load() != 1 || len(output) == 0 || output[len(output)-1].Text() != "final after reconnect" {
-		t.Fatalf("resumed output=%#v child calls=%d", output, childCalls.Load())
 	}
 }
 

@@ -2,7 +2,6 @@ package agent_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,7 +10,6 @@ import (
 	"goharness/pkg/agent"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 type recordingAgent struct {
@@ -170,41 +168,5 @@ func TestGroupChatRejectsMemberStreamWithoutDone(t *testing.T) {
 	_, err = group.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")})
 	if err == nil || !strings.Contains(err.Error(), "without done event") {
 		t.Fatalf("group error=%v", err)
-	}
-}
-
-func TestGroupChatPersistsTypedEngineCheckpointState(t *testing.T) {
-	store := state.NewMemoryStore()
-	group, err := agent.NewGroupChat(agent.GroupChatConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:            "team",
-			CheckpointStore: store,
-			Breakpointers: []agent.Breakpointer{agent.BreakpointFunc(func(_ context.Context, point agent.Breakpoint) (agent.InterruptDecision, error) {
-				return agent.InterruptDecision{Interrupt: point.LLMCalls == 1, Reason: "pause round"}, nil
-			})},
-		},
-		Agents:    []agent.Agent{&recordingAgent{name: "alpha"}, &recordingAgent{name: "beta"}},
-		MaxRounds: 2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = group.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")}, agent.WithConversationID("group-engine"))
-	if !errors.Is(err, agent.ErrInterrupted) {
-		t.Fatalf("Invoke error = %v", err)
-	}
-	checkpoint, found, err := store.Load(context.Background(), "group-engine")
-	if err != nil || !found || checkpoint.Continuation == nil || checkpoint.Continuation.Engine == nil {
-		t.Fatalf("checkpoint = %#v, found=%t, err=%v", checkpoint, found, err)
-	}
-	engine := checkpoint.Continuation.Engine
-	if engine.Round != 1 || engine.LastAgent != "alpha" {
-		t.Fatalf("engine checkpoint = %#v", engine)
-	}
-	if _, exists := checkpoint.Continuation.Cursor["last_agent"]; exists {
-		t.Fatalf("last agent leaked into generic cursor: %#v", checkpoint.Continuation.Cursor)
-	}
-	if _, err := checkpoint.JSON(); err != nil {
-		t.Fatalf("engine checkpoint is not portable JSON: %v", err)
 	}
 }

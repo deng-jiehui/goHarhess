@@ -14,6 +14,7 @@ import (
 type RoutingRunConfig struct {
 	MaxSteps      int
 	ReturnControl bool
+	Input         []schema.Message
 	Steps         int
 	Response      []schema.Message
 }
@@ -26,6 +27,7 @@ type routingRunState struct {
 	pending       []Call
 	dispatchInput []schema.Message
 	continueRun   bool
+	input         []schema.Message
 }
 
 type routingRunContextKey struct{}
@@ -36,8 +38,36 @@ func WithRoutingRunConfig(ctx context.Context, cfg RoutingRunConfig) context.Con
 	}
 	return context.WithValue(ctx, routingRunContextKey{}, &routingRunState{
 		maxSteps: cfg.MaxSteps, returnControl: cfg.ReturnControl, steps: cfg.Steps,
-		response: schema.CloneMessages(cfg.Response),
+		response: schema.CloneMessages(cfg.Response), input: schema.CloneMessages(cfg.Input),
 	})
+}
+
+func hydrateRoutingRun(ctx context.Context, state *RecipeState) error {
+	run, err := routingStateFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	run.input = schema.CloneMessages(state.Input)
+	run.steps = state.RoutingSteps
+	run.response = schema.CloneMessages(state.Response)
+	run.pending = cloneCalls(state.Pending)
+	run.dispatchInput = schema.CloneMessages(state.DispatchInput)
+	run.continueRun = state.ContinueRun
+	return nil
+}
+
+func commitRoutingRun(ctx context.Context, state *RecipeState, output []schema.Message) error {
+	run, err := routingStateFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	state.Messages = schema.CloneMessages(output)
+	state.Response = schema.CloneMessages(run.response)
+	state.RoutingSteps = run.steps
+	state.Pending = cloneCalls(run.pending)
+	state.DispatchInput = schema.CloneMessages(run.dispatchInput)
+	state.ContinueRun = run.continueRun
+	return nil
 }
 
 func routingStateFromContext(ctx context.Context) (*routingRunState, error) {
@@ -61,14 +91,13 @@ type RoutedResult struct {
 }
 
 type RoutingHooks struct {
-	MaxSteps        int
-	ReturnControl   bool
-	CallModel       func(context.Context, []schema.Message) (runnable.Stream[llm.Event], error)
-	CheckBreakpoint func(context.Context, []schema.Message, []schema.Message, int) error
-	DetectCalls     func([]schema.Message) []Call
-	Dispatch        func(context.Context, []Call, []schema.Message) ([]RoutedResult, error)
-	Observation     func(RoutedResult) schema.Message
-	NameMessages    func([]schema.Message) []schema.Message
+	MaxSteps      int
+	ReturnControl bool
+	CallModel     func(context.Context, []schema.Message) (runnable.Stream[llm.Event], error)
+	DetectCalls   func([]schema.Message) []Call
+	Dispatch      func(context.Context, []Call, []schema.Message) ([]RoutedResult, error)
+	Observation   func(RoutedResult) schema.Message
+	NameMessages  func([]schema.Message) []schema.Message
 }
 
 func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
@@ -90,11 +119,6 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		if run.steps >= run.maxSteps {
 			run.continueRun = false
 			return schema.CloneMessages(messages), nil
-		}
-		if hooks.CheckBreakpoint != nil {
-			if err := hooks.CheckBreakpoint(ctx, messages, schema.CloneMessages(run.response), run.steps); err != nil {
-				return nil, err
-			}
 		}
 		stream, err := hooks.CallModel(ctx, messages)
 		if err != nil {
@@ -157,13 +181,13 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		return updated, nil
 	})
 	if err := g.AddNode("decide", decide,
-		graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+			if err := hydrateRoutingRun(ctx, state); err != nil {
+				return nil, err
+			}
 			return schema.CloneMessages(state.Messages), nil
 		}),
-		graph.WithPostHandler(func(_ context.Context, state *RecipeState, output []schema.Message) error {
-			state.Messages = schema.CloneMessages(output)
-			return nil
-		}),
+		graph.WithPostHandler(commitRoutingRun),
 	); err != nil {
 		return nil, err
 	}
@@ -229,13 +253,13 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		return updated, nil
 	})
 	if err := g.AddNode("dispatch", dispatch,
-		graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+			if err := hydrateRoutingRun(ctx, state); err != nil {
+				return nil, err
+			}
 			return schema.CloneMessages(state.Messages), nil
 		}),
-		graph.WithPostHandler(func(_ context.Context, state *RecipeState, output []schema.Message) error {
-			state.Messages = schema.CloneMessages(output)
-			return nil
-		}),
+		graph.WithPostHandler(commitRoutingRun),
 	); err != nil {
 		return nil, err
 	}
@@ -250,7 +274,11 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		}
 		return response, nil
 	})
-	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+		if err := hydrateRoutingRun(ctx, state); err != nil {
+			return nil, err
+		}
+		notifyCompletion(ctx, state)
 		return schema.CloneMessages(state.Messages), nil
 	})); err != nil {
 		return nil, err
@@ -258,24 +286,16 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	if err := g.AddEdge(graph.Start, "decide"); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("decide", "dispatch", "sub_agents", func(ctx context.Context, _ *RecipeState) (bool, error) {
-		run, err := routingStateFromContext(ctx)
-		if err != nil {
-			return false, err
-		}
-		return len(run.pending) > 0, nil
+	if err := g.AddBranch("decide", "dispatch", "sub_agents", func(_ context.Context, state *RecipeState) (bool, error) {
+		return len(state.Pending) > 0, nil
 	}); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge("decide", "finish"); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("dispatch", "decide", "continue", func(ctx context.Context, _ *RecipeState) (bool, error) {
-		run, err := routingStateFromContext(ctx)
-		if err != nil {
-			return false, err
-		}
-		return run.continueRun, nil
+	if err := g.AddBranch("dispatch", "decide", "continue", func(_ context.Context, state *RecipeState) (bool, error) {
+		return state.ContinueRun, nil
 	}); err != nil {
 		return nil, err
 	}

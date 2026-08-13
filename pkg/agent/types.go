@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"goharness/pkg/control"
+	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -41,22 +43,27 @@ func reduceMessageEvents(ctx context.Context, stream runnable.Stream[schema.Mess
 	}
 	var final []schema.Message
 	for {
+		var item runnable.Item[schema.MessageEvent]
+		var ok bool
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case item, ok := <-stream:
-			if !ok {
-				return schema.CloneMessages(final), nil
+			if _, interrupted := control.AsInterrupt(context.Cause(ctx)); !interrupted {
+				return nil, ctx.Err()
 			}
-			if item.Err != nil {
-				return nil, item.Err
-			}
-			if item.Value.Kind == schema.MessageEventSnapshot {
-				final = schema.CloneMessages(item.Value.Messages)
-			}
-			if item.Value.Kind == schema.MessageEventDone {
-				return schema.CloneMessages(final), nil
-			}
+			item, ok = <-stream
+		case item, ok = <-stream:
+		}
+		if !ok {
+			return schema.CloneMessages(final), nil
+		}
+		if item.Err != nil {
+			return nil, item.Err
+		}
+		if item.Value.Kind == schema.MessageEventSnapshot {
+			final = schema.CloneMessages(item.Value.Messages)
+		}
+		if item.Value.Kind == schema.MessageEventDone {
+			return schema.CloneMessages(final), nil
 		}
 	}
 }
@@ -69,7 +76,10 @@ func prefetchMessageEvents(ctx context.Context, stream runnable.Stream[schema.Me
 	var ok bool
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		if _, interrupted := control.AsInterrupt(context.Cause(ctx)); !interrupted {
+			return nil, ctx.Err()
+		}
+		first, ok = <-stream
 	case first, ok = <-stream:
 	}
 	if !ok {
@@ -85,10 +95,26 @@ func prefetchMessageEvents(ctx context.Context, stream runnable.Stream[schema.Me
 	go func() {
 		defer close(out)
 		for item := range stream {
+			if item.Err != nil && interruptCauseRequested(ctx) {
+				out <- item
+				return
+			}
 			if !emitMessageItem(ctx, out, item) {
+				if _, interrupted := control.AsInterrupt(context.Cause(ctx)); interrupted {
+					continue
+				}
 				return
 			}
 		}
 	}()
 	return out, nil
+}
+
+func isPersistedInterruption(err error) bool {
+	return errors.Is(err, graph.ErrInterrupted)
+}
+
+func interruptCauseRequested(ctx context.Context) bool {
+	_, interrupted := control.AsInterrupt(context.Cause(ctx))
+	return interrupted
 }

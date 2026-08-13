@@ -11,7 +11,6 @@ import (
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 const DefaultRoutingMaxSteps = 8
@@ -109,10 +108,6 @@ func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
 			return a.callLLM(ctx, messages, a.functions, runOpts)
 		},
-		CheckBreakpoint: func(ctx context.Context, messages, response []schema.Message, steps int) error {
-			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			return a.checkBreakpoint(ctx, runOpts.session, runOpts, AgentKindRouting, BreakpointBeforeLLM, messages, response, steps, nil, &state.EngineCheckpoint{LLMCalls: steps})
-		},
 		DetectCalls:  detectRoutingCalls,
 		Dispatch:     a.dispatch,
 		Observation:  routingObservation,
@@ -146,11 +141,7 @@ func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, op
 	if err != nil {
 		return nil, err
 	}
-	commitResponse, resumeCommit, err := resumeAtCommit(&runOpts, AgentKindRouting)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session, &runOpts)
+	ctx = bindRunContext(ctx, session)
 	prepared := a.prepareMessages(loaded, &runOpts)
 	runCtx, lifecycle, err := a.beginRun(ctx, prepared, runOpts)
 	if err != nil {
@@ -158,31 +149,19 @@ func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, op
 	}
 	lifecycle.session = session
 	runOpts.session = session
-	if resumeCommit {
-		return lifecycle.wrap(completedResumeEvents(commitResponse), runOpts.StreamBufferSize), nil
-	}
-	continuation, resumed, err := continuationFor(runOpts, AgentKindRouting, BreakpointBeforeLLM)
-	if err != nil {
-		lifecycle.fail(err)
-		return nil, err
-	}
-	response := []schema.Message{}
-	steps := 0
-	if resumed {
-		response = schema.CloneMessages(continuation.Response)
-		steps = continuation.LLMCalls
-		if continuation.Engine != nil {
-			steps = continuation.Engine.LLMCalls
-		}
-	}
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
+	runCtx = withRecipeCompletion(runCtx, session)
 	runCtx = agentrecipe.WithRoutingRunConfig(runCtx, agentrecipe.RoutingRunConfig{
 		MaxSteps:      a.maxSteps,
 		ReturnControl: a.returnControl,
-		Steps:         steps,
-		Response:      response,
+		Input:         conversationInput(session, messages),
 	})
-	stream, err := a.recipe.Stream(runCtx, prepared)
+	var stream runnable.Stream[schema.MessageEvent]
+	if runOpts.resume {
+		stream, err = a.recipe.ResumeStream(runCtx, runOpts.GraphOptions...)
+	} else {
+		stream, err = a.recipe.Stream(runCtx, prepared, runOpts.GraphOptions...)
+	}
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err
@@ -245,7 +224,7 @@ func (a *RoutingAgent) dispatch(ctx context.Context, calls []agentrecipe.Call, m
 			results[index].Err = err
 			continue
 		}
-		childOptions := []RunOption{WithCheckpointBypass(), withInterruptBypass()}
+		childOptions := []RunOption{WithCheckpointBypass()}
 		if runOpts.DeltaStream {
 			childOptions = append(childOptions, WithDeltaStream(true))
 		}
@@ -254,6 +233,7 @@ func (a *RoutingAgent) dispatch(ctx context.Context, calls []agentrecipe.Call, m
 		runnableOptions = append(runnableOptions, runOpts.NodeOptions...)
 		childCtx := graph.WithDataSinkIsolated(ctx, nil)
 		childCtx = graph.WithEventSinkIsolated(childCtx, nil)
+		childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
 		stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), runnableOptions...)
 		if err != nil {
 			results[index].Err = err

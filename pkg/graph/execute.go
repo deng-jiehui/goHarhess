@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"goharness/pkg/control"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -63,6 +64,10 @@ func StreamMessages[I any](
 		runCtx := withNodeDataTracker(WithDataSink(ctx, sink), tracker)
 		output, err := g.Invoke(runCtx, input, opts...)
 		if err != nil {
+			if errors.Is(err, ErrInterrupted) || interruptCause(ctx) {
+				out <- runnable.Item[schema.MessageEvent]{Err: err}
+				return
+			}
 			select {
 			case <-ctx.Done():
 			case out <- runnable.Item[schema.MessageEvent]{Err: err}:
@@ -115,6 +120,10 @@ func streamMessageExecution(ctx context.Context, invoke func(context.Context) ([
 		runCtx := withNodeDataTracker(WithDataSink(ctx, sink), tracker)
 		output, err := invoke(runCtx)
 		if err != nil {
+			if errors.Is(err, ErrInterrupted) || interruptCause(ctx) {
+				out <- runnable.Item[schema.MessageEvent]{Err: err}
+				return
+			}
 			select {
 			case <-ctx.Done():
 			case out <- runnable.Item[schema.MessageEvent]{Err: err}:
@@ -128,6 +137,11 @@ func streamMessageExecution(ctx context.Context, invoke func(context.Context) ([
 		EmitData(runCtx, schema.MessageEvent{Kind: schema.MessageEventDone})
 	}()
 	return out
+}
+
+func interruptCause(ctx context.Context) bool {
+	_, interrupted := control.AsInterrupt(context.Cause(ctx))
+	return interrupted
 }
 
 func messagesEqual(left, right []schema.Message) bool {

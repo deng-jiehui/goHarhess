@@ -31,10 +31,6 @@ func NewBasicAgent(cfg BaseConfig, opts ...Option) (*BasicAgent, error) {
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
 			return a.callLLM(ctx, messages, nil, runOpts)
 		},
-		CheckBreakpoint: func(ctx context.Context, messages, response []schema.Message, calls int) error {
-			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			return a.checkBreakpoint(ctx, runOpts.session, runOpts, AgentKindBasic, BreakpointBeforeLLM, messages, response, calls, nil, nil)
-		},
 		NameMessages: a.withAgentName,
 	}, false)
 	if err != nil {
@@ -51,11 +47,7 @@ func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, opts
 	if err != nil {
 		return nil, err
 	}
-	commitResponse, resumeCommit, err := resumeAtCommit(&runOpts, AgentKindBasic)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session, &runOpts)
+	ctx = bindRunContext(ctx, session)
 	prepared := a.prepareMessages(loaded, &runOpts)
 	runCtx, lifecycle, err := a.beginRun(ctx, prepared, runOpts)
 	if err != nil {
@@ -63,16 +55,17 @@ func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, opts
 	}
 	lifecycle.session = session
 	runOpts.session = session
-	if resumeCommit {
-		return lifecycle.wrap(completedResumeEvents(commitResponse), runOpts.StreamBufferSize), nil
-	}
-	if _, _, err := continuationFor(runOpts, AgentKindBasic, BreakpointBeforeLLM); err != nil {
-		lifecycle.fail(err)
-		return nil, err
-	}
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
-	runCtx = agentrecipe.WithRunConfig(runCtx, agentrecipe.RunConfig{MaxLLMCalls: 1, DeltaStream: runOpts.DeltaStream})
-	dataStream, err := a.recipe.Stream(runCtx, prepared)
+	runCtx = withRecipeCompletion(runCtx, session)
+	runCtx = agentrecipe.WithRunConfig(runCtx, agentrecipe.RunConfig{
+		MaxLLMCalls: 1, DeltaStream: runOpts.DeltaStream, Input: conversationInput(session, messages),
+	})
+	var dataStream runnable.Stream[schema.MessageEvent]
+	if runOpts.resume {
+		dataStream, err = a.recipe.ResumeStream(runCtx, runOpts.GraphOptions...)
+	} else {
+		dataStream, err = a.recipe.Stream(runCtx, prepared, runOpts.GraphOptions...)
+	}
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err

@@ -11,7 +11,6 @@ import (
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 type Hub struct {
@@ -156,17 +155,13 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 	g := &GroupChat{Base: base, hub: hub, selector: selector, maxRounds: maxRounds}
 	recipe, err := agentrecipe.NewGroupRecipe(string(AgentKindGroupChat), agentrecipe.GroupHooks{
 		MaxRounds: maxRounds,
-		CheckBreakpoint: func(ctx context.Context, messages, response []schema.Message, round int, lastAgent string) error {
-			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			return g.checkBreakpoint(ctx, runOpts.session, runOpts, AgentKindGroupChat, BreakpointBeforeRound, messages, response, round, map[string]any{"last_agent": lastAgent}, &state.EngineCheckpoint{Round: round, LastAgent: lastAgent})
-		},
 		Dispatch: func(ctx context.Context, messages []schema.Message, round int, lastAgent string) (string, runnable.Stream[schema.MessageEvent], error) {
 			selected, err := g.selectAgent(ctx, SelectionState{Round: round, LastAgent: lastAgent, Messages: schema.CloneMessages(messages)})
 			if err != nil || selected == nil {
 				return "", nil, err
 			}
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			childOpts := []RunOption{WithCheckpointBypass(), withInterruptBypass()}
+			childOpts := []RunOption{WithCheckpointBypass()}
 			if runOpts.DeltaStream {
 				childOpts = append(childOpts, WithDeltaStream(true))
 			}
@@ -175,6 +170,7 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 			childRunnableOpts = append(childRunnableOpts, runOpts.NodeOptions...)
 			childCtx := graph.WithDataSinkIsolated(ctx, nil)
 			childCtx = graph.WithEventSinkIsolated(childCtx, nil)
+			childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
 			stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), childRunnableOpts...)
 			if err != nil {
 				return selected.Name(), nil, err
@@ -196,11 +192,7 @@ func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts 
 	if err != nil {
 		return nil, err
 	}
-	commitResponse, resumeCommit, err := resumeAtCommit(&runOpts, AgentKindGroupChat)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session, &runOpts)
+	ctx = bindRunContext(ctx, session)
 	prepared := g.prepareMessages(loaded, &runOpts)
 	runCtx, lifecycle, err := g.beginRun(ctx, prepared, runOpts)
 	if err != nil {
@@ -208,28 +200,15 @@ func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts 
 	}
 	lifecycle.session = session
 	runOpts.session = session
-	if resumeCommit {
-		return lifecycle.wrap(completedResumeEvents(commitResponse), runOpts.StreamBufferSize), nil
-	}
-	continuation, resumed, err := continuationFor(runOpts, AgentKindGroupChat, BreakpointBeforeRound)
-	if err != nil {
-		lifecycle.fail(err)
-		return nil, err
-	}
-	response := []schema.Message{}
-	lastAgent := ""
-	startRound := 0
-	if resumed {
-		response = schema.CloneMessages(continuation.Response)
-		startRound = continuation.LLMCalls
-		if continuation.Engine != nil {
-			startRound = continuation.Engine.Round
-			lastAgent = continuation.Engine.LastAgent
-		}
-	}
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
-	runCtx = agentrecipe.WithGroupRunConfig(runCtx, agentrecipe.GroupRunConfig{Round: startRound, LastAgent: lastAgent, Response: response})
-	stream, err := g.recipe.Stream(runCtx, prepared)
+	runCtx = withRecipeCompletion(runCtx, session)
+	runCtx = agentrecipe.WithGroupRunConfig(runCtx, agentrecipe.GroupRunConfig{Input: conversationInput(session, messages)})
+	var stream runnable.Stream[schema.MessageEvent]
+	if runOpts.resume {
+		stream, err = g.recipe.ResumeStream(runCtx, runOpts.GraphOptions...)
+	} else {
+		stream, err = g.recipe.Stream(runCtx, prepared, runOpts.GraphOptions...)
+	}
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err

@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"goharness/pkg/runnable"
-	statepkg "goharness/pkg/state"
 )
 
 // ParallelBranch describes one pure Runnable and its State adapters.
@@ -289,7 +288,6 @@ func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimePa
 			if branch.nestedGraph {
 				invokeCtx = WithDataSinkIsolated(invokeCtx, nil)
 				invokeCtx = withoutRuntimeStateCheckpointProvider(invokeCtx)
-				invokeCtx = statepkg.IgnoreGraphStateCheckpoint(invokeCtx)
 			}
 			output, err := branch.invoke(invokeCtx, input, branchPlan.ForwardOptionsFor(runnable.OptionScopeNode))
 			if err != nil {

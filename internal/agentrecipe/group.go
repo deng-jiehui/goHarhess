@@ -12,6 +12,7 @@ import (
 )
 
 type GroupRunConfig struct {
+	Input     []schema.Message
 	Round     int
 	LastAgent string
 	Response  []schema.Message
@@ -22,6 +23,7 @@ type groupRunState struct {
 	lastAgent   string
 	response    []schema.Message
 	continueRun bool
+	input       []schema.Message
 }
 
 type groupRunContextKey struct{}
@@ -31,8 +33,34 @@ func WithGroupRunConfig(ctx context.Context, cfg GroupRunConfig) context.Context
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, groupRunContextKey{}, &groupRunState{
-		round: cfg.Round, lastAgent: cfg.LastAgent, response: schema.CloneMessages(cfg.Response),
+		round: cfg.Round, lastAgent: cfg.LastAgent, response: schema.CloneMessages(cfg.Response), input: schema.CloneMessages(cfg.Input),
 	})
+}
+
+func hydrateGroupRun(ctx context.Context, state *RecipeState) error {
+	run, err := groupStateFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	run.input = schema.CloneMessages(state.Input)
+	run.round = state.Round
+	run.lastAgent = state.LastAgent
+	run.response = schema.CloneMessages(state.Response)
+	run.continueRun = state.ContinueRun
+	return nil
+}
+
+func commitGroupRun(ctx context.Context, state *RecipeState, output []schema.Message) error {
+	run, err := groupStateFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	state.Messages = schema.CloneMessages(output)
+	state.Response = schema.CloneMessages(run.response)
+	state.Round = run.round
+	state.LastAgent = run.lastAgent
+	state.ContinueRun = run.continueRun
+	return nil
 }
 
 func groupStateFromContext(ctx context.Context) (*groupRunState, error) {
@@ -50,9 +78,8 @@ func groupStateFromContext(ctx context.Context) (*groupRunState, error) {
 }
 
 type GroupHooks struct {
-	MaxRounds       int
-	CheckBreakpoint func(context.Context, []schema.Message, []schema.Message, int, string) error
-	Dispatch        func(context.Context, []schema.Message, int, string) (string, runnable.Stream[schema.MessageEvent], error)
+	MaxRounds int
+	Dispatch  func(context.Context, []schema.Message, int, string) (string, runnable.Stream[schema.MessageEvent], error)
 }
 
 func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
@@ -74,11 +101,6 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 		if run.round >= hooks.MaxRounds {
 			run.continueRun = false
 			return schema.CloneMessages(messages), nil
-		}
-		if hooks.CheckBreakpoint != nil {
-			if err := hooks.CheckBreakpoint(ctx, messages, schema.CloneMessages(run.response), run.round, run.lastAgent); err != nil {
-				return nil, err
-			}
 		}
 		selected, stream, err := hooks.Dispatch(ctx, messages, run.round, run.lastAgent)
 		if err != nil {
@@ -128,13 +150,13 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 		return updated, nil
 	})
 	if err := g.AddNode("dispatch", dispatch,
-		graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+			if err := hydrateGroupRun(ctx, state); err != nil {
+				return nil, err
+			}
 			return schema.CloneMessages(state.Messages), nil
 		}),
-		graph.WithPostHandler(func(_ context.Context, state *RecipeState, output []schema.Message) error {
-			state.Messages = schema.CloneMessages(output)
-			return nil
-		}),
+		graph.WithPostHandler(commitGroupRun),
 	); err != nil {
 		return nil, err
 	}
@@ -145,7 +167,11 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 		}
 		return schema.CloneMessages(run.response), nil
 	})
-	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+		if err := hydrateGroupRun(ctx, state); err != nil {
+			return nil, err
+		}
+		notifyCompletion(ctx, state)
 		return schema.CloneMessages(state.Messages), nil
 	})); err != nil {
 		return nil, err
@@ -153,12 +179,8 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	if err := g.AddEdge(graph.Start, "dispatch"); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("dispatch", "dispatch", "next_round", func(ctx context.Context, _ *RecipeState) (bool, error) {
-		run, err := groupStateFromContext(ctx)
-		if err != nil {
-			return false, err
-		}
-		return run.continueRun, nil
+	if err := g.AddBranch("dispatch", "dispatch", "next_round", func(_ context.Context, state *RecipeState) (bool, error) {
+		return state.ContinueRun, nil
 	}); err != nil {
 		return nil, err
 	}

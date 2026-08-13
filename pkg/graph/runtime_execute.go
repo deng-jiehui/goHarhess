@@ -124,8 +124,6 @@ func (g *Graph[I, O]) invokeRuntimeWithPlan(ctx context.Context, input I, plan r
 	if g.stateFactory != nil {
 		if continuation != nil {
 			runtimeState, err = g.restoreRuntimeState(ctx, continuation.State)
-		} else if savedState, ok := statepkg.GraphStateCheckpointFromContext(ctx); ok && !statepkg.GraphStateCheckpointIgnored(ctx) {
-			runtimeState, err = g.restoreRuntimeState(ctx, savedState)
 		} else {
 			factoryCtx := ctx
 			if _, interrupted := control.AsInterrupt(context.Cause(ctx)); interrupted {
@@ -137,7 +135,6 @@ func (g *Graph[I, O]) invokeRuntimeWithPlan(ctx context.Context, input I, plan r
 			return zero, graphFailure(ctx, err)
 		}
 		ctx = withRuntimeState(ctx, runtimeState)
-		ctx = statepkg.WithoutGraphStateCheckpoint(ctx)
 		ctx = withRuntimeStateCheckpointProvider(ctx, func(snapshotCtx context.Context) (statepkg.GraphStateCheckpoint, error) {
 			return g.snapshotRuntimeState(snapshotCtx, runtimeState)
 		})
@@ -300,7 +297,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 		if node.nestedGraph {
 			invokeCtx = WithDataSinkIsolated(invokeCtx, nil)
 			invokeCtx = withoutRuntimeStateCheckpointProvider(invokeCtx)
-			invokeCtx = statepkg.IgnoreGraphStateCheckpoint(invokeCtx)
 		}
 		output, invokeErr := node.invoke(invokeCtx, nodeInput, nodePlan.ForwardOptionsFor(runnable.OptionScopeNode))
 		if invokeErr != nil {

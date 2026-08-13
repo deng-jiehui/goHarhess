@@ -2,10 +2,8 @@ package graph_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 
@@ -180,63 +178,6 @@ func TestCursorResumeUsesRuntimeStatePreHandler(t *testing.T) {
 func TestControlEventDoesNotExposeState(t *testing.T) {
 	if _, exists := reflect.TypeOf(graph.Event{}).FieldByName("State"); exists {
 		t.Fatal("control Event exposes runtime State")
-	}
-}
-
-type checkpointTestState struct {
-	Value  int
-	Secret string
-}
-
-func newCheckpointGraph(t *testing.T) (*graph.Graph[string, int], graph.StateCodec) {
-	t.Helper()
-	codec, err := graph.NewStateCodec[*checkpointTestState]("architecture-test-state", 7,
-		func(_ context.Context, current *checkpointTestState) ([]byte, error) { return json.Marshal(current) },
-		func(_ context.Context, data []byte) (*checkpointTestState, error) {
-			var current checkpointTestState
-			return &current, json.Unmarshal(data, &current)
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := newTypedGraph[string, int](t, "checkpoint", func(_ context.Context, input string) (*checkpointTestState, error) {
-		return &checkpointTestState{Value: len(input), Secret: "generated"}, nil
-	})
-	if err := g.SetStateCodec(codec); err != nil {
-		t.Fatal(err)
-	}
-	node := runnable.Func[int, int](func(_ context.Context, value int, _ ...runnable.Option) (int, error) { return value, nil })
-	if err := g.AddNode("echo", node, graph.WithPreHandler(func(_ context.Context, current *checkpointTestState) (int, error) { return current.Value, nil })); err != nil {
-		t.Fatal(err)
-	}
-	_ = g.AddEdge(graph.Start, "echo")
-	_ = g.AddEdge("echo", graph.End)
-	return g, codec
-}
-
-func TestGraphUsesConfiguredStateCodecForResume(t *testing.T) {
-	g, codec := newCheckpointGraph(t)
-	data, err := codec.Encode(context.Background(), &checkpointTestState{Value: 42, Secret: "restored"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := state.WithGraphStateCheckpoint(context.Background(), state.GraphStateCheckpoint{CodecID: codec.ID(), Version: codec.Version(), Data: data})
-	output, err := g.Invoke(ctx, "ignored")
-	if err != nil || output != 42 {
-		t.Fatalf("output=%d err=%v", output, err)
-	}
-	data[0] ^= 0xff
-}
-
-func TestGraphRejectsCheckpointCodecMismatch(t *testing.T) {
-	g, codec := newCheckpointGraph(t)
-	data := []byte(`{"Value":1,"Secret":"checkpoint"}`)
-	for _, checkpoint := range []state.GraphStateCheckpoint{{CodecID: "other", Version: codec.Version(), Data: data}, {CodecID: codec.ID(), Version: codec.Version() + 1, Data: data}} {
-		_, err := g.Invoke(state.WithGraphStateCheckpoint(context.Background(), checkpoint), "ignored")
-		if err == nil || !strings.Contains(err.Error(), "does not match") {
-			t.Fatalf("mismatch error=%v", err)
-		}
 	}
 }
 

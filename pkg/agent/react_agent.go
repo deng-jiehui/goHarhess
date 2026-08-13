@@ -42,7 +42,7 @@ func NewReactAgent(cfg ReactAgentConfig, opts ...Option) (*ReactAgent, error) {
 		prompt = DefaultReactPrompt
 	}
 	a := &ReactAgent{Base: base, prompt: prompt}
-	a.recipe, err = reactRecipe(base)
+	a.recipe, err = reactRecipe(base, a.prepareReactMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -56,23 +56,15 @@ func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, opts
 	if err != nil {
 		return nil, err
 	}
-	commitResponse, resumeCommit, err := resumeAtCommit(&runOpts, AgentKindReact)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session, &runOpts)
+	ctx = bindRunContext(ctx, session)
 	prepared := a.prepareMessages(loaded, &runOpts)
-	prepared = a.prepareReactMessages(prepared)
 	runCtx, lifecycle, err := a.beginRun(ctx, prepared, runOpts)
 	if err != nil {
 		return nil, err
 	}
 	lifecycle.session = session
 	runOpts.session = session
-	if resumeCommit {
-		return lifecycle.wrap(completedResumeEvents(commitResponse), runOpts.StreamBufferSize), nil
-	}
-	stream, err := a.runReact(runCtx, prepared, runOpts)
+	stream, err := a.runReact(runCtx, prepared, conversationInput(session, messages), runOpts)
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err
@@ -108,21 +100,22 @@ func (a *ReactAgent) toolPrompt() string {
 	return strings.TrimRight(builder.String(), "\n")
 }
 
-func (a *ReactAgent) runReact(ctx context.Context, messages []schema.Message, opts RunOptions) (runnable.Stream[schema.MessageEvent], error) {
+func (a *ReactAgent) runReact(ctx context.Context, messages, input []schema.Message, opts RunOptions) (runnable.Stream[schema.MessageEvent], error) {
 	if a.model == nil {
 		return nil, ErrMissingModel
 	}
-	continuation, resumed, err := continuationFor(opts, AgentKindReact, BreakpointBeforeLLM)
-	if err != nil {
-		return nil, err
-	}
-	response := []schema.Message{}
-	if resumed {
-		response = schema.CloneMessages(continuation.Response)
-	}
 	ctx = withResolvedRunOptions(ctx, opts)
-	ctx = agentrecipe.WithRunConfig(ctx, agentrecipe.RunConfig{MaxLLMCalls: opts.MaxLLMCalls, DeltaStream: opts.DeltaStream, Response: response})
-	stream, err := a.recipe.Stream(ctx, messages)
+	ctx = withRecipeCompletion(ctx, opts.session)
+	ctx = agentrecipe.WithRunConfig(ctx, agentrecipe.RunConfig{
+		MaxLLMCalls: opts.MaxLLMCalls, DeltaStream: opts.DeltaStream, Input: input,
+	})
+	var stream runnable.Stream[schema.MessageEvent]
+	var err error
+	if opts.resume {
+		stream, err = a.recipe.ResumeStream(ctx, opts.GraphOptions...)
+	} else {
+		stream, err = a.recipe.Stream(ctx, messages, opts.GraphOptions...)
+	}
 	if err != nil {
 		return nil, err
 	}
