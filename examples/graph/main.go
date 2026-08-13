@@ -8,7 +8,6 @@ import (
 
 	"goharness/pkg/agent"
 	"goharness/pkg/compose"
-	"goharness/pkg/framework"
 	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/schema"
@@ -28,9 +27,7 @@ func main() {
 		Build()
 	must(err)
 
-	app, err := framework.NewApp("graph-example", team)
-	must(err)
-	messages, err := app.Invoke(context.Background(), []schema.Message{schema.UserMessage("analyze the topic")})
+	messages, err := team.Invoke(context.Background(), []schema.Message{schema.UserMessage("analyze the topic")})
 	must(err)
 
 	data, err := json.MarshalIndent(messages, "", "  ")

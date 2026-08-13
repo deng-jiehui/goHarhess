@@ -135,7 +135,7 @@ func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferS
 			l.metrics.Chunks++
 			l.metrics.OutputMessages += len(item.Value.Messages)
 			l.metrics.OutputBytes += chunkMetrics.OutputBytes
-			if item.Value.Kind == schema.MessageEventSnapshot && len(item.Value.Messages) > 0 {
+			if item.Value.Kind == schema.MessageEventSnapshot {
 				finalMessages = schema.CloneMessages(item.Value.Messages)
 			}
 			event := callback.ProgressEvent(callback.EventAgentChunk, l.operation, chunkMetrics)
@@ -238,6 +238,7 @@ func observeLLMStream(
 	go func() {
 		defer close(out)
 		chunkIndex := 0
+		sawDone := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -247,6 +248,14 @@ func observeLLMStream(
 				return
 			case item, ok := <-stream:
 				if !ok {
+					if !sawDone {
+						err := errors.New("llm stream closed without done event")
+						if dispatcher != nil {
+							_ = dispatcher.Dispatch(ctx, callback.ErrorEvent(callback.EventLLMError, operation, err, metrics))
+						}
+						emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
+						return
+					}
 					if dispatcher != nil {
 						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
 					}
@@ -261,6 +270,7 @@ func observeLLMStream(
 				}
 				eventValue := item.Value
 				if eventValue.Kind == llm.EventDone {
+					sawDone = true
 					if dispatcher != nil {
 						_ = dispatcher.Dispatch(ctx, callback.EndEvent(callback.EventLLMEnd, operation, metrics))
 					}

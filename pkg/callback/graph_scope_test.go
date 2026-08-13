@@ -21,8 +21,6 @@ type callbackGraphState struct {
 
 type callbackSpanState struct{}
 
-func (callbackSpanState) Clone() callbackSpanState { return callbackSpanState{} }
-
 func TestGraphCallbackReleasesStateLockBeforeHandler(t *testing.T) {
 	var sink graph.EventSink
 	returned := make(chan error, 1)
@@ -158,16 +156,13 @@ func TestGraphNodeEventsUseTypedPhasesAndIndependentSpans(t *testing.T) {
 func TestGraphNodeExecutionContextUsesNodeSpan(t *testing.T) {
 	var nodeTrace callback.Trace
 	var childOperation callback.Operation
-	value := graph.NewStateGraph[callbackSpanState, callbackSpanState, callbackSpanState](
-		"node-context",
-		func(_ context.Context, input callbackSpanState) callbackSpanState { return input },
-	)
+	value := graph.NewGraph[callbackSpanState, callbackSpanState]("node-context")
 	node := runnable.Func[callbackSpanState, callbackSpanState](func(ctx context.Context, state callbackSpanState, _ ...runnable.Option) (callbackSpanState, error) {
 		nodeTrace, _ = callback.TraceFromContext(ctx)
 		_, childOperation = callback.Begin(ctx, callback.ComponentLLM, "inside-node", nil)
 		return state, nil
 	})
-	if err := graph.AddNode(value, "work", node); err != nil {
+	if err := value.AddNode("work", node); err != nil {
 		t.Fatal(err)
 	}
 	if err := value.AddEdge(graph.Start, "work"); err != nil {
@@ -315,24 +310,17 @@ func TestGraphCallbackSerializesConcurrentLifecycleDispatch(t *testing.T) {
 	}
 }
 
-func (s callbackGraphState) Clone() callbackGraphState {
-	s.Messages = schema.CloneMessages(s.Messages)
-	return s
-}
-
 func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 	var childManager *callback.SyncDispatcher
 	var childTrace callback.Trace
-	child := graph.NewStateGraph[callbackGraphState, callbackGraphState, callbackGraphState]("child-graph", func(_ context.Context, input callbackGraphState) callbackGraphState {
-		return input.Clone()
-	})
-	childNode := runnable.Func[callbackGraphState, callbackGraphState](func(ctx context.Context, state callbackGraphState, _ ...runnable.Option) (callbackGraphState, error) {
+	child := graph.NewGraph[callbackGraphState, callbackGraphState]("child-graph")
+	childNode := runnable.Func[callbackGraphState, callbackGraphState](func(ctx context.Context, current callbackGraphState, _ ...runnable.Option) (callbackGraphState, error) {
 		childManager, _ = callback.DispatcherFromContext(ctx)
 		childTrace, _ = callback.TraceFromContext(ctx)
-		state.Messages = append(state.Messages, schema.AssistantMessage("child"))
-		return state, nil
+		current.Messages = append(current.Messages, schema.AssistantMessage("child"))
+		return current, nil
 	})
-	if err := graph.AddNode(child, "child-node", childNode); err != nil {
+	if err := child.AddNode("child-node", childNode); err != nil {
 		t.Fatal(err)
 	}
 	if err := child.AddEdge(graph.Start, "child-node"); err != nil {
@@ -342,22 +330,33 @@ func TestNestedGraphUsesIndependentCallbackLifecycleScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parent := graph.NewStateGraph[[]schema.Message, []schema.Message, callbackGraphState]("parent-graph", func(_ context.Context, input []schema.Message) callbackGraphState {
-		return callbackGraphState{Messages: schema.CloneMessages(input)}
-	})
-	if err := graph.AddNode(parent, "child-graph", child); err != nil {
+	parent := graph.NewGraph[[]schema.Message, []schema.Message]("parent-graph")
+	if err := parent.SetStateFactory(func(_ context.Context, input []schema.Message) (*callbackGraphState, error) {
+		return &callbackGraphState{Messages: schema.CloneMessages(input)}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	tail := runnable.Func[callbackGraphState, callbackGraphState](func(_ context.Context, state callbackGraphState, _ ...runnable.Option) (callbackGraphState, error) {
-		return state, nil
-	})
-	if err := graph.AddNode(parent, "tail", tail); err != nil {
+	if err := parent.AddNode("child-graph", child,
+		graph.WithPreHandler(func(_ context.Context, current *callbackGraphState) (callbackGraphState, error) { return *current, nil }),
+		graph.WithPostHandler(func(_ context.Context, current *callbackGraphState, output callbackGraphState) error {
+			*current = output
+			return nil
+		}),
+	); err != nil {
 		t.Fatal(err)
 	}
-	finish := runnable.Func[callbackGraphState, []schema.Message](func(_ context.Context, state callbackGraphState, _ ...runnable.Option) ([]schema.Message, error) {
-		return schema.CloneMessages(state.Messages), nil
+	tail := runnable.Func[callbackGraphState, callbackGraphState](func(_ context.Context, current callbackGraphState, _ ...runnable.Option) (callbackGraphState, error) {
+		return current, nil
 	})
-	if err := graph.AddNode(parent, "finish", finish); err != nil {
+	if err := parent.AddNode("tail", tail, graph.WithPreHandler(func(_ context.Context, current *callbackGraphState) (callbackGraphState, error) { return *current, nil })); err != nil {
+		t.Fatal(err)
+	}
+	finish := runnable.Func[[]schema.Message, []schema.Message](func(_ context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+		return schema.CloneMessages(messages), nil
+	})
+	if err := parent.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, current *callbackGraphState) ([]schema.Message, error) {
+		return schema.CloneMessages(current.Messages), nil
+	})); err != nil {
 		t.Fatal(err)
 	}
 	for _, edge := range [][2]string{{graph.Start, "child-graph"}, {"child-graph", "tail"}, {"tail", "finish"}, {"finish", graph.End}} {

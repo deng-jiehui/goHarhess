@@ -33,3 +33,10 @@ func TestAppRunsDefaultAgent(t *testing.T) {
 		t.Fatalf("last = %#v, want assistant ok", last)
 	}
 }
+
+func TestAppRejectsTypedNilRunnable(t *testing.T) {
+	var typedNil *agent.BasicAgent
+	if _, err := framework.NewApp("typed-nil", typedNil); err == nil {
+		t.Fatal("NewApp accepted a typed nil runnable")
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"log"
 
 	"goharness/pkg/agent"
-	"goharness/pkg/framework"
 	"goharness/pkg/llm"
 	"goharness/pkg/schema"
 	"goharness/pkg/tool"
@@ -53,12 +52,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app, err := framework.NewApp("demo", a)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	last, err := app.Invoke(ctx, []schema.Message{schema.UserMessage("please use echo")})
+	last, err := a.Invoke(ctx, []schema.Message{schema.UserMessage("please use echo")})
 	if err != nil {
 		log.Fatal(err)
 	}

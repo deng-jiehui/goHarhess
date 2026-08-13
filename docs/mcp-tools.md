@@ -28,22 +28,21 @@ if err != nil {
     return err
 }
 
-// ToolsNode remains strongly typed. Adapt its message contract to the
-// graph's concrete MessageState before binding it.
-toolStep := runnable.Func[graph.MessageState, graph.MessageState](func(
-    ctx context.Context,
-    state graph.MessageState,
-    options ...runnable.Option,
-) (graph.MessageState, error) {
-    output, err := toolsNode.Invoke(ctx, state.Messages, options...)
-    if err != nil {
-        return graph.MessageState{}, err
-    }
-    state.Messages = append(state.Messages, output...)
-    return state, nil
-})
-
-err = graph.AddNode(agentGraph, "mcp-tools", toolStep)
+// ToolsNode remains a pure message Runnable. Graph handlers map the
+// run-exclusive State to its input and apply its output.
+err = agentGraph.AddNode("mcp-tools", toolsNode,
+    graph.WithPreHandler(func(
+        _ context.Context, state *AgentState,
+    ) ([]schema.Message, error) {
+        return schema.CloneMessages(state.Messages), nil
+    }),
+    graph.WithPostHandler(func(
+        _ context.Context, state *AgentState, output []schema.Message,
+    ) error {
+        state.Messages = append(state.Messages, schema.CloneMessages(output)...)
+        return nil
+    }),
+)
 ```
 
 The adapter translates MCP `tools/list` schemas into `tool.Spec.Parameters`

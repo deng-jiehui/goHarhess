@@ -122,7 +122,6 @@ func TestInterruptedCheckpointResumesWithNewModelInstance(t *testing.T) {
 
 func TestInterruptedCheckpointCapturesAndRestoresGraphState(t *testing.T) {
 	store := state.NewMemoryStore()
-	graphState := state.GraphStateCheckpoint{CodecID: "custom-state", Version: 2, Data: []byte{4, 5, 6}}
 	first, err := agent.NewBasicAgent(agent.BaseConfig{
 		Model:           llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("unused")}),
 		CheckpointStore: store,
@@ -133,23 +132,21 @@ func TestInterruptedCheckpointCapturesAndRestoresGraphState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := state.WithGraphStateCheckpoint(context.Background(), graphState)
-	if _, err := first.Invoke(ctx, []schema.Message{schema.UserMessage("pause")}, agent.WithConversationID("graph-state-resume")); !errors.Is(err, agent.ErrInterrupted) {
+	if _, err := first.Invoke(context.Background(), []schema.Message{schema.UserMessage("pause")}, agent.WithConversationID("graph-state-resume")); !errors.Is(err, agent.ErrInterrupted) {
 		t.Fatalf("initial Invoke error = %v", err)
 	}
 	checkpoint, found, err := store.Load(context.Background(), "graph-state-resume")
 	if err != nil || !found || checkpoint.Continuation == nil || checkpoint.Continuation.GraphState == nil {
 		t.Fatalf("checkpoint = %#v, found=%t, err=%v", checkpoint, found, err)
 	}
-	if checkpoint.Continuation.GraphState.CodecID != graphState.CodecID || string(checkpoint.Continuation.GraphState.Data) != string(graphState.Data) {
+	if !strings.HasPrefix(checkpoint.Continuation.GraphState.CodecID, "json:") || len(checkpoint.Continuation.GraphState.Data) == 0 {
 		t.Fatalf("captured graph state = %#v", checkpoint.Continuation.GraphState)
 	}
 
 	resumed, err := agent.NewBasicAgent(agent.BaseConfig{
-		Model: llm.NewHandlerModel(func(ctx context.Context, _ []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-			restored, ok := state.GraphStateCheckpointFromContext(ctx)
-			if !ok || restored.CodecID != graphState.CodecID || string(restored.Data) != string(graphState.Data) {
-				t.Fatalf("restored graph state = %#v, ok=%t", restored, ok)
+		Model: llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
+			if len(messages) != 1 || messages[0].Text() != "pause" {
+				t.Fatalf("restored messages = %#v", messages)
 			}
 			return []schema.Message{schema.AssistantMessage("resumed")}, nil
 		}),

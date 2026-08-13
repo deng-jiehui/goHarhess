@@ -8,137 +8,175 @@ from the final output type.
 
 - Models: `Runnable[llm.Request, llm.Response]` and
   `Streamer[llm.Request, llm.Event]`.
+- ToolsNode: `Runnable[[]schema.Message, []schema.Message]`.
 - Agents and message graphs: `Runnable[[]schema.Message, []schema.Message]`.
-  `graph.StreamMessages` exposes their `schema.MessageEvent` data plane.
-- General graphs: `graph.StateGraph[I, O, S]`, where `S` implements
-  `graph.Cloner[S]`.
+- General graphs: `graph.Graph[I, O]`.
 
-Graph control events never appear in either data stream. They are published to
-`graph.EventSink`, and `callback.BindGraph` translates them into callback
-events when observability is enabled.
+`graph.StreamMessages` exposes the message data plane. Graph lifecycle events
+never enter that stream; they are published to `graph.EventSink`, and
+`callback.BindGraph` translates them into callback events.
 
-## Agent recipes
+## Graph boundary and pure nodes
 
-`pkg/agent` contains configuration, lifecycle and provider/tool adapters. The
-actual Basic, ReAct, Routing and GroupChat workflows live in
-`internal/agentrecipe` and execute through `pkg/graph`.
-
-- ReAct: `llm -> tools -> llm`, bounded by the configured model-call limit and
-  Graph step budget.
-- RoutingAgent: `decide -> sub-agent -> decide` in Supervisor mode, or one
-  `decide -> sub-agent` transition in Router mode. Sub-agents are exposed to
-  the supervisor model as standard function definitions. Use
-  `RoutingModeSupervisor` or `RoutingModeRouter` when constructing a config
-  from zero values; the explicit mode removes the ambiguity of a Go `bool`.
-- GroupChat: one fixed `dispatch` node with a bounded self-edge. Agent
-  selection is state data, not dynamically generated edges.
-
-## Durable cursors
-
-Every executing node pushes a JSON-clean `state.CursorFrame`. Interrupted
-checkpoints persist the complete `CursorStack`; resume consumes the matching
-top frame without recursively rebuilding a call stack. Runtime objects such as
-contexts, goroutines, clients and tool batches are never stored.
-
-A portable cursor can resume only at a node whose input accepts `S`, because
-arbitrary heterogeneous intermediate values are intentionally not serialized.
-Attempting to resume directly at another `NI` fails with
-`graph.resume.type_mismatch`. Place durable breakpoints on state-typed nodes or
-model the intermediate value as part of the concrete state.
-
-Invocation options have two strictly isolated routing layers. Framework
-options such as `runnable.WithMetadata` and other valid GlobalOptions cascade
-into framework components such as the Context Engine. Provider- or
-node-specific options must be wrapped with `runnable.NodeOption` and are the
-only options passed to Model, Tool, and Graph node invocation interfaces.
-Request lifecycle values such as cancellation,
-deadlines, Trace, Callback and Checkpoint state remain in `context.Context`;
-they are never encoded as OptionSet values. Only a nil option or an option
-whose `Apply` returns an error fails the invocation.
-
-ReAct resumes at `before_llm` after a completed tool batch is in the message
-history and can rehydrate its model-call count from messages. Routing and
-GroupChat also persist a typed JSON-safe `state.EngineCheckpoint`: Routing
-stores the completed supervisor-call count, while GroupChat stores the round
-and last-agent cursor. This prevents a resumed graph loop from dispatching a
-completed child Agent twice.
-
-## Callback ownership
-
-One root run owns one asynchronous dispatcher. Nested Agents reuse it and
-create child spans. Graph has one child operation whose node events are
-progress events, preventing duplicate Graph/Agent lifecycle ownership.
-
-## Compilation
-
-Graph `Compile` validates synchronously before every canonical `Invoke` or
-`StreamMessages` execution. Every edge is checked with `reflect.Type`: the
-source node's output must be assignable to the target node's input, typed
-conditions must accept the source output, and all END inputs must be assignable
-to `O`. Nested graphs are compiled recursively with indirect containment-cycle
-detection. Their lifecycle and data sinks remain isolated from the parent.
-
-Reflection is used only while binding and compiling type tokens. Node
-execution and State cloning do not use reflective value traversal.
-
-## Strongly Typed State
-
-Graph execution state is never represented as `map[string]any`. Applications
-define one concrete state type and implement a native `Clone() S` method:
+Only the public graph input and output are generic:
 
 ```go
-type Request struct{ Topic string }
-type Response struct{ Summary string }
+g := graph.NewGraph[Request, Response]("research")
+```
 
+`g.AddNode` accepts any component with this method shape:
+
+```go
+Invoke(context.Context, NI, ...runnable.Option) (NO, error)
+```
+
+ChatModel, ToolsNode, MCP, Retriever and child Agent nodes remain ordinary
+Runnables. They never import or inspect Graph State. `AddNode` records their
+input/output `reflect.Type` once; `Compile` validates every edge and END output
+before execution.
+
+```go
+_ = g.AddNode("collect", collector)
+_ = g.AddNode("render", renderer)
+_ = g.AddEdge(graph.Start, "collect")
+_ = g.AddEdge("collect", "render")
+_ = g.AddEdge("render", graph.End)
+_ = g.Compile()
+```
+
+Branches are also instance methods. A predicate may consume the source node
+output or the exact runtime State pointer:
+
+```go
+_ = g.AddBranch("chat", "tools", "has_tool_calls",
+    func(_ context.Context, state *AgentState) (bool, error) {
+        return state.HasToolCalls, nil
+    },
+)
+_ = g.AddEdge("chat", "finish") // unconditional fallback
+```
+
+## Runtime State
+
+State is optional. Stateful graphs register one factory whose result is a
+non-nil pointer to a struct:
+
+```go
 type ResearchState struct {
     Topic string
     Notes []string
 }
 
-func (s ResearchState) Clone() ResearchState {
-    s.Notes = append([]string(nil), s.Notes...)
-    return s
+_ = g.SetStateFactory(func(_ context.Context, input Request) (*ResearchState, error) {
+    return &ResearchState{Topic: input.Topic}, nil
+})
+```
+
+Every invocation owns one concrete `*ResearchState`. Sequential nodes reuse
+that exact pointer. Users do not implement `Clone`, call `GetState`, or mutate
+State from pure components. Graph-owned handlers are the mapping boundary:
+
+```go
+_ = g.AddNode("search", retriever,
+    graph.WithPreHandler(func(
+        _ context.Context, state *ResearchState,
+    ) (retrieval.Query, error) {
+        return retrieval.Query{Text: state.Topic}, nil
+    }),
+    graph.WithPostHandler(func(
+        _ context.Context, state *ResearchState, output retrieval.Result,
+    ) error {
+        state.Notes = append(state.Notes, output.Text)
+        return nil
+    }),
+)
+```
+
+Without a PreHandler, the incoming edge value must be assignable to the node
+input. A PostHandler mutates State but does not replace the outgoing edge value;
+the node output remains available to downstream nodes and output-based branches.
+
+No user function runs while Graph holds its topology lock. Nodes and handlers
+receive the node execution Context, including cancellation, deadline, Trace and
+Callback span values.
+
+## State snapshots
+
+Sequential execution performs no State serialization. Snapshot work happens
+only at ownership or durability boundaries:
+
+| Boundary | Codec work |
+| --- | --- |
+| Sequential node or branch | none |
+| Fan-Out | encode base once, decode one State per branch |
+| Durable interrupt | encode lazily when the checkpoint is requested |
+| Resume | decode once at Graph entry |
+| Ordinary completion | none |
+
+The default State Codec is strict JSON. State fields must be exported and may
+not use `json:"-"`; channels, functions, unsafe pointers and other runtime
+resources are rejected. Dynamic values stored in `any` must retain their exact
+Go type across a snapshot. Install a typed custom Codec for protobuf, msgpack,
+private fields or domain-specific resources:
+
+```go
+codec, err := graph.NewStateCodec[*ResearchState](
+    "research-state", 1, encodeResearchState, decodeResearchState,
+)
+if err == nil {
+    err = g.SetStateCodec(codec)
 }
 ```
 
-`genState` converts public input `I` into the state value placed on START.
-Package-level generic functions bind heterogeneous nodes because Go methods
-cannot declare additional type parameters:
+Fan-Out branches receive independent State pointers and merge in declaration
+order through an explicit `WithStateMerger`. A failed branch cancels siblings
+and skips the merge.
 
-```go
-g := graph.NewStateGraph[Request, Response, ResearchState](
-    "research",
-    func(_ context.Context, input Request) ResearchState {
-        return ResearchState{Topic: input.Topic}
-    },
-)
+## Durable cursors
 
-collect := runnable.Func[ResearchState, int](func(
-    _ context.Context, state ResearchState, _ ...runnable.Option,
-) (int, error) {
-    return len(state.Notes), nil
-})
+Every executing node pushes a JSON-clean `state.CursorFrame`. Interrupted
+checkpoints persist the complete `CursorStack`; resume consumes the matching
+top frame without rebuilding a Go call stack. Runtime objects such as contexts,
+goroutines, clients and tool batches are never stored.
 
-render := runnable.Func[int, Response](func(
-    _ context.Context, count int, _ ...runnable.Option,
-) (Response, error) {
-    return Response{Summary: fmt.Sprintf("%d notes", count)}, nil
-})
+A resumed runtime State can enter only a node with a PreHandler. Arbitrary
+heterogeneous edge values are not serialized. Attempting to resume another
+node fails with `graph.resume.type_mismatch`.
 
-_ = graph.AddNode(g, "collect", collect)
-_ = graph.AddNode(g, "render", render)
-_ = g.AddEdge(graph.Start, "collect")
-_ = g.AddEdge("collect", "render")
-_ = g.AddEdge("render", graph.End)
-```
+Built-in Agent recipes request `graph.StateCheckpointFromContext` only after a
+Breakpointer chooses to interrupt. Normal sequential runs therefore perform no
+State encoding. Agent prompts are injected immediately before each model call;
+the durable State contains caller-owned conversation history, not an old Agent
+instance's system prompt.
 
-The public API remains strongly typed. Internally, `AddNode` creates a private
-`anyNode` containing input/output type tokens and an invocation closure. A
-runtime value is erased only inside the Graph engine and is restored to the
-node's generic input before user code runs. Type mismatches therefore fail in
-`Compile`, rather than surfacing as application-level type assertions.
+## Options and Context
 
-`S.Clone()` owns every pointer, slice, map, or custom resource copy policy.
-The Graph calls native Clone code before handing S to a node and before
-returning S as O. Clone panics become execution errors; there is no reflective
-or shallow-copy fallback.
+Framework options such as metadata cascade through `runnable.OptionPlan`.
+Provider- or node-specific options use `runnable.NodeOption`; graph-local node
+options use `graph.WithNodeOptions`. State handlers are Graph options and are
+never forwarded to the pure node.
+
+Cancellation, deadlines, Trace, Callback, identity and Checkpoint values remain
+in `context.Context`. They are not copied into `OptionSet` or persisted as
+runtime State.
+
+## Agent recipes
+
+`pkg/agent` is a fast assembly layer over the same Graph engine:
+
+- Basic: one model node.
+- ReAct: `llm -> tools -> llm`, bounded by model-call and Graph step limits.
+- Routing: `decide -> dispatch -> decide` in Supervisor mode, or one dispatch
+  in Router mode.
+- GroupChat: one fixed dispatch node with a bounded self-edge.
+
+Nested Agents and Graphs create independent lifecycle scopes. Graph nodes have
+their own child spans, so APM systems retain node-level waterfall timing.
+
+## Compilation
+
+`Compile` freezes the graph and validates topology, reachability, conditional
+fallbacks, node and handler types, END output, State Factory, State Codec,
+parallel branches and nested graph cycles. Reflection is used to bind and
+validate types and to invoke erased node adapters; application nodes still
+receive their declared Go types.

@@ -51,7 +51,7 @@ func reduceMessageEvents(ctx context.Context, stream runnable.Stream[schema.Mess
 			if item.Err != nil {
 				return nil, item.Err
 			}
-			if item.Value.Kind == schema.MessageEventSnapshot && len(item.Value.Messages) > 0 {
+			if item.Value.Kind == schema.MessageEventSnapshot {
 				final = schema.CloneMessages(item.Value.Messages)
 			}
 			if item.Value.Kind == schema.MessageEventDone {

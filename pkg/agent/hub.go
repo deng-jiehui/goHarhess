@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 
 	"goharness/internal/agentrecipe"
 	"goharness/pkg/graph"
@@ -24,7 +25,7 @@ func NewHub(agents []Agent) (*Hub, error) {
 
 	seen := map[string]struct{}{}
 	for _, a := range agents {
-		if a == nil {
+		if isNilAgent(a) {
 			return nil, errors.New("hub agent cannot be nil")
 		}
 		name := a.Name()
@@ -37,6 +38,19 @@ func NewHub(agents []Agent) (*Hub, error) {
 		seen[name] = struct{}{}
 	}
 	return &Hub{agents: append([]Agent(nil), agents...)}, nil
+}
+
+func isNilAgent(value Agent) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (h *Hub) Agents() []Agent {

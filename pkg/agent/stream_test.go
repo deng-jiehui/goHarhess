@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,18 @@ func TestAgentStreamBuffersOutputAsynchronously(t *testing.T) {
 	}
 }
 
+func TestBasicAgentRejectsModelStreamWithoutDone(t *testing.T) {
+	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: incompleteModel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = value.Invoke(context.Background(), []schema.Message{schema.UserMessage("truncated")})
+	if err == nil || !strings.Contains(err.Error(), "without done event") {
+		t.Fatalf("Invoke error = %v", err)
+	}
+}
+
 type burstModel struct {
 	produced chan struct{}
 }
@@ -92,3 +105,26 @@ func (m *burstModel) Capabilities() llm.Capabilities {
 func (m *burstModel) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{Name: "burst", Provider: "test", ModelType: "scripted"}
 }
+
+type incompleteModel struct{}
+
+func (incompleteModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
+	stream, err := (incompleteModel{}).Stream(ctx, request, options...)
+	if err != nil {
+		return llm.Response{}, err
+	}
+	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+}
+
+func (incompleteModel) Stream(context.Context, llm.Request, ...runnable.Option) (runnable.Stream[llm.Event], error) {
+	out := make(chan runnable.Item[llm.Event], 1)
+	out <- runnable.Item[llm.Event]{Value: llm.Event{
+		Kind:     llm.EventDelta,
+		Messages: []schema.Message{schema.AssistantMessage("partial")},
+	}}
+	close(out)
+	return out, nil
+}
+
+func (incompleteModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
+func (incompleteModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "incomplete"} }

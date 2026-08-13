@@ -2,8 +2,8 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"reflect"
-	"sync"
 
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -17,88 +17,21 @@ const (
 	DefaultMaxDepth = 32
 )
 
-// Cloner makes state ownership explicit and keeps cloning in generated or
-// hand-written native Go code. StateGraph never reflect-copies S.
-type Cloner[S any] interface {
-	Clone() S
-}
-
-// StateGenerator creates the strongly typed state placed on the graph's
-// START data edge.
-type StateGenerator[I any, S Cloner[S]] func(context.Context, I) S
-
-// StatePreHandler derives a node's typed input from the current graph State.
-// It is consumed by AddNode and is never forwarded to the underlying Runnable.
-type StatePreHandler[S, NI any] func(context.Context, S) (NI, error)
-
-// StatePostHandler applies a node's typed output to the current graph State.
-// Returning the unchanged S is valid and makes the no-op explicit.
-type StatePostHandler[S, NO any] func(context.Context, S, NO) (S, error)
-
-type stateBindingOption interface {
-	runnable.Option
-	bindState(*nodeBinding) error
-}
-
-type nodeBinding struct {
-	pre  *statePreBinding
-	post *statePostBinding
-}
-
-type statePreBinding struct {
-	stateType reflect.Type
-	inputType reflect.Type
-	invoke    func(context.Context, *stateScope) (erasedValue, error)
-}
-
-type statePostBinding struct {
-	stateType  reflect.Type
-	outputType reflect.Type
-	invoke     func(context.Context, *stateScope, erasedValue) error
-}
-
-type stateScope struct {
-	mu       sync.Mutex
-	typ      reflect.Type
-	snapshot func() (erasedValue, error)
-	replace  func(erasedValue) error
-}
-
-type stateScopeContextKey struct{}
-
-func withStateScope(ctx context.Context, scope *stateScope) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, stateScopeContextKey{}, scope)
-}
-
-func stateScopeFromContext(ctx context.Context) (*stateScope, bool) {
-	if ctx == nil {
-		return nil, false
-	}
-	scope, ok := ctx.Value(stateScopeContextKey{}).(*stateScope)
-	return scope, ok && scope != nil
-}
-
-// MessageState is the standard typed state for message-oriented workflows.
+// MessageState is the standard runtime State for message-oriented workflows.
+// Graph owns it by pointer; users do not implement Clone methods.
 type MessageState struct {
 	Messages []schema.Message
 	Output   []schema.Message
 }
 
-func (s MessageState) Clone() MessageState {
-	s.Messages = schema.CloneMessages(s.Messages)
-	s.Output = schema.CloneMessages(s.Output)
-	return s
-}
-
-type MessageGraph = StateGraph[[]schema.Message, []schema.Message, MessageState]
+type MessageGraph = Graph[[]schema.Message, []schema.Message]
 
 func NewMessageGraph(name string) *MessageGraph {
-	return NewStateGraph[[]schema.Message, []schema.Message, MessageState](name, func(_ context.Context, input []schema.Message) MessageState {
-		return MessageState{Messages: schema.CloneMessages(input)}
+	g := NewGraph[[]schema.Message, []schema.Message](name)
+	_ = g.SetStateFactory(func(_ context.Context, input []schema.Message) (*MessageState, error) {
+		return &MessageState{Messages: schema.CloneMessages(input)}, nil
 	})
+	return g
 }
 
 type erasedValue struct {
@@ -106,22 +39,10 @@ type erasedValue struct {
 	value any
 }
 
-type anyNode struct {
-	id          string
-	inputType   reflect.Type
-	outputType  reflect.Type
-	info        NodeInfo
-	options     []runnable.Option
-	pre         *statePreBinding
-	post        *statePostBinding
-	invoke      func(context.Context, erasedValue, ...runnable.Option) (erasedValue, error)
-	compile     func(map[uintptr]bool) error
-	nestedGraph bool
-}
-
-type anyCondition struct {
-	inputType reflect.Type
-	invoke    func(context.Context, erasedValue) (bool, error)
+type graphComponent interface {
+	Compile() error
+	compileGraph(map[uintptr]bool) error
+	graphComponent()
 }
 
 type NodeInfo struct {
@@ -163,8 +84,8 @@ const (
 	EventGraphError EventType = "graph_error"
 )
 
-// Event is control-plane only. Strongly typed state and node values never
-// escape through an any-typed observation API.
+// Event is control-plane only. Runtime State and node values never escape
+// through an any-typed observation API.
 type Event struct {
 	Type   EventType
 	NodeID string
@@ -172,9 +93,7 @@ type Event struct {
 	Err    error
 }
 
-func typeOf[T any]() reflect.Type {
-	return reflect.TypeFor[T]()
-}
+func typeOf[T any]() reflect.Type { return reflect.TypeFor[T]() }
 
 func typeName(value reflect.Type) string {
 	if value == nil {
@@ -182,3 +101,32 @@ func typeName(value reflect.Type) string {
 	}
 	return value.String()
 }
+
+func nodeScopedOptions(options []runnable.Option) []runnable.Option {
+	scoped := make([]runnable.Option, len(options))
+	for index, option := range options {
+		if runnable.ScopeOf(option) == runnable.OptionScopeNode {
+			scoped[index] = option
+		} else {
+			scoped[index] = runnable.NodeOption(option)
+		}
+	}
+	return scoped
+}
+
+func walkReverse(start string, reverse map[string][]string) map[string]bool {
+	visited := map[string]bool{}
+	queue := []string{start}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+		queue = append(queue, reverse[current]...)
+	}
+	return visited
+}
+
+func edgePath(index int) string { return fmt.Sprintf("edges[%d]", index) }

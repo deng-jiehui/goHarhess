@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"goharness/pkg/callback"
+	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 	"goharness/pkg/state"
@@ -209,7 +210,12 @@ func (b *Base) checkBreakpoint(
 			engineState = &checkpoint
 		}
 		var graphState *state.GraphStateCheckpoint
-		if checkpoint, ok := state.GraphStateCheckpointFromContext(ctx); ok {
+		if checkpoint, ok, snapshotErr := graph.StateCheckpointFromContext(ctx); snapshotErr != nil {
+			return fmt.Errorf("snapshot Graph State at breakpoint %s: %w", point, snapshotErr)
+		} else if ok {
+			checkpointCopy := checkpoint.Clone()
+			graphState = &checkpointCopy
+		} else if checkpoint, ok := state.GraphStateCheckpointFromContext(ctx); ok {
 			checkpointCopy := checkpoint.Clone()
 			graphState = &checkpointCopy
 		} else if opts.graphState != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -41,7 +42,7 @@ func (a *App) Description() string {
 }
 
 func (a *App) AddRunnable(value runnable.NamedRunnable[[]schema.Message, []schema.Message]) error {
-	if value == nil {
+	if isNilRunnable(value) {
 		return errors.New("runnable cannot be nil")
 	}
 	name := value.Name()
@@ -70,10 +71,23 @@ func (a *App) Add(value runnable.NamedRunnable[[]schema.Message, []schema.Messag
 // This keeps naming metadata at the registry boundary while the component
 // itself only needs to implement Runnable.
 func (a *App) AddValue(name, description string, value runnable.Runnable[[]schema.Message, []schema.Message]) error {
-	if value == nil {
+	if isNilRunnable(value) {
 		return errors.New("runnable cannot be nil")
 	}
 	return a.AddRunnable(namedValue{name: name, description: description, value: value})
+}
+
+func isNilRunnable(value any) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 type namedValue struct {

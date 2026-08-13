@@ -41,3 +41,22 @@ func TestRunLifecycleRejectsStreamWithoutDone(t *testing.T) {
 		t.Fatal("incomplete stream produced a successful Done event")
 	}
 }
+
+func TestReduceMessageEventsAcceptsEmptyFinalSnapshot(t *testing.T) {
+	stream := make(chan runnable.Item[schema.MessageEvent], 3)
+	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{
+		Kind:     schema.MessageEventSnapshot,
+		Messages: []schema.Message{schema.AssistantMessage("stale")},
+	}}
+	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventSnapshot}}
+	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventDone}}
+	close(stream)
+
+	output, err := reduceMessageEvents(context.Background(), stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("output = %#v, want empty final snapshot", output)
+	}
+}

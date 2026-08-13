@@ -44,7 +44,6 @@ func bindRunContext(ctx context.Context, session *conversationSession, opts *Run
 	if checkpoint, ok := state.GraphStateCheckpointFromContext(ctx); ok {
 		copy := checkpoint.Clone()
 		opts.graphState = &copy
-		return state.IgnoreGraphStateCheckpoint(ctx)
 	}
 	return ctx
 }

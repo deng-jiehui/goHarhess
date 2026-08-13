@@ -50,6 +50,27 @@ func TestRoutingAgentSupervisorReturnsControlAfterSubAgent(t *testing.T) {
 	}
 }
 
+func TestRoutingAgentRejectsModelStreamWithoutDone(t *testing.T) {
+	worker, err := agent.NewBasicAgent(agent.BaseConfig{
+		Name:  "worker",
+		Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("worker")}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := agent.NewRoutingAgent(agent.SupervisorConfig{
+		BaseConfig: agent.BaseConfig{Name: "router", Model: incompleteModel{}},
+		SubAgents:  []agent.Agent{worker},
+		Mode:       agent.RoutingModeRouter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")}); err == nil || !strings.Contains(err.Error(), "without done event") {
+		t.Fatalf("routing error = %v", err)
+	}
+}
+
 func TestRoutingAgentRouterReturnsSubAgentOutputDirectly(t *testing.T) {
 	worker, err := agent.NewBasicAgent(agent.BaseConfig{
 		Name:  "writer",

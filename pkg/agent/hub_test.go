@@ -122,6 +122,13 @@ func TestGroupChatCollaboratesAcrossRounds(t *testing.T) {
 	}
 }
 
+func TestNewHubRejectsTypedNilAgent(t *testing.T) {
+	var typedNil *agent.BasicAgent
+	if _, err := agent.NewHub([]agent.Agent{typedNil}); err == nil {
+		t.Fatal("NewHub accepted a typed nil agent")
+	}
+}
+
 func TestGroupChatUsesCustomSelector(t *testing.T) {
 	alpha := &recordingAgent{name: "alpha"}
 	beta := &recordingAgent{name: "beta"}

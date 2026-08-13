@@ -62,34 +62,37 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	if hooks.Dispatch == nil {
 		return nil, errors.New("group recipe dispatch hook is required")
 	}
-	g := newRecipeGraph(name)
-	dispatch := runnable.Func[RecipeState, RecipeState](func(ctx context.Context, state RecipeState, _ ...runnable.Option) (RecipeState, error) {
+	g, err := newRecipeGraph(name)
+	if err != nil {
+		return nil, err
+	}
+	dispatch := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
 		run, err := groupStateFromContext(ctx)
 		if err != nil {
-			return RecipeState{}, err
+			return nil, err
 		}
 		if run.round >= hooks.MaxRounds {
 			run.continueRun = false
-			return state, nil
+			return schema.CloneMessages(messages), nil
 		}
 		if hooks.CheckBreakpoint != nil {
-			if err := hooks.CheckBreakpoint(ctx, state.Messages, schema.CloneMessages(run.response), run.round, run.lastAgent); err != nil {
-				return RecipeState{}, err
+			if err := hooks.CheckBreakpoint(ctx, messages, schema.CloneMessages(run.response), run.round, run.lastAgent); err != nil {
+				return nil, err
 			}
 		}
-		selected, stream, err := hooks.Dispatch(ctx, state.Messages, run.round, run.lastAgent)
+		selected, stream, err := hooks.Dispatch(ctx, messages, run.round, run.lastAgent)
 		if err != nil {
-			return RecipeState{}, err
+			return nil, err
 		}
 		if stream == nil {
-			return RecipeState{}, fmt.Errorf("group member %q returned a nil stream", selected)
+			return nil, fmt.Errorf("group member %q returned a nil stream", selected)
 		}
 		var roundOutput []schema.Message
 		accumulator := llm.NewDeltaAccumulator(true)
 		sawDone := false
 		for item := range stream {
 			if item.Err != nil {
-				return RecipeState{}, fmt.Errorf("group member %q: %w", selected, item.Err)
+				return nil, fmt.Errorf("group member %q: %w", selected, item.Err)
 			}
 			event := item.Value
 			if event.Kind == schema.MessageEventDone {
@@ -102,7 +105,7 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 			if event.Kind == schema.MessageEventDelta {
 				roundOutput, err = accumulator.Apply(llm.Event{Kind: llm.EventDelta, Messages: event.Messages})
 				if err != nil {
-					return RecipeState{}, err
+					return nil, err
 				}
 			} else {
 				roundOutput = schema.CloneMessages(event.Messages)
@@ -111,36 +114,46 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 			graph.EmitData(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: appendMessages(run.response, roundOutput)})
 		}
 		if !sawDone {
-			return RecipeState{}, fmt.Errorf("group member %q stream closed without done event", selected)
+			return nil, fmt.Errorf("group member %q stream closed without done event", selected)
 		}
 		if len(roundOutput) == 0 {
 			run.continueRun = false
-			return state, nil
+			return schema.CloneMessages(messages), nil
 		}
 		run.response = append(run.response, schema.CloneMessages(roundOutput)...)
-		state.Messages = append(state.Messages, schema.CloneMessages(roundOutput)...)
+		updated := appendMessages(messages, roundOutput)
 		run.round++
 		run.lastAgent = selected
 		run.continueRun = run.round < hooks.MaxRounds
-		return state, nil
+		return updated, nil
 	})
-	if err := graph.AddNode(g, "dispatch", dispatch); err != nil {
+	if err := g.AddNode("dispatch", dispatch,
+		graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+			return schema.CloneMessages(state.Messages), nil
+		}),
+		graph.WithPostHandler(func(_ context.Context, state *RecipeState, output []schema.Message) error {
+			state.Messages = schema.CloneMessages(output)
+			return nil
+		}),
+	); err != nil {
 		return nil, err
 	}
-	finish := runnable.Func[RecipeState, []schema.Message](func(ctx context.Context, _ RecipeState, _ ...runnable.Option) ([]schema.Message, error) {
+	finish := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
 		run, err := groupStateFromContext(ctx)
 		if err != nil {
 			return nil, err
 		}
 		return schema.CloneMessages(run.response), nil
 	})
-	if err := graph.AddNode(g, "finish", finish); err != nil {
+	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *RecipeState) ([]schema.Message, error) {
+		return schema.CloneMessages(state.Messages), nil
+	})); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge(graph.Start, "dispatch"); err != nil {
 		return nil, err
 	}
-	if err := graph.AddConditionalEdge(g, "dispatch", "dispatch", "next_round", func(ctx context.Context, _ RecipeState) (bool, error) {
+	if err := g.AddBranch("dispatch", "dispatch", "next_round", func(ctx context.Context, _ *RecipeState) (bool, error) {
 		run, err := groupStateFromContext(ctx)
 		if err != nil {
 			return false, err

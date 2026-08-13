@@ -167,6 +167,11 @@ func (b *Base) prepareMessages(messages []schema.Message, opts *RunOptions) []sc
 			opts.Lang = "en"
 		}
 	}
+	return prepared
+}
+
+func (b *Base) withSystemMessage(messages []schema.Message) []schema.Message {
+	prepared := schema.CloneMessages(messages)
 	if b.systemMessage == "" {
 		return prepared
 	}
@@ -202,6 +207,7 @@ func (b *Base) callLLM(ctx context.Context, messages []schema.Message, functions
 	if b.model == nil {
 		return nil, ErrMissingModel
 	}
+	messages = b.withSystemMessage(messages)
 	globalOptions := append([]runnable.Option(nil), opts.GlobalOptions...)
 	nodeOptions := append([]runnable.Option(nil), opts.NodeOptions...)
 	globalPlan, err := runnable.NewOptionPlan(globalOptions...)
