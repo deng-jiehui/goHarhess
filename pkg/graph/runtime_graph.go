@@ -43,6 +43,7 @@ type Graph[I, O any] struct {
 
 type runtimeNode struct {
 	id          string
+	component   any
 	inputType   reflect.Type
 	outputType  reflect.Type
 	info        NodeInfo
@@ -50,6 +51,9 @@ type runtimeNode struct {
 	pre         *runtimePreHandler
 	post        *runtimePostHandler
 	invoke      func(context.Context, any, []runnable.Option) (any, error)
+	stream      func(context.Context, any, []runnable.Option) (erasedStream, error)
+	collect     func(context.Context, erasedStream, []runnable.Option) (any, error)
+	transform   func(context.Context, erasedStream, []runnable.Option) (erasedStream, error)
 	compile     func(map[uintptr]bool) error
 	nestedGraph bool
 	parallel    *runtimeParallelNode
@@ -217,7 +221,7 @@ func (g *Graph[I, O]) AddNode(name string, node any, options ...NodeOption) erro
 		}
 	}
 	entry := runtimeNode{
-		id: name, inputType: inputType, outputType: outputType, info: info,
+		id: name, component: node, inputType: inputType, outputType: outputType, info: info,
 		options: nodeScopedOptions(config.options), pre: config.pre, post: config.post, invoke: invoker,
 	}
 	if component != nil {
@@ -354,7 +358,7 @@ func (g *Graph[I, O]) Compile() (*CompiledGraph[I, O], error) {
 	if err := runtime.compileGraph(map[uintptr]bool{}); err != nil {
 		return nil, err
 	}
-	return &CompiledGraph[I, O]{runtime: runtime}, nil
+	return compileRuntimePlans(runtime)
 }
 
 func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {

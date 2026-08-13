@@ -377,29 +377,29 @@ Commit: `refactor(graph)!: 分离构建器与不可变执行图`
 - Binds Box, Concat, Transform chains, Pre/Post, Branch, Fan-Out, and checkpoint barriers
 - Guarantees Graph Stream emits only final END `O`
 
-- [ ] **Step 1: Write failing direct-pipeline and barrier tests**
+- [x] **Step 1: Write failing direct-pipeline and barrier tests**
 
 Use instrumented native Transform nodes. Assert two sequential transforms
 receive one Reader chain with no intermediate Concat. Add a branch and assert
 one Concat occurs before predicate evaluation.
 
-- [ ] **Step 2: Write failing final-output test**
+- [x] **Step 2: Write failing final-output test**
 
 Emit three internal chunks and assert `CompiledGraph.Stream` yields exactly one
 complete END output followed by EOF.
 
-- [ ] **Step 3: Bind both plans during Compile**
+- [x] **Step 3: Bind both plans during Compile**
 
 Select native capabilities once. Store closed-over execution functions in the
 immutable node plan. Runtime branch selection chooses only among already-bound
 targets.
 
-- [ ] **Step 4: Integrate terminal lifecycle and continuation boundaries**
+- [x] **Step 4: Integrate terminal lifecycle and continuation boundaries**
 
 End node spans at Reader EOF/error/close. Never checkpoint a partial Reader;
 resume the first uncommitted segment boundary.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run: `go test -race -count=1 ./pkg/graph`
 

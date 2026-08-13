@@ -89,6 +89,28 @@ func TestConcatUsesReaderDomainStrategy(t *testing.T) {
 	}
 }
 
+func TestStreamReaderCollectUsesBoundConcat(t *testing.T) {
+	reader, writer := runnable.Pipe[string](context.Background(), runnable.WithConcat(func(accumulated, next string) (string, error) {
+		if accumulated == "" {
+			return next, nil
+		}
+		return accumulated + ":" + next, nil
+	}))
+	go func() {
+		_ = writer.Send("first")
+		_ = writer.Send("second")
+		_ = writer.Close()
+	}()
+
+	value, err := reader.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "first:second" {
+		t.Fatalf("Collect() = %q, want first:second", value)
+	}
+}
+
 func concatValues[T any](ctx context.Context, values ...T) (T, error) {
 	reader, writer := runnable.Pipe[T](ctx)
 	go func() {

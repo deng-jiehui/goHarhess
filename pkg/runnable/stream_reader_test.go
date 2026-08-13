@@ -70,6 +70,21 @@ func TestReaderCloseCancelsBlockedWriter(t *testing.T) {
 	}
 }
 
+func TestReaderCloseCancelsPipeContext(t *testing.T) {
+	reader, _ := runnable.Pipe[int](context.Background())
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reader.Context().Done():
+		if !errors.Is(reader.Context().Err(), context.Canceled) {
+			t.Fatalf("pipe context error = %v, want canceled", reader.Context().Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pipe context was not canceled")
+	}
+}
+
 func TestPipeHonorsParentCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	reader, writer := runnable.Pipe[int](ctx)

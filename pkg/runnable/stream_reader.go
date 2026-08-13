@@ -30,6 +30,7 @@ func WithConcat[T any](concat ConcatFunc[T]) PipeOption[T] {
 
 type pipeState[T any] struct {
 	ctx    context.Context
+	cancel context.CancelFunc
 	values chan T
 	done   chan struct{}
 	concat ConcatFunc[T]
@@ -58,10 +59,13 @@ func Pipe[T any](ctx context.Context, options ...PipeOption[T]) (*StreamReader[T
 			option(&config)
 		}
 	}
-	state := &pipeState[T]{ctx: ctx, values: make(chan T), done: make(chan struct{}), concat: config.concat}
 	if ctx == nil {
+		state := &pipeState[T]{values: make(chan T), done: make(chan struct{}), concat: config.concat}
 		state.finish(errNilPipeContext)
+		return &StreamReader[T]{state: state}, &StreamWriter[T]{state: state}
 	}
+	pipeCtx, cancel := context.WithCancel(ctx)
+	state := &pipeState[T]{ctx: pipeCtx, cancel: cancel, values: make(chan T), done: make(chan struct{}), concat: config.concat}
 	return &StreamReader[T]{state: state}, &StreamWriter[T]{state: state}
 }
 
@@ -72,6 +76,20 @@ func (r *StreamReader[T]) Recv() (T, error) {
 		return zero, errors.New("runnable stream reader is nil")
 	}
 	return r.recv(r.state.ctx)
+}
+
+// Collect consumes the stream using the Concat strategy bound when the Reader
+// was created.
+func (r *StreamReader[T]) Collect(ctx context.Context) (T, error) {
+	return Concat(ctx, r)
+}
+
+// Context is canceled when either side closes or the parent Context ends.
+func (r *StreamReader[T]) Context() context.Context {
+	if r == nil || r.state == nil || r.state.ctx == nil {
+		return context.Background()
+	}
+	return r.state.ctx
 }
 
 func (r *StreamReader[T]) recv(ctx context.Context) (T, error) {
@@ -156,6 +174,9 @@ func (s *pipeState[T]) finish(err error) {
 		s.terminal = err
 		s.mu.Unlock()
 		close(s.done)
+		if s.cancel != nil {
+			s.cancel()
+		}
 	})
 }
 

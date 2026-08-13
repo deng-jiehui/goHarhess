@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -400,5 +401,30 @@ func TestGraphCheckpointCanBeResumedMoreThanOnce(t *testing.T) {
 	}
 	if firstCalls.Load() != 2 || firstPostCalls.Load() != 2 {
 		t.Fatalf("first calls=%d post calls=%d", firstCalls.Load(), firstPostCalls.Load())
+	}
+}
+
+func TestCompiledGraphResumeStreamReturnsOnlyFinalOutput(t *testing.T) {
+	store := &byteCheckpointStore{}
+	var firstCalls atomic.Int32
+	var firstPostCalls atomic.Int32
+	g := newInterruptibleGraph(t, nil, &firstCalls, &firstPostCalls)
+	compiled := mustCompile(t, g)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(control.RequestInterrupt("pause", nil))
+	if _, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "resume-stream")); !errors.Is(err, graph.ErrInterrupted) {
+		t.Fatalf("Invoke error=%v", err)
+	}
+
+	reader, err := compiled.ResumeStream(context.Background(), graph.WithCheckpoint(store, "resume-stream"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := reader.Recv()
+	if err != nil || value != "input-first-second-1" {
+		t.Fatalf("ResumeStream value=%q err=%v", value, err)
+	}
+	if _, err := reader.Recv(); err != io.EOF {
+		t.Fatalf("ResumeStream end=%v, want EOF", err)
 	}
 }
