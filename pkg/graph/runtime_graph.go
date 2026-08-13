@@ -37,6 +37,8 @@ type Graph[I, O any] struct {
 	edges        []runtimeEdge
 	maxSteps     int
 	built        bool
+	revision     string
+	resumableErr error
 }
 
 type runtimeNode struct {
@@ -407,6 +409,9 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	if errs := g.validateRuntimeGraph(); len(errs) > 0 {
 		return errs
 	}
+	if err := g.compileRecoveryMetadata(); err != nil {
+		return err
+	}
 	g.built = true
 	return nil
 }
@@ -415,6 +420,11 @@ func (*Graph[I, O]) graphComponent() {}
 
 func (g *Graph[I, O]) Invoke(ctx context.Context, input I, options ...runnable.Option) (output O, err error) {
 	return g.invokeRuntime(ctx, input, options...)
+}
+
+// Resume loads and continues a previously interrupted execution.
+func (g *Graph[I, O]) Resume(ctx context.Context, options ...runnable.Option) (output O, err error) {
+	return g.resumeRuntime(ctx, options...)
 }
 
 func (g *Graph[I, O]) Snapshot() Snapshot {
