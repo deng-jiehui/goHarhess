@@ -2,39 +2,33 @@
 
 ## One execution contract
 
-All executable components implement the complete `runnable.Runnable[I, O]`
-contract: `Invoke`, `Stream`, `Collect`, and `Transform`.
+所有可执行组件都实现完整的 `runnable.Runnable[I, O]` 契约：`Invoke`、`Stream`、`Collect` 和 `Transform`。
 
 - Models: `Runnable[llm.Request, llm.Response]`.
 - ToolsNode: `Runnable[[]schema.Message, []schema.Message]`.
-- Agents and message graphs: `Runnable[[]schema.Message, []schema.Message]`.
+- Agent 和消息 Graph：`Runnable[[]schema.Message, []schema.Message]`。
 - General graphs compile to `Runnable[I, O]`.
 
-`Stream` returns `*runnable.StreamReader[O]`; a compiled Graph exposes only its
-complete END result. Live model chunks, tool progress, and Agent snapshots use
-typed Context EventStream callbacks. Graph lifecycle events use the typed Graph
-Callback interface and never enter the business data Reader.
+`Stream` 返回 `*runnable.StreamReader[O]`；编译后的 Graph 仅暴露其
+完整的 END 结果。实时模型分片、工具进度和 Agent 快照通过类型化 Context EventStream 回调传递。Graph 生命周期事件使用类型化 Graph Callback 接口，绝不会进入业务数据 Reader。
 
-## Graph boundary and pure nodes
+## Graph 边界与纯节点
 
-Only the public graph input and output are generic:
+只有公开的 Graph 输入和输出使用泛型：
 
 ```go
 g := graph.NewGraph[Request, Response]("research")
 ```
 
-`g.AddNode` accepts any component with this method shape:
+`g.AddNode` 接受具有以下方法形式的任何组件：
 
 ```go
 Invoke(context.Context, NI, ...runnable.Option) (NO, error)
 ```
 
-ChatModelNode, ToolsNode, MCP, Retriever and child Agent nodes remain ordinary
-Runnables. They never import or inspect Graph State. Wrap a provider model with
-`llm.NewChatModelNode` before mounting it so model lifecycle callbacks and the
-`chat_model` node kind are attached at the component boundary. `AddNode` records
-the component kind and input/output `reflect.Type` once; `Compile` validates
-every edge and END output before execution.
+ChatModelNode、ToolsNode、MCP、Retriever 和子 Agent 节点仍是普通 Runnable。它们不会导入或检查 Graph State。挂载前使用
+挂载前使用 `llm.NewChatModelNode` 包装，使模型生命周期回调和 `chat_model` 节点类型附着在组件边界。`AddNode` 记录
+组件类型及输入/输出 `reflect.Type` 只记录一次；`Compile` 会在执行前校验每条边和 END 输出。
 
 ```go
 _ = g.AddNode("collect", collector)
@@ -45,8 +39,7 @@ _ = g.AddEdge("render", graph.End)
 _ = g.Compile()
 ```
 
-Branches are also instance methods. A predicate may consume the source node
-output or the exact runtime State pointer:
+分支同样是实例方法。谓词可以消费源节点输出或运行时的精确 State 指针：
 
 ```go
 _ = g.AddBranch("chat", "tools", "has_tool_calls",
@@ -59,8 +52,7 @@ _ = g.AddEdge("chat", "finish") // unconditional fallback
 
 ## Runtime State
 
-State is optional. Stateful graphs register one factory whose result is a
-non-nil pointer to a struct:
+State 是可选的。有状态 Graph 注册一个工厂，其结果必须是非 nil 的结构体指针：
 
 ```go
 type ResearchState struct {
@@ -73,9 +65,8 @@ _ = g.SetStateFactory(func(_ context.Context, input Request) (*ResearchState, er
 })
 ```
 
-Every invocation owns one concrete `*ResearchState`. Sequential nodes reuse
-that exact pointer. Users do not implement `Clone`, call `GetState`, or mutate
-State from pure components. Graph-owned handlers are the mapping boundary:
+每次调用拥有一个具体的 `*ResearchState`。顺序节点复用
+该精确指针。用户无需实现 `Clone`、调用 `GetState`，也不要从纯组件修改 State。由 Graph 所有的 Handler 负责映射边界：
 
 ```go
 _ = g.AddNode("search", retriever,
@@ -93,32 +84,23 @@ _ = g.AddNode("search", retriever,
 )
 ```
 
-Without a PreHandler, the incoming edge value must be assignable to the node
-input. A PostHandler mutates State but does not replace the outgoing edge value;
-the node output remains available to downstream nodes and output-based branches.
+没有 PreHandler 时，入边值必须可赋给节点输入。PostHandler 可以修改 State，但不会替换出边值；节点输出仍可供下游节点和基于输出的分支使用。
 
-No user function runs while Graph holds its topology lock. Nodes and handlers
-receive the node execution Context, including cancellation, deadline, Trace and
-Callback span values.
+Graph 持有拓扑锁时不会运行用户函数。节点和 Handler 接收节点执行 Context，其中包含取消、截止时间、Trace 和 Callback span 值。
 
 ## State snapshots
 
-Sequential execution performs no State serialization. Snapshot work happens
-only at ownership or durability boundaries:
+顺序执行不会序列化 State。快照工作只发生在所有权或持久性边界：
 
 | Boundary | Codec work |
 | --- | --- |
 | Sequential node or branch | none |
 | Fan-Out | encode base once, decode one State per branch |
-| Durable interrupt | encode lazily when the checkpoint is requested |
+| 持久化中断 | 请求 Checkpoint 时延迟编码 |
 | Resume | decode once at Graph entry |
 | Ordinary completion | none |
 
-The default State Codec is strict JSON. State fields must be exported and may
-not use `json:"-"`; channels, functions, unsafe pointers and other runtime
-resources are rejected. Dynamic values stored in `any` must retain their exact
-Go type across a snapshot. Install a typed custom Codec for protobuf, msgpack,
-private fields or domain-specific resources:
+默认 State Codec 是严格 JSON。State 字段必须导出，不能使用 `json:"-"`；通道、函数、非安全指针及其他运行时资源会被拒绝。存储在 `any` 中的动态值必须在快照前后保持精确的 Go 类型。对于 protobuf、msgpack、私有字段或领域资源，请安装类型化自定义 Codec：
 
 ```go
 codec, err := graph.NewStateCodec[*ResearchState](
@@ -129,26 +111,17 @@ if err == nil {
 }
 ```
 
-Fan-Out branches receive independent State pointers and merge in declaration
-order through an explicit `WithStateMerger`. A failed branch cancels siblings
-and skips the merge.
+Fan-Out 分支接收独立的 State 指针，并通过显式 `WithStateMerger` 按声明顺序合并。分支失败会取消兄弟分支并跳过合并。
 
 ## Durable cursors
 
-Every executing node pushes a JSON-clean `graph.CursorFrame`. Interrupted
-checkpoints persist the complete `CursorStack`; resume consumes the matching
-top frame without rebuilding a Go call stack. Runtime objects such as contexts,
-goroutines, clients and tool batches are never stored.
+每个执行中的节点都会压入一个可安全编码为 JSON 的 `graph.CursorFrame`。中断的 Checkpoint 持久化完整 `CursorStack`；Resume 消费匹配的
+顶层帧，无需重建 Go 调用栈。Context、goroutine、客户端和工具批次等运行时对象从不存储。
 
-A resumable Graph requires a State Codec and a PreHandler for every possible
-resume target. Arbitrary heterogeneous edge values are not serialized. Graph
-validates the checkpoint schema, graph name, deterministic revision, Codec and
-resume node before invoking user code.
+可恢复 Graph 要求每个可能的恢复目标都有 State Codec 和 PreHandler。任意异构边值不会被序列化。Graph 会在调用用户代码前校验 Checkpoint Schema、Graph 名称、确定性版本、Codec 和恢复节点。
 
-Only a typed `control.InterruptRequest` returned by a component or installed as
-the cause of `context.WithCancelCause` creates a Continuation. Plain cancellation
-and deadlines never save one. Configure persistence per invocation and resume
-with the same application-owned key:
+只有组件返回或设为 `context.WithCancelCause` cause 的类型化 `control.InterruptRequest` 才会创建 Continuation。普通取消
+普通取消和截止时间不会保存 Continuation。按调用配置持久化，并使用同一个由应用拥有的 key 恢复：
 
 ```go
 output, err := g.Invoke(ctx, input, graph.WithCheckpoint(store, key))
@@ -157,53 +130,38 @@ if errors.Is(err, graph.ErrInterrupted) {
 }
 ```
 
-Recovery is at-least-once. A node interrupted during execution and every branch
-of an interrupted parallel node may run again. The framework deliberately does
-not provide leases, distributed locks, fencing or one-time checkpoint deletion;
-multi-replica applications must serialize Resume before entering Graph.
+恢复语义为 at-least-once。执行中断的节点以及中断并行节点的每个分支都可能再次运行。框架有意不提供 Lease、分布式锁、fencing 或一次性 Checkpoint 删除；多副本应用必须在进入 Graph 前串行化 Resume。
 
-Built-in Agent recipes use this same Graph Continuation. Normal sequential runs
-perform no State encoding. Agent prompts are injected immediately before each
-model call, so durable State contains caller-owned conversation history rather
-than an old Agent instance's prompt or credentials.
+内置 Agent 配方使用同一 Graph Continuation。普通顺序运行不会编码 State。Agent Prompt 会在每次模型调用前立即注入，因此持久化 State 保存调用方拥有的会话历史，而不是旧 Agent 实例的 Prompt 或凭据。
 
-## Options and Context
+## Option 与 Context
 
-Framework options such as metadata cascade through `runnable.OptionPlan`.
+metadata 等框架 Option 通过 `runnable.OptionPlan` 级联。
 Provider- or node-specific options use `runnable.NodeOption`; graph-local node
-options use `graph.WithNodeOptions`. State handlers are Graph options and are
-never forwarded to the pure node.
+Option 使用 `graph.WithNodeOptions`。State Handler 属于 Graph Option，绝不会转发给纯节点。
 
-Cancellation, deadlines, Trace, Callback and identity remain in
-`context.Context`. Graph checkpoint configuration is an invocation option and
-is consumed by Graph rather than forwarded to pure nodes.
+取消、截止时间、Trace、Callback 和身份信息仍保留在
+`context.Context`。Graph Checkpoint 配置属于调用 Option，
+由 Graph 消费，不会转发给纯节点。
 
 ## Agent recipes
 
-`pkg/agent` is a fast assembly layer over the same Graph engine:
+`pkg/agent` 是同一 Graph 引擎上的快速组装层：
 
 - Basic: one `chat_model` node.
-- ReAct: `chat_model -> tools -> chat_model`, bounded by model-call and Graph
+- ReAct：`chat_model -> tools -> chat_model`，受模型调用和 Graph
   step limits.
 - Routing: `decide(chat_model) -> agent:<name> -> decide` in Supervisor mode;
-  Router mode executes one selected Agent node and finishes.
+  Router 模式执行一个选定的 Agent 节点后结束。
 - GroupChat: `select -> agent:<name> -> select`, bounded by round count.
 
-`agent.AgentNode` is the public child-node adapter. It returns a typed
-`runnable.Outcome` so Supervisor mode can turn a child failure into an
-observation while Router and GroupChat can propagate the same failure. Child
-execution is still a real Graph node, so snapshots, callbacks and Continuation
-resume points expose the selected Agent name instead of an opaque dispatch step.
+`agent.AgentNode` 是公开的子节点适配器。它返回类型化 `runnable.Outcome`，使 Supervisor 模式可以将子节点失败转为
+观测，而 Router 和 GroupChat 可以传播同一失败。子执行仍是真实的 Graph 节点，因此快照、回调和 Continuation 恢复点会暴露所选 Agent 名称，而不是不透明的分发步骤。
 
-Nested Agents and Graphs create independent lifecycle scopes. Graph nodes have
-their own child spans, so APM systems retain node-level waterfall timing.
-`graph.NodeExecution` carries the compiled node kind and input/output types in
-addition to node ID and step.
+嵌套 Agent 和 Graph 创建独立的生命周期作用域。Graph 节点拥有自己的子 span，因此 APM 系统仍能保留节点级瀑布时序。
+除节点 ID 和 step 外，`graph.NodeExecution` 还携带编译后的节点类型及输入/输出类型。
 
 ## Compilation
 
-`Compile` freezes the graph and validates topology, reachability, conditional
-fallbacks, node and handler types, END output, State Factory, State Codec,
-parallel branches and nested graph cycles. Reflection is used to bind and
-validate types and to invoke erased node adapters; application nodes still
-receive their declared Go types.
+`Compile` 冻结 Graph，并校验拓扑、可达性、条件
+回退、节点和 Handler 类型、END 输出、State Factory、State Codec、并行分支以及嵌套 Graph 循环。Reflection 用于绑定和校验类型并调用擦除类型的节点适配器；应用节点仍接收其声明的 Go 类型。

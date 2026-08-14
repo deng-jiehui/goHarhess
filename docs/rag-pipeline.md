@@ -1,9 +1,8 @@
-# RAG Pipeline
+# RAG 管道
 
-The RAG implementation has three independent stages: document indexing,
-hybrid retrieval, and reference assembly for Agents.
+RAG 实现包含三个独立阶段：文档索引、混合检索和为 Agent 组装引用。
 
-## Chunk and index
+## 分块与索引
 
 ```go
 chunker, err := retrieval.NewTextChunker(retrieval.ChunkConfig{
@@ -26,12 +25,10 @@ indexer, err := retrieval.NewDocumentIndexer(retrieval.IndexerConfig{
 stats, err := indexer.Invoke(ctx, documents)
 ```
 
-The chunker uses a sliding token window with overlap and prefers paragraph,
-sentence, line, and word boundaries. It records stable chunk IDs, rune offsets,
-token count, and source metadata. Inject the embedding model's tokenizer for
-strict limits; the built-in counter is an approximation.
+分块器使用带重叠的滑动 Token 窗口，并优先选择段落、
+句子、行和单词边界。它记录稳定的 chunk ID、rune 偏移、Token 数量和来源元数据。若需严格限制，请注入 Embedding 模型的 tokenizer；内置计数器只是近似值。
 
-## Hybrid retrieval
+## 混合检索
 
 ```go
 searcher, err := retrieval.NewHybridSearcher(retrieval.HybridSearchConfig{
@@ -48,29 +45,23 @@ searcher, err := retrieval.NewHybridSearcher(retrieval.HybridSearchConfig{
 })
 ```
 
-Keyword retrieval runs in parallel with query embedding and vector retrieval.
-Results are deduplicated by ID (or text hash), then combined with RRF or
-normalized weighted fusion. MMR is optional and requests vectors only when it
-is enabled. Rerank is optional; `StrictRerank` controls fallback behavior, and
-`RequireBoth` controls whether one failed retrieval branch may degrade to the
-other branch.
+关键词检索与查询 Embedding 和向量检索并行执行。
+结果按 ID（或文本哈希）去重，然后通过 RRF 或归一化加权融合。MMR 可选，仅在启用时请求向量。Rerank 可选；`StrictRerank` 控制回退行为，
+`RequireBoth` 控制一个检索分支失败时是否允许降级为仅使用另一个分支。
 
 `HybridQuery.VectorRaw` carries backend-specific settings such as Qdrant
 `hnsw_ef`, Milvus `nprobe`, or equivalent adapter parameters. Branch candidate
-counts automatically grow when a request asks for a larger final TopK.
+当请求更大的最终 TopK 时，分支候选数量会自动增加。
 
-Run retrieval with the same canonical contract:
+使用同一规范契约执行检索：
 
 ```go
 hits, err := searcher.Invoke(ctx, retrieval.HybridQuery{Text: query, TopK: 8})
 ```
 
-## Model reference context
+## 模型引用上下文
 
-`retrieval.HybridRetriever` implements
-`Runnable[retrieval.ReferenceRequest, string]`. It builds a file filter, emits
-citation-bearing reference blocks, and truncates them to `ReferenceRequest.MaxTokens`.
+`retrieval.HybridRetriever` 实现 `Runnable[retrieval.ReferenceRequest, string]`。它构建文件过滤器，生成带引用的参考 Block，并按 `ReferenceRequest.MaxTokens` 截断。
 
-Documents should include a `file` metadata value when the default file filter
-is used. Applications with another metadata schema can supply a custom
+使用默认文件过滤器时，文档应包含 `file` 元数据。使用其他元数据结构的应用可以提供自定义
 `retrieval.FileFilterBuilder`.

@@ -46,9 +46,7 @@ messages, err := assistant.Invoke(ctx, []schema.Message{
 })
 ```
 
-Messages store an ordered `ContentBlocks` slice. Block arguments are kept in
-the order passed to `NewMessage`, so a text-plus-image request can be written
-as:
+消息通过有序的 `ContentBlocks` 切片保存内容。Block 参数保持传给 `NewMessage` 的顺序，因此文本加图片的请求可以写成：
 
 ```go
 input := []schema.Message{
@@ -59,27 +57,19 @@ input := []schema.Message{
 }
 ```
 
-The accessors are deliberately top-level filtered views:
+这些访问器有意只提供顶层过滤视图：
 
-- `TextBlocks()` returns cloned top-level text payloads only.
-- `JoinedText(separator)` joins those same top-level text payloads with the
-  caller-supplied separator.
-- `ReasoningBlocks()` returns cloned top-level reasoning payloads only.
-- `FunctionToolCalls()` returns cloned top-level function-call payloads only.
-- `FunctionToolResults()` returns cloned top-level function-result payloads
-  only.
+- `TextBlocks()` 仅返回克隆后的顶层文本载荷。
+- `JoinedText(separator)` 使用调用方提供的分隔符连接同一批顶层文本载荷。
+- `ReasoningBlocks()` 仅返回克隆后的顶层推理载荷。
+- `FunctionToolCalls()` 仅返回克隆后的顶层函数调用载荷。
+- `FunctionToolResults()` 仅返回克隆后的顶层函数结果载荷。
 
-Nested result blocks, media, reasoning, opaque blocks, and their text are not
-included by any text accessor. Traverse `ContentBlocks` directly for complete
-mixed order, and traverse `FunctionToolResult.ContentBlocks` for nested order.
-Use `TextBlocks` when each text segment must remain distinct (for example,
-preserving authored boundaries); use `JoinedText("\n")` when a single explicit
-text representation is needed.
-There is no general-purpose message-to-string conversion: use `TextBlocks` to
-preserve segments, or `JoinedText(separator)` only when intentionally
-constructing one text protocol value.
+任何文本访问器都不会包含嵌套结果块、媒体、推理、Opaque 块及其中的文本。需要完整混合顺序时直接遍历 `ContentBlocks`，需要嵌套顺序时遍历 `FunctionToolResult.ContentBlocks`。
+当每个文本片段必须保持独立（例如保留作者边界）时使用 `TextBlocks`；需要一个明确的单一文本表示时使用 `JoinedText("\n")`。
+不存在通用的消息转字符串操作：使用 `TextBlocks` 保留片段，只有在有意构造一个文本协议值时才使用 `JoinedText(separator)`。
 
-Tool calls and results remain typed blocks in their messages:
+Tool 调用和结果在消息中始终保持为类型化 Block：
 
 ```go
 assistant := schema.NewMessage(schema.RoleAssistant,
@@ -94,16 +84,12 @@ toolResult := schema.NewMessage(schema.RoleTool,
 )
 ```
 
-The result's `CallID` and `Name` correlate it with the call. `isError=true`
-marks a model-visible tool failure; it is still content, not an implicit
-transport error.
+结果中的 `CallID` 和 `Name` 用于与调用关联。`isError=true` 表示模型可见的工具失败；它仍然是内容，不是隐式的传输错误。
 
-`ResponseMeta` is optional message metadata with `ID`, `Model`, `FinishReason`,
-`Usage`, and `Extra`. `Usage` is `*schema.TokenUsage`, whose counters are
+`ResponseMeta` 是可选的消息元数据，包含 `ID`、`Model`、`FinishReason`、`Usage` 和 `Extra`。`Usage` 类型为 `*schema.TokenUsage`，其计数器包括
 `InputTokens`, `OutputTokens`, `TotalTokens`, `ReasoningTokens`,
-`CacheReadTokens`, and `CacheWriteTokens` (plus `Extra`).
-`Opaque`/`NewOpaqueBlock` preserves provider-specific JSON. No accessor
-implicitly flattens or reorders content.
+`CacheReadTokens` 和 `CacheWriteTokens`（另含 `Extra`）。
+`Opaque`/`NewOpaqueBlock` 用于保留 Provider 专属 JSON。任何访问器都不会隐式展平或重排内容。
 
 需要暂停/审批后释放执行栈时，为本次运行提供独立的执行 Checkpoint key。只有 typed
 `control.InterruptRequest` 会落盘，恢复使用相同 key：

@@ -11,13 +11,11 @@ Agent 和 `tool.ToolsNode` 共用公开的 `tool.Runtime`，不存在 Agent 私�
 
 ## ToolsNode
 
-Messages retain the exact order of their `ContentBlocks`. `ToolsNode` reads
-assistant `FunctionToolCall` blocks and emits one `RoleTool` message containing
+消息保留 `ContentBlocks` 的精确顺序。`ToolsNode` 读取
+Assistant 的 `FunctionToolCall` Block，并生成一个包含
 ordered `FunctionToolResult` blocks; result blocks may themselves contain
-nested text or media blocks. Use the typed top-level accessors for filtered
-views, or traverse `ContentBlocks` directly when order matters. No implicit
-text flattening occurs. See the README's canonical Message and ContentBlocks
-section for complete call/result and accessor examples.
+嵌套文本或媒体 Block 的 `RoleTool` 消息。需要过滤视图时使用类型化顶层访问器；顺序重要时直接遍历 `ContentBlocks`。不会发生隐式文本展平。构造和访问器详情请参阅 README 的规范 Message 与 ContentBlocks
+章节，查看完整的调用/结果与访问器示例。
 
 `ToolsNode` 是完整的 `runnable.Runnable[[]schema.Message, []schema.Message]`。它只执行消息末尾连续的 assistant function calls，按原调用顺序返回 function-result 消息。
 

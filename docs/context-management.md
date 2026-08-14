@@ -19,9 +19,8 @@ Context Engine
 
 ## Checkpoint Store
 
-The core module depends only on `state.Store`. Redis persistence is provided
-by the optional `goharness/extensions` module; import it as
-`redisstore "goharness/extensions/state/redis"` when needed.
+核心模块只依赖 `state.Store`。Redis 持久化由可选的 `goharness/extensions` 模块提供；需要时以
+`redisstore "goharness/extensions/state/redis"` 导入。
 
 内存 Store 适合单进程应用和测试：
 

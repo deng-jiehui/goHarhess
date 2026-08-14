@@ -1,16 +1,10 @@
-# LLM Providers
+# LLM Provider
 
-The framework executes models through `llm.ChatModel`, which combines the complete
-`runnable.Runnable[llm.Request, llm.Response]` contract, capabilities, and safe
-model metadata. Provider wire methods remain private.
+框架通过 `llm.ChatModel` 执行模型，它组合了完整的 `runnable.Runnable[llm.Request, llm.Response]` 契约、能力声明和安全的模型元数据。Provider 线路方法保持为私有实现。
 
-## OpenAI-compatible providers
+## OpenAI-compatible Provider
 
-The built-in adapter is registered as `openai-compatible` and `openai`. DeepSeek
-is registered as `deepseek` and uses the same adapter with a DeepSeek default
-endpoint and reasoning-content input enabled. DashScope/Qwen are registered as
-`dashscope` and `qwen` and use DashScope's OpenAI-compatible endpoint by
-default.
+内置适配器注册为 `openai-compatible` 和 `openai`。DeepSeek 注册为 `deepseek`，复用同一适配器，默认使用 DeepSeek 端点并启用 reasoning-content 输入。DashScope/Qwen 注册为 `dashscope` 和 `qwen`，默认使用 DashScope 的 OpenAI-compatible 端点。
 
 ```go
 model, err := llm.New(llm.Config{
@@ -21,42 +15,22 @@ model, err := llm.New(llm.Config{
 })
 ```
 
-Any OpenAI-compatible service can use `ModelType: "openai-compatible"` and set
-`ModelServer` to its API base URL. A shared `Config.HTTPClient` may be supplied
-when several models should use the same connection pool.
+任何 OpenAI-compatible 服务都可以使用 `ModelType: "openai-compatible"`，并将 `ModelServer` 设置为其 API 基础 URL。多个模型需要共享同一连接池时，可以提供共享的 `Config.HTTPClient`。
 
-Without an injected client, model providers use `pkg/httpclient.DefaultPool`.
-The same Transport is also used by retrieval and inference REST services; its
-zero-timeout LLM client remains suitable for long SSE streams.
+未注入客户端时，模型 Provider 使用 `pkg/httpclient.DefaultPool`。同一 Transport 也用于检索和推理 REST 服务；零超时 LLM 客户端仍适合长时间 SSE 流。
 
-## Normalized streams
+## 规范化流
 
-Providers reduce private wire events into one complete `llm.Response` returned
-through `*runnable.StreamReader[llm.Response]`. SSE framing, decompression, and
-provider chunk decoding are private package details. Live partial Responses are
-published through typed Context EventStream callbacks and never enter the
-Reader's final-result data plane.
-Reasoning fields named `reasoning_content`, `reasoning`, `thinking`, or
-`thought` are normalized to `schema.NewReasoningBlock` entries in the ordered
-`Message.ContentBlocks` slice. Tool-call argument fragments are merged into
-`NewFunctionToolCallBlock` entries before the final Response is committed.
-Adapters preserve block order and use `RoleTool` plus
-`NewFunctionToolResultBlock` for results. Unsupported provider payloads remain
-`NewOpaqueBlock` values or produce an explicit error; they are never silently
-flattened or discarded. See the README's canonical Message and ContentBlocks
-section for constructor and accessor details.
+Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `*runnable.StreamReader[llm.Response]` 返回。SSE 分帧、解压和 Provider 分片解码属于包内部细节。实时的部分 Response 通过类型化 Context EventStream 回调发布，绝不会进入 Reader 的最终结果数据面。
 
-## Capabilities
+名为 `reasoning_content`、`reasoning`、`thinking` 或 `thought` 的推理字段会规范化为有序 `Message.ContentBlocks` 切片中的 `schema.NewReasoningBlock` 条目。工具调用参数片段会在最终 Response 提交前合并为 `NewFunctionToolCallBlock` 条目。适配器保留 Block 顺序，并用 `RoleTool` 和 `NewFunctionToolResultBlock` 表示结果。不支持的 Provider 载荷会保留为 `NewOpaqueBlock` 值或产生明确错误；绝不会静默展平或丢弃。构造函数和访问器详情请参阅 README 的规范 Message 与 ContentBlocks 章节。
 
-Every `llm.ChatModel` declares streaming, tool-call, vision, JSON-schema, and
-reasoning support through `Capabilities()`.
+## 能力
 
-## Optional retry
+每个 `llm.ChatModel` 都通过 `Capabilities()` 声明对流式、工具调用、视觉、JSON-schema 和推理的支持。
 
-Retries are opt-in and can wrap any model with `llm.NewRetryingModel`. The
-decorator retries only retryable request failures and stream errors that arrive
-before the first data event; partial streams are never replayed.
+## 可选重试
 
-`llm.NewRateLimitedModel` provides an optional concurrency limit and minimum
-request-start interval. These decorators can be composed in either order with
-the application's own circuit-breaker policy.
+重试默认关闭，可以使用 `llm.NewRetryingModel` 包装任意模型。该装饰器只重试可重试的请求失败，以及首个数据事件前到达的流错误；部分流绝不会重放。
+
+`llm.NewRateLimitedModel` 提供可选的并发限制和最小请求启动间隔。这些装饰器可按任意顺序与应用自己的熔断策略组合。

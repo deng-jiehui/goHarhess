@@ -1,8 +1,7 @@
-# Retrieval and Inference HTTP Services
+# 检索与推理 HTTP 服务
 
-`pkg/httpclient.DefaultPool` is the shared transport boundary for HTTP-based
-integrations. One `http.Transport` automatically maintains separate connection
-pools per target host. Clients with different timeouts share that Transport.
+`pkg/httpclient.DefaultPool` 是基于 HTTP 的集成默认连接池。
+一个 `http.Transport` 会按目标主机自动维护独立连接池，不同超时的客户端共享该 Transport。
 
 ```text
 DefaultPool / one Transport
@@ -11,7 +10,7 @@ DefaultPool / one Transport
   client timeout=10s  -> embedding and rerank APIs
 ```
 
-## Service examples
+## 服务示例
 
 Qdrant:
 
@@ -24,37 +23,31 @@ service, err := httpclient.NewService(httpclient.ServiceConfig{
 })
 ```
 
-Pinecone uses the same configuration with `APIKeyHeader: "Api-Key"`.
-Elasticsearch API-key authentication can set `APIKeyHeader: "Authorization"`
-and `APIKeyPrefix: "ApiKey "`. Chroma or internal Milvus REST gateways can omit
-the API key. Hosted embedding and rerank APIs normally use the default Bearer
-authorization.
+Pinecone 使用相同配置，并将 `APIKeyHeader` 设为 `"Api-Key"`。
+Elasticsearch 可以将 `APIKeyHeader` 设为 `"Authorization"`，并设置
+`APIKeyPrefix: "ApiKey "`。Chroma 或内部 Milvus REST 网关可以省略 API key。
+托管的 Embedding 和 Rerank API 通常使用默认 Bearer 授权。
 
-Adapters implement provider-neutral `runnable.Runnable` contracts directly:
+适配器直接实现与 Provider 无关的 `runnable.Runnable` 契约：
 
-- Vector databases: `Runnable[retrieval.VectorRequest, retrieval.VectorResponse]`.
-- Search engines: `Runnable[retrieval.TextSearchRequest, []retrieval.SearchHit]`.
-- Embedding: `Runnable[retrieval.EmbeddingRequest, retrieval.EmbeddingResponse]`.
-- Rerank: `Runnable[retrieval.RerankRequest, []retrieval.RerankResult]`.
+- 向量数据库：`Runnable[retrieval.VectorRequest, retrieval.VectorResponse]`。
+- 搜索引擎：`Runnable[retrieval.TextSearchRequest, []retrieval.SearchHit]`。
+- Embedding：`Runnable[retrieval.EmbeddingRequest, retrieval.EmbeddingResponse]`。
+- Rerank：`Runnable[retrieval.RerankRequest, []retrieval.RerankResult]`。
 
-`VectorRequest.Operation` selects query, upsert, or delete without requiring
-multiple execution interfaces. HTTP adapters should use
-`httpclient.NewService` or `httpclient.NewClient`.
+`VectorRequest.Operation` 选择 query、upsert 或 delete，无需多个执行接口。
+HTTP 适配器应使用 `httpclient.NewService` 或 `httpclient.NewClient`。
 
-## Pool isolation
+## 连接池隔离
 
-Use a dedicated `httpclient.Pool` when an integration requires different mTLS
-certificates, a different proxy, custom dial behavior, or strict traffic
-isolation. Changing request timeout alone does not require a separate Pool.
+当集成需要不同的 mTLS 证书、不同代理、自定义拨号行为或严格流量隔离时，
+可以使用独立的 `httpclient.Pool`。仅改变请求超时不需要单独的 Pool。
+受控关闭期间，专用 Pool 不再需要时调用 `Pool.CloseIdleConnections`；活动请求不会被中断。
 
-Call `Pool.CloseIdleConnections` during controlled shutdown when a dedicated
-Pool is no longer needed. Active requests are not interrupted.
+## 向量查询缓存扩展
 
-## Vector query cache extension
-
-Caching is intentionally outside the framework module. Import the optional
-`goharness/extensions` module and wrap any concrete vector adapter with its
-cache decorator:
+缓存有意放在框架模块之外。导入可选的
+`goharness/extensions` 模块，并使用其中的缓存装饰器：
 
 ```go
 import retrievalcache "goharness/extensions/cache/retrieval"
@@ -69,12 +62,9 @@ vectorStore, err := retrievalcache.NewCachedVectorStore(qdrantStore, retrievalca
 })
 ```
 
-The extension module provides `RedisVectorCache` for multiple application
-instances. Exact-query keys include tenant, Store ID, vector, TopK, filters,
-namespace and include options. Concurrent misses for one key are combined.
+扩展模块为多实例应用提供 `RedisVectorCache`。精确查询键包含 tenant、Store ID、vector、TopK、filters、namespace 和 include 选项；相同键的并发未命中会合并。
 
-Successful `VectorUpsertOperation` and `VectorDeleteOperation` invocations increment a per-namespace data
-version. New queries stop seeing old cache entries immediately; old entries
-expire through TTL instead of requiring a Redis key scan. Use
-`retrievalcache.WithVectorCacheTenant` for tenant isolation and
-`retrievalcache.WithVectorCacheBypass` for freshness-critical reads.
+成功调用 `VectorUpsertOperation` 和 `VectorDeleteOperation` 会递增每个 namespace 的数据
+版本。新查询会立即看不到旧缓存条目；旧条目通过 TTL 过期，无需扫描 Redis key。
+使用 `retrievalcache.WithVectorCacheTenant` 实现 tenant 隔离，使用
+`retrievalcache.WithVectorCacheBypass` 处理对新鲜度敏感的读取。

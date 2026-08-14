@@ -1,13 +1,11 @@
-# MCP Tools
+# MCP 工具
 
-The core `pkg/tool` package exposes `Tool` and `ToolsNode`. `ToolsNode`
-accepts the trailing assistant function-call messages, executes only that
-suffix concurrently, and returns ordered tool-result messages to append before
-the next model turn.
+核心 `pkg/tool` 包提供 `Tool` 和 `ToolsNode`。`ToolsNode`
+接收末尾的 Assistant 函数调用消息，仅并发执行该后缀，并返回有序的工具结果消息，供下一轮模型调用前追加。
 
-The MCP integration lives in `extensions/mcp` so the core module does not take
-on an MCP SDK dependency. It uses `github.com/mark3labs/mcp-go` and supports
-stdio, SSE, streamable HTTP, and injected SDK clients.
+MCP 集成位于 `extensions/mcp`，因此核心模块无需依赖
+MCP SDK 依赖。它使用 `github.com/mark3labs/mcp-go`，支持
+stdio、SSE、可流式 HTTP 以及注入的 SDK 客户端。
 
 ```go
 client, err := mcp.NewClient(mcp.Config{
@@ -45,13 +43,13 @@ err = agentGraph.AddNode("mcp-tools", toolsNode,
 )
 ```
 
-The adapter translates MCP `tools/list` schemas into `tool.Spec.Parameters`
-and MCP `tools/call` results into `tool.Result`. MCP `isError` results remain
-model-visible content rather than becoming transport errors. A
-`notifications/tools/list_changed` notification marks the dynamic node dirty;
-the next invocation refreshes the schema and routing table.
+适配器将 MCP `tools/list` Schema 转换为 `tool.Spec.Parameters`，
+并将 MCP `tools/call` 结果转换为 `tool.Result`。MCP `isError` 结果仍是
+模型可见内容，而不是传输错误。收到
+`notifications/tools/list_changed` 通知会将动态节点标记为 dirty；
+下次调用时会刷新 Schema 和路由表。
 
-For React agents, the tools node is assembled automatically:
+对于 React Agent，工具节点会自动组装：
 
 ```go
 tools, err := client.Tools(ctx)
@@ -66,10 +64,9 @@ agentValue, err := agent.NewReactAgent(agent.ReactAgentConfig{
 })
 ```
 
-The resulting recipe contains the bounded `llm -> tools -> llm` loop. Users do
-not need to register a second tools node manually.
+生成的配方包含有界的 `llm -> tools -> llm` 循环。用户无需手动注册第二个工具节点。
 
-`ToolsNode` enforces its node-wide `MaxConcurrency` and each registered
+`ToolsNode` 对节点级 `MaxConcurrency` 以及每个已注册
 tool's `Spec.Concurrency` group limit across all simultaneous invocations.
-It shares the public `tool.Runtime` with Agent, so Middleware, retry, timeout,
-recursion and authorization policies follow the same execution contract.
+它与 Agent 共享公开的 `tool.Runtime`，因此 Middleware、重试、超时、
+递归和授权策略遵循相同的执行契约。
