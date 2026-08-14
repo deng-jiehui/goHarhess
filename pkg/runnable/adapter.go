@@ -10,7 +10,7 @@ type nativeInvoker[I, O any] interface {
 	Invoke(context.Context, I, ...Option) (O, error)
 }
 
-type nativeStreamer[I, O any] interface {
+type nativeStreamable[I, O any] interface {
 	Stream(context.Context, I, ...Option) (*StreamReader[O], error)
 }
 
@@ -37,7 +37,7 @@ func Adapt[I, O any](value any) (*Adapter[I, O], error) {
 		return nil, errors.New("runnable adapter value is nil")
 	}
 	invoker, hasInvoke := value.(nativeInvoker[I, O])
-	streamer, hasStream := value.(nativeStreamer[I, O])
+	streamable, hasStream := value.(nativeStreamable[I, O])
 	collector, hasCollect := value.(nativeCollector[I, O])
 	transformer, hasTransform := value.(nativeTransformer[I, O])
 	if !hasInvoke && !hasStream && !hasCollect && !hasTransform {
@@ -49,7 +49,7 @@ func Adapt[I, O any](value any) (*Adapter[I, O], error) {
 		adapter.invoke = invoker.Invoke
 	}
 	if hasStream {
-		adapter.stream = streamer.Stream
+		adapter.stream = streamable.Stream
 	}
 	if hasCollect {
 		adapter.collect = collector.Collect

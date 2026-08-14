@@ -157,6 +157,15 @@ type fixedChunker struct {
 func (c fixedChunker) Invoke(context.Context, retrieval.Document, ...runnable.Option) ([]retrieval.Chunk, error) {
 	return append([]retrieval.Chunk(nil), c.chunks...), nil
 }
+func (c fixedChunker) Stream(ctx context.Context, input retrieval.Document, options ...runnable.Option) (*runnable.StreamReader[[]retrieval.Chunk], error) {
+	return runnable.StreamFromInvoke(ctx, input, c.Invoke, options...)
+}
+func (c fixedChunker) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.Document], options ...runnable.Option) ([]retrieval.Chunk, error) {
+	return runnable.CollectFromInvoke(ctx, input, c.Invoke, options...)
+}
+func (c fixedChunker) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.Document], options ...runnable.Option) (*runnable.StreamReader[[]retrieval.Chunk], error) {
+	return runnable.TransformFromInvoke(ctx, input, c.Invoke, options...)
+}
 
 type batchEmbedder struct {
 	mu         sync.Mutex
@@ -172,6 +181,15 @@ func (e *batchEmbedder) Invoke(ctx context.Context, request retrieval.EmbeddingR
 		vectors[index] = []float32{float32(len(input))}
 	}
 	return retrieval.EmbeddingResponse{Vectors: vectors}, nil
+}
+func (e *batchEmbedder) Stream(ctx context.Context, input retrieval.EmbeddingRequest, options ...runnable.Option) (*runnable.StreamReader[retrieval.EmbeddingResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, e.Invoke, options...)
+}
+func (e *batchEmbedder) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.EmbeddingRequest], options ...runnable.Option) (retrieval.EmbeddingResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, e.Invoke, options...)
+}
+func (e *batchEmbedder) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.EmbeddingRequest], options ...runnable.Option) (*runnable.StreamReader[retrieval.EmbeddingResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, e.Invoke, options...)
 }
 
 func (e *batchEmbedder) BatchSizes() []int {
@@ -193,6 +211,15 @@ func (s *capturingVectorStore) Invoke(ctx context.Context, request retrieval.Vec
 	}
 	return retrieval.VectorResponse{}, nil
 }
+func (s *capturingVectorStore) Stream(ctx context.Context, input retrieval.VectorRequest, options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *capturingVectorStore) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (retrieval.VectorResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *capturingVectorStore) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, s.Invoke, options...)
+}
 
 func (s *capturingVectorStore) Batches() [][]retrieval.VectorRecord {
 	s.mu.Lock()
@@ -211,6 +238,15 @@ func (e fixedEmbedder) Invoke(context.Context, retrieval.EmbeddingRequest, ...ru
 	}
 	return retrieval.EmbeddingResponse{Vectors: [][]float32{append([]float32(nil), e.vector...)}}, nil
 }
+func (e fixedEmbedder) Stream(ctx context.Context, input retrieval.EmbeddingRequest, options ...runnable.Option) (*runnable.StreamReader[retrieval.EmbeddingResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, e.Invoke, options...)
+}
+func (e fixedEmbedder) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.EmbeddingRequest], options ...runnable.Option) (retrieval.EmbeddingResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, e.Invoke, options...)
+}
+func (e fixedEmbedder) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.EmbeddingRequest], options ...runnable.Option) (*runnable.StreamReader[retrieval.EmbeddingResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, e.Invoke, options...)
+}
 
 type fixedVectorStore struct {
 	mu        sync.Mutex
@@ -227,6 +263,15 @@ func (s *fixedVectorStore) Invoke(ctx context.Context, request retrieval.VectorR
 	}
 	return retrieval.VectorResponse{Hits: append([]retrieval.SearchHit(nil), s.hits...)}, s.err
 }
+func (s *fixedVectorStore) Stream(ctx context.Context, input retrieval.VectorRequest, options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *fixedVectorStore) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (retrieval.VectorResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *fixedVectorStore) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, s.Invoke, options...)
+}
 
 func (s *fixedVectorStore) LastQuery() retrieval.VectorQuery {
 	s.mu.Lock()
@@ -242,6 +287,15 @@ type fixedSearchEngine struct {
 func (s fixedSearchEngine) Invoke(context.Context, retrieval.TextSearchRequest, ...runnable.Option) ([]retrieval.SearchHit, error) {
 	return append([]retrieval.SearchHit(nil), s.hits...), s.err
 }
+func (s fixedSearchEngine) Stream(ctx context.Context, input retrieval.TextSearchRequest, options ...runnable.Option) (*runnable.StreamReader[[]retrieval.SearchHit], error) {
+	return runnable.StreamFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s fixedSearchEngine) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.TextSearchRequest], options ...runnable.Option) ([]retrieval.SearchHit, error) {
+	return runnable.CollectFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s fixedSearchEngine) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.TextSearchRequest], options ...runnable.Option) (*runnable.StreamReader[[]retrieval.SearchHit], error) {
+	return runnable.TransformFromInvoke(ctx, input, s.Invoke, options...)
+}
 
 type fixedReranker struct {
 	results []retrieval.RerankResult
@@ -250,6 +304,15 @@ type fixedReranker struct {
 
 func (r *fixedReranker) Invoke(context.Context, retrieval.RerankRequest, ...runnable.Option) ([]retrieval.RerankResult, error) {
 	return append([]retrieval.RerankResult(nil), r.results...), r.err
+}
+func (r *fixedReranker) Stream(ctx context.Context, input retrieval.RerankRequest, options ...runnable.Option) (*runnable.StreamReader[[]retrieval.RerankResult], error) {
+	return runnable.StreamFromInvoke(ctx, input, r.Invoke, options...)
+}
+func (r *fixedReranker) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.RerankRequest], options ...runnable.Option) ([]retrieval.RerankResult, error) {
+	return runnable.CollectFromInvoke(ctx, input, r.Invoke, options...)
+}
+func (r *fixedReranker) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.RerankRequest], options ...runnable.Option) (*runnable.StreamReader[[]retrieval.RerankResult], error) {
+	return runnable.TransformFromInvoke(ctx, input, r.Invoke, options...)
 }
 
 func mustHybridSearcher(t *testing.T, config retrieval.HybridSearchConfig) *retrieval.HybridSearcher {

@@ -153,7 +153,8 @@ func (h *HybridSearcher) Invoke(ctx context.Context, query HybridQuery, options 
 		candidateCount := min(len(fused), max(h.config.RerankTopK, finalTopK))
 		reranked, err := h.rerank(ctx, query, fused[:candidateCount], finalTopK, options...)
 		if err == nil {
-			return reranked, nil
+			callbackHits = cloneSearchHits(reranked)
+			return callbackHits, nil
 		}
 		if h.config.StrictRerank {
 			callbackErr = err
@@ -164,7 +165,19 @@ func (h *HybridSearcher) Invoke(ctx context.Context, query HybridQuery, options 
 	return callbackHits, nil
 }
 
+func (h *HybridSearcher) Stream(ctx context.Context, input HybridQuery, options ...runnable.Option) (*runnable.StreamReader[[]SearchHit], error) {
+	return runnable.StreamFromInvoke(ctx, input, h.Invoke, options...)
+}
+func (h *HybridSearcher) Collect(ctx context.Context, input *runnable.StreamReader[HybridQuery], options ...runnable.Option) ([]SearchHit, error) {
+	return runnable.CollectFromInvoke(ctx, input, h.Invoke, options...)
+}
+func (h *HybridSearcher) Transform(ctx context.Context, input *runnable.StreamReader[HybridQuery], options ...runnable.Option) (*runnable.StreamReader[[]SearchHit], error) {
+	return runnable.TransformFromInvoke(ctx, input, h.Invoke, options...)
+}
+
 var _ runnable.Runnable[HybridQuery, []SearchHit] = (*HybridSearcher)(nil)
+
+func (*HybridSearcher) NodeKind() runnable.NodeKind { return runnable.NodeKindRetriever }
 
 func NewHybridSearcher(cfg HybridSearchConfig) (*HybridSearcher, error) {
 	if cfg.Embedder == nil || cfg.VectorStore == nil || cfg.KeywordSearch == nil {

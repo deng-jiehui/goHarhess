@@ -159,7 +159,19 @@ func (i *DocumentIndexer) Invoke(ctx context.Context, documents []Document, opti
 	return stats, nil
 }
 
+func (i *DocumentIndexer) Stream(ctx context.Context, input []Document, options ...runnable.Option) (*runnable.StreamReader[IndexStats], error) {
+	return runnable.StreamFromInvoke(ctx, input, i.Invoke, options...)
+}
+func (i *DocumentIndexer) Collect(ctx context.Context, input *runnable.StreamReader[[]Document], options ...runnable.Option) (IndexStats, error) {
+	return runnable.CollectFromInvoke(ctx, input, i.Invoke, options...)
+}
+func (i *DocumentIndexer) Transform(ctx context.Context, input *runnable.StreamReader[[]Document], options ...runnable.Option) (*runnable.StreamReader[IndexStats], error) {
+	return runnable.TransformFromInvoke(ctx, input, i.Invoke, options...)
+}
+
 var _ runnable.Runnable[[]Document, IndexStats] = (*DocumentIndexer)(nil)
+
+func (*DocumentIndexer) NodeKind() runnable.NodeKind { return runnable.NodeKindRetriever }
 
 func (i *DocumentIndexer) embedChunks(ctx context.Context, chunks []Chunk, options ...runnable.Option) ([][]float32, int, error) {
 	vectors := make([][]float32, len(chunks))

@@ -1,4 +1,4 @@
-package toolruntime
+package tool
 
 import (
 	"context"
@@ -11,16 +11,15 @@ import (
 	"time"
 
 	"goharness/pkg/runnable"
-	"goharness/pkg/tool"
 )
 
 type traceKey struct{}
 
 func TestRuntimeOrdersMiddlewareAndToolAndPreservesContext(t *testing.T) {
 	var order []string
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "masking",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
 			order = append(order, "middleware")
 			if ctx.Value(traceKey{}) != "trace-1" {
 				t.Fatal("caller context value did not reach middleware")
@@ -29,31 +28,31 @@ func TestRuntimeOrdersMiddlewareAndToolAndPreservesContext(t *testing.T) {
 			return next(ctx, input)
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
-	value := tool.NewFunctionTool(tool.Spec{Name: "read", IsReadOnly: true}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+	runtime := mustRuntime(t, []Middleware{middleware})
+	value := NewFunctionTool(Spec{Name: "read", IsReadOnly: true}, func(ctx context.Context, input CallInput) (Result, error) {
 		order = append(order, "tool")
 		if input.Args["masked"] != true || ctx.Value(traceKey{}) != "trace-1" {
 			t.Fatalf("tool input = %#v, trace = %v", input.Args, ctx.Value(traceKey{}))
 		}
-		if _, err := tool.RequireSubject(ctx); err != nil {
+		if _, err := RequireSubject(ctx); err != nil {
 			t.Fatalf("caller Subject was stripped: %v", err)
 		}
-		return tool.TextResult("ok"), nil
+		return TextResult("ok"), nil
 	})
 	binding := registerTool(t, runtime, value)
 
 	runCtx := context.WithValue(context.Background(), traceKey{}, "trace-1")
-	runCtx = tool.WithSubject(runCtx, tool.Subject{ID: "user-1"})
+	runCtx = WithSubject(runCtx, Subject{ID: "user-1"})
 	result, err := runtime.NewScope(1).Execute(
 		runCtx,
 		binding,
-		tool.CallInput{Args: map[string]any{}},
+		CallInput{Args: map[string]any{}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, err := result.ToContent()
-	if err != nil || content.String() != "ok" {
+	blocks, err := result.ToContentBlocks()
+	if err != nil || len(blocks) != 1 || blocks[0].Text == nil || blocks[0].Text.Text != "ok" {
 		t.Fatalf("result = %#v, err = %v", result, err)
 	}
 	want := []string{"middleware", "tool"}
@@ -64,22 +63,22 @@ func TestRuntimeOrdersMiddlewareAndToolAndPreservesContext(t *testing.T) {
 
 func TestRuntimeLabelsMiddlewareDenialAndSkipsTool(t *testing.T) {
 	reason := errors.New("viewer cannot mutate")
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "rbac",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
-			return tool.Result{}, tool.Deny(reason)
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
+			return Result{}, Deny(reason)
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
+	runtime := mustRuntime(t, []Middleware{middleware})
 	var calls atomic.Int32
-	value := tool.NewFunctionTool(tool.Spec{Name: "delete"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	value := NewFunctionTool(Spec{Name: "delete"}, func(context.Context, CallInput) (Result, error) {
 		calls.Add(1)
-		return tool.TextResult("deleted"), nil
+		return TextResult("deleted"), nil
 	})
 	binding := registerTool(t, runtime, value)
 
-	_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
-	if !errors.Is(err, tool.ErrPermissionDenied) || !errors.Is(err, reason) {
+	_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
+	if !errors.Is(err, ErrPermissionDenied) || !errors.Is(err, reason) {
 		t.Fatalf("Execute error = %v", err)
 	}
 	if !strings.Contains(err.Error(), `middleware "rbac"`) {
@@ -92,23 +91,23 @@ func TestRuntimeLabelsMiddlewareDenialAndSkipsTool(t *testing.T) {
 
 func TestRuntimeLabelsMiddlewareErrorReturnedAfterNext(t *testing.T) {
 	reason := errors.New("billing commit failed")
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "billing",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
 			if _, err := next(ctx, input); err != nil {
-				return tool.Result{}, err
+				return Result{}, err
 			}
-			return tool.Result{}, reason
+			return Result{}, reason
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
-	value := tool.NewFunctionTool(tool.Spec{Name: "charge"}, func(context.Context, tool.CallInput) (tool.Result, error) {
-		return tool.TextResult("charged"), nil
+	runtime := mustRuntime(t, []Middleware{middleware})
+	value := NewFunctionTool(Spec{Name: "charge"}, func(context.Context, CallInput) (Result, error) {
+		return TextResult("charged"), nil
 	})
 	binding := registerTool(t, runtime, value)
 
-	_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
-	var extensionErr *tool.ExtensionError
+	_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
+	var extensionErr *ExtensionError
 	if !errors.As(err, &extensionErr) || extensionErr.Name != "billing" || !errors.Is(err, reason) {
 		t.Fatalf("Execute error = %#v", err)
 	}
@@ -117,34 +116,34 @@ func TestRuntimeLabelsMiddlewareErrorReturnedAfterNext(t *testing.T) {
 func TestRuntimeRecoversMiddlewareAndToolPanics(t *testing.T) {
 	tests := []struct {
 		name        string
-		middlewares []tool.Middleware
-		handler     tool.Handler
+		middlewares []Middleware
+		handler     Handler
 		component   string
 	}{
 		{
 			name: "middleware",
-			middlewares: []tool.Middleware{tool.MiddlewareFuncs{
+			middlewares: []Middleware{MiddlewareFuncs{
 				MiddlewareName: "broken",
-				HandleFunc: func(context.Context, tool.Spec, tool.CallInput, tool.Next) (tool.Result, error) {
+				HandleFunc: func(context.Context, Spec, CallInput, Next) (Result, error) {
 					panic("middleware panic")
 				},
 			}},
-			handler:   func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("unused"), nil },
+			handler:   func(context.Context, CallInput) (Result, error) { return TextResult("unused"), nil },
 			component: `middleware "broken"`,
 		},
 		{
 			name:      "tool",
-			handler:   func(context.Context, tool.CallInput) (tool.Result, error) { panic("tool panic") },
+			handler:   func(context.Context, CallInput) (Result, error) { panic("tool panic") },
 			component: `tool "run"`,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runtime := mustRuntime(t, test.middlewares)
-			value := tool.NewFunctionTool(tool.Spec{Name: "run"}, test.handler)
+			value := NewFunctionTool(Spec{Name: "run"}, test.handler)
 			binding := registerTool(t, runtime, value)
-			_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
-			if !errors.Is(err, tool.ErrExecutionPanic) || !strings.Contains(err.Error(), test.component) {
+			_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
+			if !errors.Is(err, ErrExecutionPanic) || !strings.Contains(err.Error(), test.component) {
 				t.Fatalf("Execute error = %v", err)
 			}
 		})
@@ -155,16 +154,16 @@ func TestRuntimeCancellationPreemptsUncooperativeTool(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	runtime := mustRuntime(t, nil)
-	value := tool.NewFunctionTool(tool.Spec{Name: "slow"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	value := NewFunctionTool(Spec{Name: "slow"}, func(context.Context, CallInput) (Result, error) {
 		close(started)
 		<-release
-		return tool.TextResult("late"), nil
+		return TextResult("late"), nil
 	})
 	binding := registerTool(t, runtime, value)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := runtime.NewScope(1).Execute(ctx, binding, tool.CallInput{})
+		_, err := runtime.NewScope(1).Execute(ctx, binding, CallInput{})
 		done <- err
 	}()
 	waitSignal(t, started, "tool start")
@@ -176,20 +175,20 @@ func TestRuntimeCancellationPreemptsUncooperativeTool(t *testing.T) {
 }
 
 func TestConfiguredTimeoutControlsToolExecution(t *testing.T) {
-	config := defaultConfig()
+	config := defaultRuntimeConfig()
 	config.Timeout = 25 * time.Millisecond
-	runtime, err := New(nil, config)
+	runtime, err := NewRuntime(nil, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := tool.NewFunctionTool(tool.Spec{Name: "configured-timeout"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+	value := NewFunctionTool(Spec{Name: "configured-timeout"}, func(ctx context.Context, input CallInput) (Result, error) {
 		<-ctx.Done()
-		return tool.Result{}, ctx.Err()
+		return Result{}, ctx.Err()
 	})
 	binding := registerTool(t, runtime, value)
 	startedAt := time.Now()
 
-	_, err = runtime.NewScope(1, time.Second).Execute(context.Background(), binding, tool.CallInput{})
+	_, err = runtime.NewScope(1, time.Second).Execute(context.Background(), binding, CallInput{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Execute error = %v, want deadline exceeded", err)
 	}
@@ -218,23 +217,23 @@ func TestEffectiveTimeoutEnforcesSystemCap(t *testing.T) {
 }
 
 func TestRuntimeRetriesOnlyReadOnlyTools(t *testing.T) {
-	config := defaultConfig()
+	config := defaultRuntimeConfig()
 	config.MaxRetries = 2
 	config.RetryBackoff = 0
-	runtime, err := New(nil, config)
+	runtime, err := NewRuntime(nil, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	transient := errors.New("transient failure")
 	var readCalls atomic.Int32
-	readTool := tool.NewFunctionTool(tool.Spec{Name: "read", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	readTool := NewFunctionTool(Spec{Name: "read", IsReadOnly: true}, func(context.Context, CallInput) (Result, error) {
 		if readCalls.Add(1) < 3 {
-			return tool.Result{}, transient
+			return Result{}, transient
 		}
-		return tool.TextResult("ok"), nil
+		return TextResult("ok"), nil
 	})
 	readBinding := registerTool(t, runtime, readTool)
-	if _, err := runtime.NewScope(1).Execute(context.Background(), readBinding, tool.CallInput{}); err != nil {
+	if _, err := runtime.NewScope(1).Execute(context.Background(), readBinding, CallInput{}); err != nil {
 		t.Fatal(err)
 	}
 	if readCalls.Load() != 3 {
@@ -242,12 +241,12 @@ func TestRuntimeRetriesOnlyReadOnlyTools(t *testing.T) {
 	}
 
 	var writeCalls atomic.Int32
-	writeTool := tool.NewFunctionTool(tool.Spec{Name: "write"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	writeTool := NewFunctionTool(Spec{Name: "write"}, func(context.Context, CallInput) (Result, error) {
 		writeCalls.Add(1)
-		return tool.Result{}, transient
+		return Result{}, transient
 	})
 	writeBinding := registerTool(t, runtime, writeTool)
-	_, err = runtime.NewScope(1).Execute(context.Background(), writeBinding, tool.CallInput{})
+	_, err = runtime.NewScope(1).Execute(context.Background(), writeBinding, CallInput{})
 	if !errors.Is(err, transient) || writeCalls.Load() != 1 {
 		t.Fatalf("write calls = %d, error = %v", writeCalls.Load(), err)
 	}
@@ -255,32 +254,32 @@ func TestRuntimeRetriesOnlyReadOnlyTools(t *testing.T) {
 
 func TestRuntimeRejectsDepthBeyondSystemLimit(t *testing.T) {
 	runtime := mustRuntime(t, nil)
-	value := tool.NewFunctionTool(tool.Spec{Name: "recursive"}, nil)
+	value := NewFunctionTool(Spec{Name: "recursive"}, nil)
 	binding := registerTool(t, runtime, value)
 	ctx := context.WithValue(context.Background(), executionStateKey{}, executionState{depth: maxExecutionDepth})
 
-	_, err := runtime.NewScope(1).Execute(ctx, binding, tool.CallInput{})
-	if !errors.Is(err, tool.ErrMaxDepthExceeded) {
+	_, err := runtime.NewScope(1).Execute(ctx, binding, CallInput{})
+	if !errors.Is(err, ErrMaxDepthExceeded) {
 		t.Fatalf("Execute error = %v", err)
 	}
-	var depthErr *tool.MaxDepthError
+	var depthErr *MaxDepthError
 	if !errors.As(err, &depthErr) || depthErr.Depth != maxExecutionDepth+1 {
 		t.Fatalf("depth error = %#v", depthErr)
 	}
 }
 
 func TestRuntimeRejectsDeadlockRiskAndMiddlewareCannotSwallowIt(t *testing.T) {
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "unsafe-fallback",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
 			_, _ = next(context.Background(), input)
-			return tool.TextResult("pretend-success"), nil
+			return TextResult("pretend-success"), nil
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
-	value := tool.NewFunctionTool(tool.Spec{
+	runtime := mustRuntime(t, []Middleware{middleware})
+	value := NewFunctionTool(Spec{
 		Name: "nested",
-		Concurrency: tool.ConcurrencyPolicy{
+		Concurrency: ConcurrencyPolicy{
 			Group:       "network",
 			MaxParallel: 1,
 		},
@@ -288,8 +287,8 @@ func TestRuntimeRejectsDeadlockRiskAndMiddlewareCannotSwallowIt(t *testing.T) {
 	binding := registerTool(t, runtime, value)
 	ctx := context.WithValue(context.Background(), executionStateKey{}, executionState{heldGroups: []string{"network"}})
 
-	_, err := runtime.NewScope(1).Execute(ctx, binding, tool.CallInput{})
-	if !errors.Is(err, tool.ErrDeadlockRisk) {
+	_, err := runtime.NewScope(1).Execute(ctx, binding, CallInput{})
+	if !errors.Is(err, ErrDeadlockRisk) {
 		t.Fatalf("Execute error = %v", err)
 	}
 }
@@ -297,9 +296,9 @@ func TestRuntimeRejectsDeadlockRiskAndMiddlewareCannotSwallowIt(t *testing.T) {
 func TestRuntimeSemaphoreLimitsEveryMiddlewareNextCall(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "parallel-retry",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
 			var wait sync.WaitGroup
 			wait.Add(2)
 			for range 2 {
@@ -309,25 +308,25 @@ func TestRuntimeSemaphoreLimitsEveryMiddlewareNextCall(t *testing.T) {
 				}()
 			}
 			wait.Wait()
-			return tool.TextResult("done"), nil
+			return TextResult("done"), nil
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
-	value := tool.NewFunctionTool(tool.Spec{
+	runtime := mustRuntime(t, []Middleware{middleware})
+	value := NewFunctionTool(Spec{
 		Name: "network",
-		Concurrency: tool.ConcurrencyPolicy{
+		Concurrency: ConcurrencyPolicy{
 			Group:       "network",
 			MaxParallel: 2,
 		},
-	}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	}, func(context.Context, CallInput) (Result, error) {
 		started <- struct{}{}
 		<-release
-		return tool.TextResult("ok"), nil
+		return TextResult("ok"), nil
 	})
 	binding := registerTool(t, runtime, value)
 	done := make(chan error, 1)
 	go func() {
-		_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
+		_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
 		done <- err
 	}()
 	waitSignal(t, started, "first next call")
@@ -342,26 +341,26 @@ func TestRuntimeSemaphoreLimitsEveryMiddlewareNextCall(t *testing.T) {
 func TestRuntimeWaitsForNextStartedBeforeMiddlewareReturns(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	middleware := tool.MiddlewareFuncs{
+	middleware := MiddlewareFuncs{
 		MiddlewareName: "async-next",
-		HandleFunc: func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		HandleFunc: func(ctx context.Context, spec Spec, input CallInput, next Next) (Result, error) {
 			go func() {
 				_, _ = next(ctx, input)
 			}()
 			<-started
-			return tool.TextResult("middleware-returned"), nil
+			return TextResult("middleware-returned"), nil
 		},
 	}
-	runtime := mustRuntime(t, []tool.Middleware{middleware})
-	value := tool.NewFunctionTool(tool.Spec{Name: "async"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	runtime := mustRuntime(t, []Middleware{middleware})
+	value := NewFunctionTool(Spec{Name: "async"}, func(context.Context, CallInput) (Result, error) {
 		close(started)
 		<-release
-		return tool.TextResult("tool-returned"), nil
+		return TextResult("tool-returned"), nil
 	})
 	binding := registerTool(t, runtime, value)
 	done := make(chan error, 1)
 	go func() {
-		_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
+		_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
 		done <- err
 	}()
 	waitSignal(t, started, "async next tool start")
@@ -378,13 +377,13 @@ func TestRuntimeWaitsForNextStartedBeforeMiddlewareReturns(t *testing.T) {
 
 func TestRuntimeRejectsConflictingConcurrencyDeclarations(t *testing.T) {
 	runtime := mustRuntime(t, nil)
-	if _, err := runtime.Register(tool.NewFunctionTool(tool.Spec{
-		Name: "first", Concurrency: tool.ConcurrencyPolicy{Group: "browser", MaxParallel: 1},
+	if _, err := runtime.Register(NewFunctionTool(Spec{
+		Name: "first", Concurrency: ConcurrencyPolicy{Group: "browser", MaxParallel: 1},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runtime.Register(tool.NewFunctionTool(tool.Spec{
-		Name: "second", Concurrency: tool.ConcurrencyPolicy{Group: "browser", MaxParallel: 2},
+	_, err := runtime.Register(NewFunctionTool(Spec{
+		Name: "second", Concurrency: ConcurrencyPolicy{Group: "browser", MaxParallel: 2},
 	}, nil))
 	if err == nil || !strings.Contains(err.Error(), "already has max parallel 1") {
 		t.Fatalf("Register error = %v", err)
@@ -393,9 +392,9 @@ func TestRuntimeRejectsConflictingConcurrencyDeclarations(t *testing.T) {
 
 func TestRuntimeRejectsConcurrencyAboveSystemLimit(t *testing.T) {
 	runtime := mustRuntime(t, nil)
-	_, err := runtime.Register(tool.NewFunctionTool(tool.Spec{
+	_, err := runtime.Register(NewFunctionTool(Spec{
 		Name: "unbounded",
-		Concurrency: tool.ConcurrencyPolicy{
+		Concurrency: ConcurrencyPolicy{
 			Group:       "network",
 			MaxParallel: maxGroupParallelism + 1,
 		},
@@ -407,21 +406,21 @@ func TestRuntimeRejectsConcurrencyAboveSystemLimit(t *testing.T) {
 
 func TestRuntimeRecoversSpecPanicDuringRegistration(t *testing.T) {
 	value := &customTool{
-		specFunc: func() tool.Spec {
+		specFunc: func() Spec {
 			panic("spec panic")
 		},
 	}
 	runtime := mustRuntime(t, nil)
 
 	_, err := runtime.Register(value)
-	if !errors.Is(err, tool.ErrExecutionPanic) || !strings.Contains(err.Error(), "tool Spec") {
+	if !errors.Is(err, ErrExecutionPanic) || !strings.Contains(err.Error(), "tool Spec") {
 		t.Fatalf("Register error = %v", err)
 	}
 }
 
 func TestRuntimeRecoversExtensionNamePanicDuringConfiguration(t *testing.T) {
-	_, err := New([]tool.Middleware{panickingNameMiddleware{}})
-	if !errors.Is(err, tool.ErrExecutionPanic) || !strings.Contains(err.Error(), "middleware Name") {
+	_, err := NewRuntime([]Middleware{panickingNameMiddleware{}})
+	if !errors.Is(err, ErrExecutionPanic) || !strings.Contains(err.Error(), "middleware Name") {
 		t.Fatalf("New error = %v", err)
 	}
 }
@@ -429,20 +428,20 @@ func TestRuntimeRecoversExtensionNamePanicDuringConfiguration(t *testing.T) {
 func TestRuntimeUsesFrozenSpecSnapshot(t *testing.T) {
 	var specCalls atomic.Int32
 	value := &customTool{
-		specFunc: func() tool.Spec {
+		specFunc: func() Spec {
 			if specCalls.Add(1) > 1 {
 				panic("Spec called after registration")
 			}
-			return tool.Spec{Name: "stable", IsReadOnly: true}
+			return Spec{Name: "stable", IsReadOnly: true}
 		},
-		callFunc: func(context.Context, tool.CallInput) (tool.Result, error) {
-			return tool.TextResult("ok"), nil
+		callFunc: func(context.Context, CallInput) (Result, error) {
+			return TextResult("ok"), nil
 		},
 	}
 	runtime := mustRuntime(t, nil)
 	binding := registerTool(t, runtime, value)
 
-	_, err := runtime.NewScope(1).Execute(context.Background(), binding, tool.CallInput{})
+	_, err := runtime.NewScope(1).Execute(context.Background(), binding, CallInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,13 +452,13 @@ func TestRuntimeUsesFrozenSpecSnapshot(t *testing.T) {
 
 func TestNewScopeHonorsConfiguredAndSystemConcurrencyLimits(t *testing.T) {
 	runtime := mustRuntime(t, nil)
-	if capacity := cap(runtime.NewScope(maxBatchParallelism + 100).semaphore); capacity != defaultConfig().MaxConcurrency {
-		t.Fatalf("default scope capacity = %d, want %d", capacity, defaultConfig().MaxConcurrency)
+	if capacity := cap(runtime.NewScope(maxBatchParallelism + 100).semaphore); capacity != defaultRuntimeConfig().MaxConcurrency {
+		t.Fatalf("default scope capacity = %d, want %d", capacity, defaultRuntimeConfig().MaxConcurrency)
 	}
 
-	config := defaultConfig()
+	config := defaultRuntimeConfig()
 	config.MaxConcurrency = maxBatchParallelism
-	runtime, err := New(nil, config)
+	runtime, err := NewRuntime(nil, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,16 +467,16 @@ func TestNewScopeHonorsConfiguredAndSystemConcurrencyLimits(t *testing.T) {
 	}
 }
 
-func mustRuntime(t *testing.T, middlewares []tool.Middleware) *Runtime {
+func mustRuntime(t *testing.T, middlewares []Middleware) *Runtime {
 	t.Helper()
-	runtime, err := New(middlewares)
+	runtime, err := NewRuntime(middlewares)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return runtime
 }
 
-func registerTool(t *testing.T, runtime *Runtime, value tool.Tool) *Binding {
+func registerTool(t *testing.T, runtime *Runtime, value Tool) *Binding {
 	t.Helper()
 	binding, err := runtime.Register(value)
 	if err != nil {
@@ -516,8 +515,8 @@ func waitError(t *testing.T, done <-chan error) error {
 }
 
 type customTool struct {
-	specFunc func() tool.Spec
-	callFunc tool.Handler
+	specFunc func() Spec
+	callFunc Handler
 }
 
 type panickingNameMiddleware struct{}
@@ -528,20 +527,29 @@ func (panickingNameMiddleware) Name() string {
 
 func (panickingNameMiddleware) Handle(
 	ctx context.Context,
-	spec tool.Spec,
-	input tool.CallInput,
-	next tool.Next,
-) (tool.Result, error) {
+	spec Spec,
+	input CallInput,
+	next Next,
+) (Result, error) {
 	return next(ctx, input)
 }
 
-func (t *customTool) Spec() tool.Spec {
+func (t *customTool) Spec() Spec {
 	return t.specFunc()
 }
 
-func (t *customTool) Invoke(ctx context.Context, input tool.CallInput, _ ...runnable.Option) (tool.Result, error) {
+func (t *customTool) Invoke(ctx context.Context, input CallInput, _ ...runnable.Option) (Result, error) {
 	if t.callFunc == nil {
-		return tool.Result{}, errors.New("custom tool call is not configured")
+		return Result{}, errors.New("custom tool call is not configured")
 	}
 	return t.callFunc(ctx, input)
+}
+func (t *customTool) Stream(ctx context.Context, input CallInput, options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.StreamFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *customTool) Collect(ctx context.Context, input *runnable.StreamReader[CallInput], options ...runnable.Option) (Result, error) {
+	return runnable.CollectFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *customTool) Transform(ctx context.Context, input *runnable.StreamReader[CallInput], options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.TransformFromInvoke(ctx, input, t.Invoke, options...)
 }

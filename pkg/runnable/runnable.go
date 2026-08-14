@@ -369,30 +369,20 @@ func ResolveOptions(options ...Option) (OptionSet, error) {
 	return resolved, nil
 }
 
-// Runnable is the only required component contract. I and O are the typed
-// input and output of one invocation.
+// Runnable is the complete provider-neutral execution contract. Components
+// normally implement one native form and use Adapt to bind the other forms.
 type Runnable[I, O any] interface {
 	Invoke(context.Context, I, ...Option) (O, error)
+	Stream(context.Context, I, ...Option) (*StreamReader[O], error)
+	Collect(context.Context, *StreamReader[I], ...Option) (O, error)
+	Transform(context.Context, *StreamReader[I], ...Option) (*StreamReader[O], error)
 }
 
-// Item is one value or terminal error emitted by a streaming component.
-type Item[T any] struct {
+// Outcome carries a child component result without forcing the Graph engine to
+// decide whether that component's error is fatal or domain-visible state.
+type Outcome[T any] struct {
 	Value T
 	Err   error
-}
-
-// Stream is a cancellation-aware asynchronous sequence of values.
-type Stream[T any] <-chan Item[T]
-
-// Reducer combines a streamed item into the accumulated full value. A stream
-// is not assumed to be cumulative unless a reducer is supplied explicitly.
-type Reducer[T any] func(T, T) (T, error)
-
-// Streamer is an optional data-plane capability. E is deliberately
-// independent from Runnable's final output O: model token deltas, Agent
-// message events and graph control events are different protocols.
-type Streamer[I, E any] interface {
-	Stream(context.Context, I, ...Option) (Stream[E], error)
 }
 
 // Batchable is an optional bulk capability for a Runnable.
@@ -405,6 +395,26 @@ type Batchable[I, O any] interface {
 type Named interface {
 	Name() string
 	Description() string
+}
+
+// NodeKind identifies a component's role in a compiled Graph snapshot without
+// coupling the Graph package to domain packages.
+type NodeKind string
+
+const (
+	NodeKindRunnable  NodeKind = "runnable"
+	NodeKindGraph     NodeKind = "graph"
+	NodeKindParallel  NodeKind = "parallel"
+	NodeKindChatModel NodeKind = "chat_model"
+	NodeKindTools     NodeKind = "tools"
+	NodeKindRetriever NodeKind = "retriever"
+	NodeKindMCP       NodeKind = "mcp"
+	NodeKindAgent     NodeKind = "agent"
+)
+
+// NodeDescriptor provides Graph diagnostic metadata for a Runnable.
+type NodeDescriptor interface {
+	NodeKind() NodeKind
 }
 
 // NamedRunnable combines execution and diagnostic metadata for registry and
@@ -426,44 +436,16 @@ func (f Func[I, O]) Invoke(ctx context.Context, input I, options ...Option) (O, 
 	return f(ctx, input, options...)
 }
 
-// Collect consumes a stream and returns its last value. Components that emit
-// cumulative snapshots therefore compose naturally with Invoke.
-func Collect[T any](ctx context.Context, stream Stream[T]) (T, error) {
-	return CollectWith(ctx, stream, nil)
+func (f Func[I, O]) Stream(ctx context.Context, input I, options ...Option) (*StreamReader[O], error) {
+	return StreamFromInvoke(ctx, input, f.Invoke, options...)
 }
 
-// CollectWith consumes a stream through an explicit reducer. A nil reducer
-// means last-value semantics, which is appropriate only for snapshot streams.
-func CollectWith[T any](ctx context.Context, stream Stream[T], reducer Reducer[T]) (T, error) {
-	var last T
-	var err error
-	if ctx == nil {
-		return last, errors.New("runnable context is nil")
-	}
-	if stream == nil {
-		return last, errors.New("runnable stream is nil")
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return last, ctx.Err()
-		case item, ok := <-stream:
-			if !ok {
-				return last, nil
-			}
-			if item.Err != nil {
-				return last, item.Err
-			}
-			if reducer == nil {
-				last = item.Value
-				continue
-			}
-			last, err = reducer(last, item.Value)
-			if err != nil {
-				return last, err
-			}
-		}
-	}
+func (f Func[I, O]) Collect(ctx context.Context, input *StreamReader[I], options ...Option) (O, error) {
+	return CollectFromInvoke(ctx, input, f.Invoke, options...)
+}
+
+func (f Func[I, O]) Transform(ctx context.Context, input *StreamReader[I], options ...Option) (*StreamReader[O], error) {
+	return TransformFromInvoke(ctx, input, f.Invoke, options...)
 }
 
 // Batch invokes a Runnable once per input when it does not provide a native
@@ -490,61 +472,4 @@ func Batch[I, O any](ctx context.Context, component Runnable[I, O], inputs []I, 
 		outputs[index] = output
 	}
 	return outputs, nil
-}
-
-// Single returns a one-item stream for an invocation result.
-func Single[T any](ctx context.Context, value T, err error) Stream[T] {
-	out := make(chan Item[T], 1)
-	go func() {
-		defer close(out)
-		if ctx == nil {
-			out <- Item[T]{Err: errors.New("runnable stream context is nil")}
-			return
-		}
-		select {
-		case <-ctx.Done():
-			out <- Item[T]{Err: ctx.Err()}
-		case out <- Item[T]{Value: value, Err: err}:
-		}
-	}()
-	return out
-}
-
-// Buffer relays an event stream through a bounded channel while preserving
-// order and applying backpressure.
-func Buffer[T any](ctx context.Context, upstream Stream[T], size int) Stream[T] {
-	if size < 1 {
-		size = 1
-	}
-	if size > 256 {
-		size = 256
-	}
-	out := make(chan Item[T], size)
-	go func() {
-		defer close(out)
-		if ctx == nil {
-			out <- Item[T]{Err: errors.New("runnable buffer context is nil")}
-			return
-		}
-		if upstream == nil {
-			out <- Item[T]{Err: errors.New("runnable upstream stream is nil")}
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case item, ok := <-upstream:
-				if !ok {
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case out <- item:
-				}
-			}
-		}
-	}()
-	return out
 }

@@ -456,30 +456,30 @@ Commit: `refactor(graph)!: 移除消息领域与重复包装层`
 - ChatModel Reader carries domain Concat and emits chunks through EventStream
 - ToolNode owns the full public Tool execution runtime
 
-- [ ] **Step 1: Migrate ChatModel streaming tests to Response Reader**
+- [x] **Step 1: Migrate ChatModel streaming tests to Response Reader**
 
 Remove `llm.Event` and explicit Done events. EOF is transport completion;
 malformed/truncated providers close with an error. Verify indexed Tool deltas
 and final Usage through ChatModel Concat.
 
-- [ ] **Step 2: Instrument ChatModel lifecycle**
+- [x] **Step 2: Instrument ChatModel lifecycle**
 
 Start before provider work; End at reader EOF with concatenated Response;
 Error on provider failure, cancellation, or early close. Emit each incremental
 Response through `EmitStream` only.
 
-- [ ] **Step 3: Merge internal Tool runtime into public ToolNode**
+- [x] **Step 3: Merge internal Tool runtime into public ToolNode**
 
 Move Middleware, timeout, retry, concurrency, recursion, authorization, batch
 hook, Callback, and progress EventStream into `pkg/tool`. Delete duplicate
 execution code after Agent migration.
 
-- [ ] **Step 4: Instrument retrieval pipelines and MCP protocol operations**
+- [x] **Step 4: Instrument retrieval pipelines and MCP protocol operations**
 
 Nested retrieval operations and MCP Initialize/ListTools/CallTool create child
 spans. MCP Tool call emits both Tool and MCP lifecycles with correct parentage.
 
-- [ ] **Step 5: Migrate cache decorators without losing stream lifetime**
+- [x] **Step 5: Migrate cache decorators without losing stream lifetime**
 
 Followers receive incremental Reader values. Subscriber close cancels only its
 subscription; upstream cancels after all subscribers leave. Cached replay ends
@@ -508,22 +508,22 @@ Commit: `refactor(runtime)!: 统一核心组件执行与观测契约`
 - Model, ToolNode, Retriever, and child Agent are actual public Graph nodes
 - Agent has no callback configuration; runtime Context owns the Manager
 
-- [ ] **Step 1: Add architecture tests for Graph-native Agents**
+- [x] **Step 1: Add architecture tests for Graph-native Agents**
 
 Assert recipe structs contain a CompiledGraph, no `internal/toolruntime`
 reference exists, and model/tool calls appear as named nodes in Graph Snapshot.
 
-- [ ] **Step 2: Rebuild Basic and ReAct**
+- [x] **Step 2: Rebuild Basic and ReAct**
 
 Use Pre/Post handlers for message State and public ToolNode for the tool loop.
 Remove manual model stream consumption and `graph.EmitData`.
 
-- [ ] **Step 3: Rebuild Routing and GroupChat**
+- [x] **Step 3: Rebuild Routing and GroupChat**
 
 Mount child Agents as Graph nodes. Preserve strict complete-stream consumption,
 valid child history, supervisor Tool result pairing, and append-only commits.
 
-- [ ] **Step 4: Remove Agent callback options and private runtime**
+- [x] **Step 4: Remove Agent callback options and private runtime**
 
 Delete `WithCallbacks`, `WithCallbackConfig`, run callback options, BaseConfig
 callback fields, and `internal/toolruntime`.
@@ -548,16 +548,16 @@ Commit: `refactor(agent)!: 使用公开编译图装配内置代理`
 - Modify Agent Context Engine injection
 - Modify tests and docs
 
-- [ ] **Step 1: Add package ownership tests**
+- [x] **Step 1: Add package ownership tests**
 
 Assert `pkg/state` exports only conversation Checkpoint/Store contracts and
 Graph owns CursorStack/GraphStateCheckpoint.
 
-- [ ] **Step 2: Move recovery types without changing wire JSON**
+- [x] **Step 2: Move recovery types without changing wire JSON**
 
 Round-trip a pre-move fixture and compare exact JSON bytes and resume behavior.
 
-- [ ] **Step 3: Retain one Context Engine Runnable**
+- [x] **Step 3: Retain one Context Engine Runnable**
 
 Delete synonymous builders/options and expose one constructor plus one Agent
 injection option. Use Retriever Callback through runtime Context.
@@ -579,18 +579,18 @@ Commit: `refactor(state)!: 收敛图恢复与上下文构建边界`
 - Remove or rewrite `pkg/memory/`
 - Modify tests, examples, and docs
 
-- [ ] **Step 1: Add a public-surface symbol test**
+- [x] **Step 1: Add a public-surface symbol test**
 
 Use `go doc`/AST inspection to reject removed aliases and constructors:
 `BaseTool`, `Model`, `NewAgent`, `NewBase`, `AddTool`, duplicate
 `RequestInterrupt`, and legacy Graph node events.
 
-- [ ] **Step 2: Remove Tool registry and Agent internals**
+- [x] **Step 2: Remove Tool registry and Agent internals**
 
 Delete Factory/Register/MustRegister/RegisteredNames/New registry paths and
 public Agent base assembly. Keep only constructor-injected Tools.
 
-- [ ] **Step 3: Canonicalize names and memory ownership**
+- [x] **Step 3: Canonicalize names and memory ownership**
 
 Retain `tool.Tool`, `llm.ChatModel`, domain `Callback`, one Agent constructor
 per type, and `control.RequestInterrupt`. Move useful retrieval implementation;
@@ -611,13 +611,13 @@ Commit: `refactor(api)!: 删除重复入口与无效设计`
 - Modify: `docs/mcp-tools.md`
 - Rewrite examples under `examples/basic` and `examples/graph`
 
-- [ ] **Step 1: Update examples to the final API**
+- [x] **Step 1: Update examples to the final API**
 
 Show direct ChatModel/ToolNode/MCP/Graph construction, Compile, complete
 Runnable methods, Context Manager registration, typed lifecycle Callback,
 EventStream token rendering, and Graph interrupt/resume.
 
-- [ ] **Step 2: Remove every deleted symbol from user-facing docs**
+- [x] **Step 2: Remove every deleted symbol from user-facing docs**
 
 Run:
 
@@ -627,7 +627,7 @@ rg -n 'pkg/framework|pkg/compose|AnyRunnable|InvokeAny|Erase|FilterChunks|WithCa
 
 Expected: no references outside historical design/plan documents.
 
-- [ ] **Step 3: Run complete root verification**
+- [x] **Step 3: Run complete root verification**
 
 ```powershell
 go test -count=1 ./...
@@ -637,7 +637,7 @@ $env:CGO_ENABLED = '1'
 go test -race -count=1 ./...
 ```
 
-- [ ] **Step 4: Run complete extensions verification**
+- [x] **Step 4: Run complete extensions verification**
 
 ```powershell
 Set-Location extensions
@@ -648,7 +648,7 @@ $env:CGO_ENABLED = '1'
 go test -race -count=1 ./...
 ```
 
-- [ ] **Step 5: Verify public architecture acceptance criteria**
+- [x] **Step 5: Verify public architecture acceptance criteria**
 
 Run dependency and removed-symbol tests, inspect Agent Graph snapshots, and
 manually run both examples. Confirm Graph Stream emits only END output while UI

@@ -1,4 +1,4 @@
-package toolruntime
+package tool
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"goharness/pkg/httpclient"
-	"goharness/pkg/tool"
 )
 
 func TestRuntimeInjectsPooledHTTPClientIntoEveryToolCall(t *testing.T) {
@@ -28,29 +27,29 @@ func TestRuntimeInjectsPooledHTTPClientIntoEveryToolCall(t *testing.T) {
 			return dialer.DialContext(ctx, network, address)
 		},
 	})
-	ctx := tool.WithHTTPOptions(context.Background(), tool.HTTPOptions{Pool: pool, Timeout: time.Second})
+	ctx := WithHTTPOptions(context.Background(), HTTPOptions{Pool: pool, Timeout: time.Second})
 	runtime := mustRuntime(t, nil)
-	value := tool.NewFunctionTool(tool.Spec{Name: "http", IsReadOnly: true}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+	value := NewFunctionTool(Spec{Name: "http", IsReadOnly: true}, func(ctx context.Context, input CallInput) (Result, error) {
 		if input.HTTPClient == nil {
 			t.Fatal("runtime did not populate CallInput.HTTPClient")
 		}
-		if input.HTTPClient != tool.HTTPClient(ctx) {
+		if input.HTTPClient != HTTPClient(ctx) {
 			t.Fatal("CallInput and context resolved different clients")
 		}
 		response, err := input.HTTPClient.Get(server.URL)
 		if err != nil {
-			return tool.Result{}, err
+			return Result{}, err
 		}
 		defer response.Body.Close()
 		if _, err := io.Copy(io.Discard, response.Body); err != nil {
-			return tool.Result{}, err
+			return Result{}, err
 		}
-		return tool.TextResult("ok"), nil
+		return TextResult("ok"), nil
 	})
 	binding := registerTool(t, runtime, value)
 	scope := runtime.NewScope(1)
 	for range 2 {
-		if _, err := scope.Execute(ctx, binding, tool.CallInput{}); err != nil {
+		if _, err := scope.Execute(ctx, binding, CallInput{}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -1,4 +1,4 @@
-package toolruntime
+package tool
 
 import (
 	"context"

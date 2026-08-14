@@ -26,12 +26,12 @@ type graphComponent interface {
 }
 
 type NodeInfo struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	Label       string `json:"label,omitempty"`
-	Description string `json:"description,omitempty"`
-	InputType   string `json:"input_type"`
-	OutputType  string `json:"output_type"`
+	ID          string            `json:"id"`
+	Kind        runnable.NodeKind `json:"kind"`
+	Label       string            `json:"label,omitempty"`
+	Description string            `json:"description,omitempty"`
+	InputType   string            `json:"input_type"`
+	OutputType  string            `json:"output_type"`
 }
 
 type EdgeInfo struct {

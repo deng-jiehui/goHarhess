@@ -3,11 +3,26 @@ package runnable_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"goharness/pkg/runnable"
 )
+
+func requireCompleteRunnable[I, O any](value runnable.Runnable[I, O]) {
+	_ = value.Invoke
+	_ = value.Stream
+	_ = value.Collect
+	_ = value.Transform
+}
+
+func TestRunnableExposesAllExecutionForms(t *testing.T) {
+	value := runnable.InvokableLambda(func(_ context.Context, input int) (string, error) {
+		return fmt.Sprint(input), nil
+	})
+	requireCompleteRunnable[int, string](value)
+}
 
 type failingOption struct{}
 
@@ -28,7 +43,12 @@ func TestRunnableInvokeBatchAndStream(t *testing.T) {
 	if err != nil || len(values) != 3 || values[2] != 6 {
 		t.Fatalf("Batch() = %#v, %v", values, err)
 	}
-	last, err := runnable.Collect(context.Background(), runnable.Stream[int](runnable.Single(context.Background(), 7, nil)))
+	reader, writer := runnable.Pipe[int](context.Background())
+	go func() {
+		_ = writer.Send(7)
+		_ = writer.Close()
+	}()
+	last, err := reader.Collect(context.Background())
 	if err != nil || last != 7 {
 		t.Fatalf("Collect() = %d, %v", last, err)
 	}

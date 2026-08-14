@@ -1,4 +1,4 @@
-package memory
+package retrieval
 
 import (
 	"context"
@@ -6,31 +6,37 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/pkg/retrieval"
 	"goharness/pkg/runnable"
 )
 
 const DefaultMaxReferenceTokens = 4096
 
-type FileFilterBuilder func([]string) retrieval.Metadata
+// ReferenceRequest asks a retriever for model-ready reference text scoped to files.
+type ReferenceRequest struct {
+	Query     string
+	Files     []string
+	MaxTokens int
+}
+
+type FileFilterBuilder func([]string) Metadata
 
 type HybridRetrieverConfig struct {
-	Searcher      runnable.Runnable[retrieval.HybridQuery, []retrieval.SearchHit]
+	Searcher      runnable.Runnable[HybridQuery, []SearchHit]
 	Index         string
 	Namespace     string
 	TopK          int
-	TokenCounter  retrieval.TokenCounter
+	TokenCounter  TokenCounter
 	FilterBuilder FileFilterBuilder
 }
 
 // HybridRetriever adapts retrieval.HybridSearcher to Memory's retrieval
 // contract and produces citation-bearing context within the reference budget.
 type HybridRetriever struct {
-	searcher      runnable.Runnable[retrieval.HybridQuery, []retrieval.SearchHit]
+	searcher      runnable.Runnable[HybridQuery, []SearchHit]
 	index         string
 	namespace     string
 	topK          int
-	counter       retrieval.TokenCounter
+	counter       TokenCounter
 	filterBuilder FileFilterBuilder
 }
 
@@ -45,7 +51,7 @@ func NewHybridRetriever(cfg HybridRetrieverConfig) (*HybridRetriever, error) {
 		return nil, errors.New("hybrid retriever TopK must be greater than zero")
 	}
 	if cfg.TokenCounter == nil {
-		cfg.TokenCounter = retrieval.ApproxTokenCounter{}
+		cfg.TokenCounter = ApproxTokenCounter{}
 	}
 	if cfg.FilterBuilder == nil {
 		cfg.FilterBuilder = defaultFileFilter
@@ -56,11 +62,11 @@ func NewHybridRetriever(cfg HybridRetrieverConfig) (*HybridRetriever, error) {
 	}, nil
 }
 
-func (r *HybridRetriever) Invoke(ctx context.Context, request RetrieveRequest, options ...runnable.Option) (string, error) {
+func (r *HybridRetriever) Invoke(ctx context.Context, request ReferenceRequest, options ...runnable.Option) (string, error) {
 	if ctx == nil {
 		return "", errors.New("hybrid retrieve context cannot be nil")
 	}
-	searchQuery := retrieval.HybridQuery{
+	searchQuery := HybridQuery{
 		Text: request.Query, Index: r.index, Namespace: r.namespace,
 		Filter: r.filterBuilder(append([]string(nil), request.Files...)), TopK: r.topK,
 	}
@@ -68,7 +74,7 @@ func (r *HybridRetriever) Invoke(ctx context.Context, request RetrieveRequest, o
 	if err != nil {
 		return "", err
 	}
-	budget := request.Config.MaxRefToken
+	budget := request.MaxTokens
 	if budget <= 0 {
 		budget = DefaultMaxReferenceTokens
 	}
@@ -98,9 +104,21 @@ func (r *HybridRetriever) Invoke(ctx context.Context, request RetrieveRequest, o
 	return builder.String(), nil
 }
 
-var _ runnable.Runnable[RetrieveRequest, string] = (*HybridRetriever)(nil)
+func (r *HybridRetriever) Stream(ctx context.Context, input ReferenceRequest, options ...runnable.Option) (*runnable.StreamReader[string], error) {
+	return runnable.StreamFromInvoke(ctx, input, r.Invoke, options...)
+}
+func (r *HybridRetriever) Collect(ctx context.Context, input *runnable.StreamReader[ReferenceRequest], options ...runnable.Option) (string, error) {
+	return runnable.CollectFromInvoke(ctx, input, r.Invoke, options...)
+}
+func (r *HybridRetriever) Transform(ctx context.Context, input *runnable.StreamReader[ReferenceRequest], options ...runnable.Option) (*runnable.StreamReader[string], error) {
+	return runnable.TransformFromInvoke(ctx, input, r.Invoke, options...)
+}
 
-func defaultFileFilter(files []string) retrieval.Metadata {
+var _ runnable.Runnable[ReferenceRequest, string] = (*HybridRetriever)(nil)
+
+func (*HybridRetriever) NodeKind() runnable.NodeKind { return runnable.NodeKindRetriever }
+
+func defaultFileFilter(files []string) Metadata {
 	if len(files) == 0 {
 		return nil
 	}
@@ -108,10 +126,10 @@ func defaultFileFilter(files []string) retrieval.Metadata {
 	for index, file := range files {
 		values[index] = file
 	}
-	return retrieval.Metadata{"file": map[string]any{"$in": values}}
+	return Metadata{"file": map[string]any{"$in": values}}
 }
 
-func truncateToTokens(text string, limit int, counter retrieval.TokenCounter) string {
+func truncateToTokens(text string, limit int, counter TokenCounter) string {
 	if limit <= 0 {
 		return ""
 	}

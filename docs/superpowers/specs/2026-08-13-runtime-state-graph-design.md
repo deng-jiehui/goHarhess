@@ -253,7 +253,7 @@ No Handler, node, Codec or merger runs while an internal mutex is held.
 ## Checkpoint and Resume
 
 The State Scope exposes a private lazy snapshot provider through Context.
-Agent interruption code requests a `state.GraphStateCheckpoint` only when a
+Agent interruption code requests a `graph.GraphStateCheckpoint` only when a
 durable continuation is actually created. The provider returns Codec ID,
 version and owned bytes.
 

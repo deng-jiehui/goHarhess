@@ -1,11 +1,10 @@
-package memory_test
+package retrieval_test
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	"goharness/pkg/memory"
 	"goharness/pkg/retrieval"
 	"goharness/pkg/runnable"
 )
@@ -15,14 +14,14 @@ func TestHybridRetrieverFiltersFilesAndHonorsReferenceBudget(t *testing.T) {
 		{ID: "a", Source: "keyword+vector", Score: 0.9, Text: "one two three four five six seven eight"},
 		{ID: "b", Source: "vector", Score: 0.8, Text: "nine ten eleven twelve"},
 	}}
-	retriever, err := memory.NewHybridRetriever(memory.HybridRetrieverConfig{
+	retriever, err := retrieval.NewHybridRetriever(retrieval.HybridRetrieverConfig{
 		Searcher: searcher, Index: "docs", Namespace: "tenant", TopK: 2, TokenCounter: fieldCounter{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextText, err := retriever.Invoke(context.Background(), memory.RetrieveRequest{
-		Query: "question", Files: []string{"guide.pdf"}, Config: memory.RAGConfig{MaxRefToken: 10},
+	contextText, err := retriever.Invoke(context.Background(), retrieval.ReferenceRequest{
+		Query: "question", Files: []string{"guide.pdf"}, MaxTokens: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +47,15 @@ type recordingHybridSearch struct {
 func (s *recordingHybridSearch) Invoke(ctx context.Context, query retrieval.HybridQuery, _ ...runnable.Option) ([]retrieval.SearchHit, error) {
 	s.query = query
 	return append([]retrieval.SearchHit(nil), s.hits...), nil
+}
+func (s *recordingHybridSearch) Stream(ctx context.Context, input retrieval.HybridQuery, options ...runnable.Option) (*runnable.StreamReader[[]retrieval.SearchHit], error) {
+	return runnable.StreamFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *recordingHybridSearch) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.HybridQuery], options ...runnable.Option) ([]retrieval.SearchHit, error) {
+	return runnable.CollectFromInvoke(ctx, input, s.Invoke, options...)
+}
+func (s *recordingHybridSearch) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.HybridQuery], options ...runnable.Option) (*runnable.StreamReader[[]retrieval.SearchHit], error) {
+	return runnable.TransformFromInvoke(ctx, input, s.Invoke, options...)
 }
 
 type fieldCounter struct{}

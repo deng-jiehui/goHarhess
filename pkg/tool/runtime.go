@@ -1,4 +1,4 @@
-package toolruntime
+package tool
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"goharness/pkg/runnable"
-	"goharness/pkg/tool"
 )
 
 const (
@@ -22,8 +21,8 @@ const (
 	maxRetryBackoff      = 30 * time.Second
 )
 
-// Config contains sanitized numeric limits supplied by the Agent package.
-type Config struct {
+// RuntimeConfig bounds tool execution independently from any Agent.
+type RuntimeConfig struct {
 	MaxDepth       int
 	Timeout        time.Duration
 	MaxConcurrency int
@@ -31,8 +30,8 @@ type Config struct {
 	RetryBackoff   time.Duration
 }
 
-func defaultConfig() Config {
-	return Config{
+func defaultRuntimeConfig() RuntimeConfig {
+	return RuntimeConfig{
 		MaxDepth:       16,
 		Timeout:        30 * time.Second,
 		MaxConcurrency: 8,
@@ -40,40 +39,40 @@ func defaultConfig() Config {
 	}
 }
 
-func validateConfig(config Config) error {
+func validateRuntimeConfig(config RuntimeConfig) error {
 	if config.MaxDepth < 1 || config.MaxDepth > maxExecutionDepth {
-		return fmt.Errorf("internal max depth must be between 1 and %d: %d", maxExecutionDepth, config.MaxDepth)
+		return fmt.Errorf("tool runtime max depth must be between 1 and %d: %d", maxExecutionDepth, config.MaxDepth)
 	}
 	if config.Timeout <= 0 || config.Timeout > maxExecutionDuration {
-		return fmt.Errorf("internal timeout must be greater than zero and at most %s: %s", maxExecutionDuration, config.Timeout)
+		return fmt.Errorf("tool runtime timeout must be greater than zero and at most %s: %s", maxExecutionDuration, config.Timeout)
 	}
 	if config.MaxConcurrency < 1 || config.MaxConcurrency > maxBatchParallelism {
-		return fmt.Errorf("internal max concurrency must be between 1 and %d: %d", maxBatchParallelism, config.MaxConcurrency)
+		return fmt.Errorf("tool runtime max concurrency must be between 1 and %d: %d", maxBatchParallelism, config.MaxConcurrency)
 	}
 	if config.MaxRetries < 0 || config.MaxRetries > maxToolRetries {
-		return fmt.Errorf("internal max retries must be between 0 and %d: %d", maxToolRetries, config.MaxRetries)
+		return fmt.Errorf("tool runtime max retries must be between 0 and %d: %d", maxToolRetries, config.MaxRetries)
 	}
 	if config.RetryBackoff < 0 || config.RetryBackoff > maxRetryBackoff {
-		return fmt.Errorf("internal retry backoff must be between zero and %s: %s", maxRetryBackoff, config.RetryBackoff)
+		return fmt.Errorf("tool runtime retry backoff must be between zero and %s: %s", maxRetryBackoff, config.RetryBackoff)
 	}
 	return nil
 }
 
 type middlewareEntry struct {
 	name  string
-	value tool.Middleware
+	value Middleware
 }
 
 // Binding is an immutable runtime association between a tool and its validated Spec.
 type Binding struct {
-	value tool.Tool
-	spec  tool.Spec
+	value Tool
+	spec  Spec
 }
 
 // Spec returns the validated registration snapshot.
-func (b *Binding) Spec() tool.Spec {
+func (b *Binding) Spec() Spec {
 	if b == nil {
-		return tool.Spec{}
+		return Spec{}
 	}
 	return b.spec
 }
@@ -83,16 +82,16 @@ type Runtime struct {
 	scheduler   *scheduler
 	middlewares []middlewareEntry
 	workers     chan struct{}
-	config      Config
+	config      RuntimeConfig
 }
 
-// New validates user extensions and creates the fixed system runtime.
-func New(middlewares []tool.Middleware, configs ...Config) (*Runtime, error) {
-	config := defaultConfig()
+// NewRuntime validates extensions and creates the guarded tool executor.
+func NewRuntime(middlewares []Middleware, configs ...RuntimeConfig) (*Runtime, error) {
+	config := defaultRuntimeConfig()
 	if len(configs) > 0 {
 		config = configs[0]
 	}
-	if err := validateConfig(config); err != nil {
+	if err := validateRuntimeConfig(config); err != nil {
 		return nil, err
 	}
 	runtime := &Runtime{
@@ -117,9 +116,9 @@ func New(middlewares []tool.Middleware, configs ...Config) (*Runtime, error) {
 }
 
 // Register snapshots a tool Spec and reserves its internal concurrency group.
-func (r *Runtime) Register(value tool.Tool) (*Binding, error) {
+func (r *Runtime) Register(value Tool) (*Binding, error) {
 	if r == nil || r.scheduler == nil {
-		return nil, errors.New("internal tool runtime is not configured")
+		return nil, errors.New("tool runtime is not configured")
 	}
 	if value == nil {
 		return nil, errors.New("tool cannot be nil")
@@ -165,40 +164,49 @@ type Scope struct {
 }
 
 // Execute runs user extensions and the tool behind all system guards.
-func (s *Scope) Execute(ctx context.Context, binding *Binding, input tool.CallInput, options ...runnable.Option) (tool.Result, error) {
+func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, options ...runnable.Option) (Result, error) {
 	if s == nil || s.runtime == nil || s.runtime.scheduler == nil || s.runtime.workers == nil {
-		return tool.Result{}, errors.New("internal tool execution scope is not configured")
+		return Result{}, errors.New("tool execution scope is not configured")
 	}
 	if ctx == nil {
-		return tool.Result{}, tool.ErrNilContext
+		return Result{}, ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	plan, err := runnable.NewOptionPlan(options...)
 	if err != nil {
-		return tool.Result{}, fmt.Errorf("resolve tool options: %w", err)
+		return Result{}, fmt.Errorf("resolve tool options: %w", err)
 	}
 	nodeOptions := plan.ForwardOptionsFor(runnable.OptionScopeNode)
 	nodePlan, err := runnable.NewOptionPlan(nodeOptions...)
 	if err != nil {
-		return tool.Result{}, fmt.Errorf("isolate tool options: %w", err)
+		return Result{}, fmt.Errorf("isolate tool options: %w", err)
 	}
 	ctx = runnable.WithOptionPlan(ctx, nodePlan)
 	options = nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)
+	requested := nodeExecutionOptionsFromPlan(nodePlan)
+	timeout := s.defaultTimeout
+	contextLimits := executionLimitsFromContext(ctx)
+	if contextLimits.Timeout > 0 && contextLimits.Timeout < timeout {
+		timeout = contextLimits.Timeout
+	}
+	if requested.Timeout > 0 && requested.Timeout < timeout {
+		timeout = requested.Timeout
+	}
 	if binding == nil || binding.value == nil {
-		return tool.Result{}, errors.New("tool binding is not configured")
+		return Result{}, errors.New("tool binding is not configured")
 	}
-	httpOptions, configured := tool.HTTPOptionsFromContext(ctx)
+	httpOptions, configured := HTTPOptionsFromContext(ctx)
 	if !configured {
-		httpOptions = tool.HTTPOptions{Timeout: effectiveTimeout(s.defaultTimeout)}
+		httpOptions = HTTPOptions{Timeout: effectiveTimeout(timeout)}
 	}
-	ctx = tool.WithHTTPOptions(ctx, httpOptions)
-	control, cancel := context.WithTimeout(ctx, effectiveTimeout(s.defaultTimeout))
+	ctx = WithHTTPOptions(ctx, httpOptions)
+	control, cancel := context.WithTimeout(ctx, effectiveTimeout(timeout))
 	defer cancel()
-	input.HTTPClient = tool.HTTPClient(control)
+	input.HTTPClient = HTTPClient(control)
 	if err := acquire(control, s.runtime.workers); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 
 	completed := make(chan executionResult, 1)
@@ -209,7 +217,7 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input tool.CallIn
 	}()
 	select {
 	case <-control.Done():
-		return tool.Result{}, control.Err()
+		return Result{}, control.Err()
 	case completed := <-completed:
 		return completed.result, completed.err
 	}
@@ -224,7 +232,7 @@ func effectiveTimeout(configured time.Duration) time.Duration {
 }
 
 type executionResult struct {
-	result tool.Result
+	result Result
 	err    error
 }
 
@@ -232,20 +240,20 @@ func (r *Runtime) invoke(
 	control context.Context,
 	semaphore chan struct{},
 	binding *Binding,
-	input tool.CallInput,
+	input CallInput,
 	options []runnable.Option,
-) (result tool.Result, err error) {
+) (result Result, err error) {
 	spec := binding.spec
 	state := stateFromContext(control)
 	state.depth++
 	if state.depth > r.config.MaxDepth {
-		return tool.Result{}, &tool.MaxDepthError{Depth: state.depth, MaxDepth: r.config.MaxDepth}
+		return Result{}, &MaxDepthError{Depth: state.depth, MaxDepth: r.config.MaxDepth}
 	}
 
 	ctx, cleanup := bindContext(control, control, state)
 	defer cleanup()
-	ctx, invocation := tool.BeginCallback(ctx, spec, input)
-	defer func() { tool.EndCallback(ctx, invocation, spec, input, result, err) }()
+	ctx, invocation := BeginCallback(ctx, spec, input)
+	defer func() { EndCallback(ctx, invocation, spec, input, result, err) }()
 	defer recoverPanic("user extension zone", &result, &err)
 	return r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
 }
@@ -255,17 +263,17 @@ func (r *Runtime) invokeMiddleware(
 	control context.Context,
 	state executionState,
 	semaphore chan struct{},
-	value tool.Tool,
-	spec tool.Spec,
-	input tool.CallInput,
+	value Tool,
+	spec Spec,
+	input CallInput,
 	options []runnable.Option,
 	index int,
-) (tool.Result, error) {
+) (Result, error) {
 	if err := control.Err(); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	if index >= len(r.middlewares) {
 		return r.invokeTool(ctx, control, state, semaphore, value, spec, input, options)
@@ -286,21 +294,21 @@ func (r *Runtime) invokeMiddleware(
 		sync.Mutex
 		errors []error
 	}
-	next := func(nextCtx context.Context, nextInput tool.CallInput) (tool.Result, error) {
+	next := func(nextCtx context.Context, nextInput CallInput) (Result, error) {
 		nextCalled.Store(true)
 		lifecycle.Lock()
 		if !lifecycle.accepting {
 			lifecycle.Unlock()
-			return tool.Result{}, tool.ErrNextUnavailable
+			return Result{}, ErrNextUnavailable
 		}
 		nextWait.Add(1)
 		lifecycle.Unlock()
 		defer nextWait.Done()
 
-		var result tool.Result
+		var result Result
 		var err error
 		if nextCtx == nil {
-			err = tool.ErrNilContext
+			err = ErrNilContext
 		} else {
 			boundCtx, cleanup := bindContext(control, nextCtx, state)
 			defer cleanup()
@@ -329,19 +337,19 @@ func (r *Runtime) invokeMiddleware(
 	protectedErr := protected.err
 	protected.Unlock()
 	if protectedErr != nil {
-		return tool.Result{}, protectedErr
+		return Result{}, protectedErr
 	}
 	if err == nil {
 		return result, nil
 	}
-	if errors.Is(err, tool.ErrPermissionDenied) {
+	if errors.Is(err, ErrPermissionDenied) {
 		return result, classifyExtensionError("middleware", entry.name, "handle", spec.Name, err)
 	}
 	downstream.Lock()
 	downstreamErrors := append([]error(nil), downstream.errors...)
 	downstream.Unlock()
 	if !nextCalled.Load() || !wrapsAny(err, downstreamErrors) {
-		return result, &tool.ExtensionError{Kind: "middleware", Name: entry.name, Phase: "handle", Err: err}
+		return result, &ExtensionError{Kind: "middleware", Name: entry.name, Phase: "handle", Err: err}
 	}
 	return result, err
 }
@@ -351,16 +359,16 @@ func (r *Runtime) invokeTool(
 	control context.Context,
 	state executionState,
 	semaphore chan struct{},
-	value tool.Tool,
-	spec tool.Spec,
-	input tool.CallInput,
+	value Tool,
+	spec Spec,
+	input CallInput,
 	options []runnable.Option,
-) (result tool.Result, err error) {
+) (result Result, err error) {
 	if err := control.Err(); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	attempts := 1
 	if spec.IsReadOnly {
@@ -378,7 +386,7 @@ func (r *Runtime) invokeTool(
 			return result, err
 		}
 		if err := waitRetry(control, r.config.RetryBackoff); err != nil {
-			return tool.Result{}, err
+			return Result{}, err
 		}
 	}
 	return result, err
@@ -389,20 +397,20 @@ func (r *Runtime) invokeToolAttempt(
 	control context.Context,
 	state executionState,
 	semaphore chan struct{},
-	value tool.Tool,
-	spec tool.Spec,
-	input tool.CallInput,
+	value Tool,
+	spec Spec,
+	input CallInput,
 	options []runnable.Option,
-) (result tool.Result, err error) {
+) (result Result, err error) {
 	if err := acquire(control, semaphore); err != nil {
-		return tool.Result{}, err
+		return Result{}, err
 	}
 	defer release(semaphore)
 	boundCtx, cleanup := bindContext(control, ctx, state)
 	defer cleanup()
 	defer recoverPanic(fmt.Sprintf("tool %q", spec.Name), &result, &err)
-	return r.scheduler.execute(boundCtx, spec.Concurrency, func(callCtx context.Context) (tool.Result, error) {
-		input.HTTPClient = tool.HTTPClient(callCtx)
+	return r.scheduler.execute(boundCtx, spec.Concurrency, func(callCtx context.Context) (Result, error) {
+		input.HTTPClient = HTTPClient(callCtx)
 		return value.Invoke(callCtx, input, options...)
 	})
 }
@@ -424,48 +432,48 @@ func waitRetry(ctx context.Context, backoff time.Duration) error {
 func callMiddleware(
 	entry middlewareEntry,
 	ctx context.Context,
-	spec tool.Spec,
-	input tool.CallInput,
-	next tool.Next,
-) (result tool.Result, err error) {
+	spec Spec,
+	input CallInput,
+	next Next,
+) (result Result, err error) {
 	defer recoverPanic(fmt.Sprintf("middleware %q", entry.name), &result, &err)
 	return entry.value.Handle(ctx, spec, input, next)
 }
 
 func classifyExtensionError(kind, name, phase, toolName string, err error) error {
-	if errors.Is(err, tool.ErrPermissionDenied) {
-		var denied *tool.PermissionDeniedError
+	if errors.Is(err, ErrPermissionDenied) {
+		var denied *PermissionDeniedError
 		if errors.As(err, &denied) && denied.Err != nil {
 			err = denied.Err
 		}
-		return &tool.PermissionDeniedError{
+		return &PermissionDeniedError{
 			ToolName: toolName,
 			Layer:    fmt.Sprintf("%s %q", kind, name),
 			Err:      err,
 		}
 	}
-	return &tool.ExtensionError{Kind: kind, Name: name, Phase: phase, Err: err}
+	return &ExtensionError{Kind: kind, Name: name, Phase: phase, Err: err}
 }
 
-func recoverPanic(component string, result *tool.Result, err *error) {
+func recoverPanic(component string, result *Result, err *error) {
 	if recovered := recover(); recovered != nil {
-		*result = tool.Result{}
+		*result = Result{}
 		*err = panicError(component, recovered)
 	}
 }
 
 func panicError(component string, recovered any) error {
-	panicErr := &tool.ExecutionPanicError{Component: component, Value: recovered}
+	panicErr := &ExecutionPanicError{Component: component, Value: recovered}
 	if recoveredErr, ok := recovered.(error); ok {
 		panicErr.Err = recoveredErr
 	}
 	return panicErr
 }
 
-func readSpec(value tool.Tool) (spec tool.Spec, err error) {
+func readSpec(value Tool) (spec Spec, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			spec = tool.Spec{}
+			spec = Spec{}
 			err = panicError("tool Spec", recovered)
 		}
 	}()
@@ -475,22 +483,22 @@ func readSpec(value tool.Tool) (spec tool.Spec, err error) {
 func isProtectedError(err error) bool {
 	return err != nil && (errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, tool.ErrNilContext) ||
-		errors.Is(err, tool.ErrExecutionPanic) ||
-		errors.Is(err, tool.ErrMaxDepthExceeded) ||
-		errors.Is(err, tool.ErrDeadlockRisk) ||
-		errors.Is(err, tool.ErrPermissionDenied) ||
-		errors.Is(err, tool.ErrNextUnavailable))
+		errors.Is(err, ErrNilContext) ||
+		errors.Is(err, ErrExecutionPanic) ||
+		errors.Is(err, ErrMaxDepthExceeded) ||
+		errors.Is(err, ErrDeadlockRisk) ||
+		errors.Is(err, ErrPermissionDenied) ||
+		errors.Is(err, ErrNextUnavailable))
 }
 
-func middlewareName(value tool.Middleware, index int) (name string, err error) {
+func middlewareName(value Middleware, index int) (name string, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			name = ""
 			err = panicError("middleware Name", recovered)
 		}
 	}()
-	if named, ok := value.(tool.NamedMiddleware); ok {
+	if named, ok := value.(NamedMiddleware); ok {
 		if name := strings.TrimSpace(named.Name()); name != "" {
 			return name, nil
 		}

@@ -10,7 +10,6 @@ import (
 
 	"goharness/pkg/control"
 	"goharness/pkg/runnable"
-	statepkg "goharness/pkg/state"
 )
 
 const (
@@ -38,18 +37,18 @@ const (
 // Continuation is the portable Graph execution state captured at one node
 // boundary. It intentionally contains no edge values or runtime objects.
 type Continuation struct {
-	SchemaVersion int                           `json:"schema_version"`
-	GraphName     string                        `json:"graph_name"`
-	GraphRevision string                        `json:"graph_revision"`
-	ResumeNode    string                        `json:"resume_node"`
-	Step          int                           `json:"step"`
-	Visits        map[string]int                `json:"visits,omitempty"`
-	State         statepkg.GraphStateCheckpoint `json:"state"`
-	CursorStack   statepkg.CursorStack          `json:"cursor_stack,omitempty"`
-	Point         InterruptPoint                `json:"point"`
-	Reason        string                        `json:"reason,omitempty"`
-	Metadata      map[string]any                `json:"metadata,omitempty"`
-	CreatedAt     time.Time                     `json:"created_at"`
+	SchemaVersion int                  `json:"schema_version"`
+	GraphName     string               `json:"graph_name"`
+	GraphRevision string               `json:"graph_revision"`
+	ResumeNode    string               `json:"resume_node"`
+	Step          int                  `json:"step"`
+	Visits        map[string]int       `json:"visits,omitempty"`
+	State         GraphStateCheckpoint `json:"state"`
+	CursorStack   CursorStack          `json:"cursor_stack,omitempty"`
+	Point         InterruptPoint       `json:"point"`
+	Reason        string               `json:"reason,omitempty"`
+	Metadata      map[string]any       `json:"metadata,omitempty"`
+	CreatedAt     time.Time            `json:"created_at"`
 }
 
 func (c Continuation) Clone() Continuation {
@@ -172,11 +171,6 @@ func (checkpointOption) OptionScope() runnable.OptionScope { return runnable.Opt
 
 func WithCheckpoint(store control.CheckpointStore, key string) runnable.Option {
 	return checkpointOption{config: checkpointConfig{Store: store, Key: key, Timeout: DefaultCheckpointTimeout}}
-}
-
-// RequestInterrupt is a convenience alias for the shared control protocol.
-func RequestInterrupt(reason string, metadata map[string]any) error {
-	return control.RequestInterrupt(reason, metadata)
 }
 
 func checkpointFromPlan(plan runnable.OptionPlan) (checkpointConfig, bool, error) {
