@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"goharness/pkg/callback"
+	"goharness/pkg/runnable"
 )
 
 type ResumeMode string
@@ -27,7 +28,7 @@ type RunInfo struct {
 type NodeExecution struct {
 	GraphName  string
 	NodeID     string
-	Kind       string
+	Kind       runnable.NodeKind
 	Step       int
 	Visit      int
 	InputType  string
@@ -132,6 +133,7 @@ type lifecycleSink struct {
 	run           RunInfo
 	runInvocation callback.Invocation
 	nodes         map[graphNodeKey]nodeLifecycle
+	nodeInfo      map[string]NodeInfo
 }
 
 type graphNodeKey struct {
@@ -144,12 +146,16 @@ type nodeLifecycle struct {
 	ctx        context.Context
 }
 
-func bindCallbacks(ctx context.Context, run RunInfo) context.Context {
+func bindCallbacks(ctx context.Context, run RunInfo, nodes []NodeInfo) context.Context {
 	if _, ok := callback.ManagerFromContext(ctx); !ok {
 		return ctx
 	}
 	graphCtx, invocation := callback.Begin(ctx, "graph", run.Name, map[string]any{"graph.revision": run.Revision})
-	sink := &lifecycleSink{run: run, runInvocation: invocation, nodes: map[graphNodeKey]nodeLifecycle{}}
+	nodeInfo := make(map[string]NodeInfo, len(nodes))
+	for _, node := range nodes {
+		nodeInfo[node.ID] = node
+	}
+	sink := &lifecycleSink{run: run, runInvocation: invocation, nodes: map[graphNodeKey]nodeLifecycle{}, nodeInfo: nodeInfo}
 	if existing, ok := EventSinkFromContext(ctx); ok {
 		return WithEventSink(graphCtx, NewEventSink(sink, existing))
 	}
@@ -166,8 +172,8 @@ func (s *lifecycleSink) BindEventContext(ctx context.Context, event Event) conte
 	if node, ok := s.nodes[key]; ok {
 		return callback.BindInvocation(ctx, node.invocation)
 	}
-	nodeCtx, invocation := callback.Begin(ctx, "graph.node", event.NodeID, map[string]any{"graph.node_id": event.NodeID, "graph.step": event.Step})
-	execution := NodeExecution{GraphName: s.run.Name, NodeID: event.NodeID, Step: event.Step}
+	execution := s.nodeExecution(event)
+	nodeCtx, invocation := callback.Begin(ctx, "graph.node", event.NodeID, nodeExecutionMetadata(execution))
 	s.nodes[key] = nodeLifecycle{execution: execution, invocation: invocation, ctx: nodeCtx}
 	return nodeCtx
 }
@@ -186,8 +192,9 @@ func (s *lifecycleSink) Publish(ctx context.Context, event Event) {
 		key := graphNodeKey{id: event.NodeID, step: event.Step}
 		node := s.nodes[key]
 		if node.invocation.Operation == "" {
-			nodeCtx, invocation := callback.Begin(ctx, "graph.node", event.NodeID, map[string]any{"graph.node_id": event.NodeID, "graph.step": event.Step})
-			node = nodeLifecycle{execution: NodeExecution{GraphName: s.run.Name, NodeID: event.NodeID, Step: event.Step}, invocation: invocation, ctx: nodeCtx}
+			execution := s.nodeExecution(event)
+			nodeCtx, invocation := callback.Begin(ctx, "graph.node", event.NodeID, nodeExecutionMetadata(execution))
+			node = nodeLifecycle{execution: execution, invocation: invocation, ctx: nodeCtx}
 			s.nodes[key] = node
 		}
 		s.mu.Unlock()
@@ -224,5 +231,27 @@ func (s *lifecycleSink) Publish(ctx context.Context, event Event) {
 		_ = callback.Dispatch[Callback](callback.BindInvocation(ctx, invocation), invocation.WithPhase(callback.PhaseError), func(ctx context.Context, h Callback) error { return h.OnGraphError(ctx, failure) })
 	default:
 		s.mu.Unlock()
+	}
+}
+
+func (s *lifecycleSink) nodeExecution(event Event) NodeExecution {
+	info := s.nodeInfo[event.NodeID]
+	return NodeExecution{
+		GraphName:  s.run.Name,
+		NodeID:     event.NodeID,
+		Kind:       info.Kind,
+		Step:       event.Step,
+		InputType:  info.InputType,
+		OutputType: info.OutputType,
+	}
+}
+
+func nodeExecutionMetadata(execution NodeExecution) map[string]any {
+	return map[string]any{
+		"graph.node_id":     execution.NodeID,
+		"graph.node_kind":   execution.Kind,
+		"graph.step":        execution.Step,
+		"graph.input_type":  execution.InputType,
+		"graph.output_type": execution.OutputType,
 	}
 }

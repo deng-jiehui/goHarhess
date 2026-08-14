@@ -13,11 +13,10 @@ import (
 	"goharness/pkg/schema"
 )
 
-func TestAgentStreamBuffersOutputAsynchronously(t *testing.T) {
+func TestAgentStreamPublishesLiveOutputBeforeFinalResultIsConsumed(t *testing.T) {
 	model := &burstModel{produced: make(chan struct{})}
 	value, err := agent.NewBasicAgent(
 		agent.BaseConfig{Name: "async", Model: model},
-		agent.WithStreamBufferSize(4),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -33,27 +32,17 @@ func TestAgentStreamBuffersOutputAsynchronously(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	output, err := stream.Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 1 || output[0].JoinedText("") != "01234567" {
+		t.Fatalf("output=%#v", output)
+	}
 	select {
 	case <-model.produced:
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("model producer blocked before the Agent output was consumed")
-	}
-
-	deltas := 0
-	done := false
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		switch item.Value.Kind {
-		case schema.MessageEventDelta:
-			deltas++
-		case schema.MessageEventDone:
-			done = true
-		}
-	}
-	if deltas != 8 || !done {
-		t.Fatalf("stream events: deltas=%d done=%t", deltas, done)
+		t.Fatal("model producer did not finish")
 	}
 }
 
@@ -64,7 +53,7 @@ func TestBasicAgentRejectsModelStreamWithoutDone(t *testing.T) {
 	}
 
 	_, err = value.Invoke(context.Background(), []schema.Message{schema.UserMessage("truncated")})
-	if err == nil || !strings.Contains(err.Error(), "without done event") {
+	if err == nil || !strings.Contains(err.Error(), "without a result") {
 		t.Fatalf("Invoke error = %v", err)
 	}
 }
@@ -78,24 +67,27 @@ func (m *burstModel) Invoke(ctx context.Context, request llm.Request, options ..
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return stream.Collect(ctx)
 }
 
-func (m *burstModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
-	out := make(chan runnable.Item[llm.Event])
+func (m *burstModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		defer close(out)
 		defer close(m.produced)
+		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
 		for index := range 8 {
-			select {
-			case <-ctx.Done():
+			messages, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.AssistantMessage(fmt.Sprint(index))}})
+			if err != nil {
+				_ = writer.CloseWithError(err)
 				return
-			case out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage(fmt.Sprint(index))}}}:
+			}
+			if err := writer.Send(llm.Response{Messages: messages}); err != nil {
+				return
 			}
 		}
-		out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
+		_ = writer.Close()
 	}()
-	return out, nil
+	return reader, nil
 }
 
 func (m *burstModel) Capabilities() llm.Capabilities {
@@ -105,6 +97,12 @@ func (m *burstModel) Capabilities() llm.Capabilities {
 func (m *burstModel) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{Name: "burst", Provider: "test", ModelType: "scripted"}
 }
+func (m *burstModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m *burstModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
+}
 
 type incompleteModel struct{}
 
@@ -113,18 +111,20 @@ func (incompleteModel) Invoke(ctx context.Context, request llm.Request, options 
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return stream.Collect(ctx)
 }
 
-func (incompleteModel) Stream(context.Context, llm.Request, ...runnable.Option) (runnable.Stream[llm.Event], error) {
-	out := make(chan runnable.Item[llm.Event], 1)
-	out <- runnable.Item[llm.Event]{Value: llm.Event{
-		Kind:     llm.EventDelta,
-		Messages: []schema.Message{schema.AssistantMessage("partial")},
-	}}
-	close(out)
-	return out, nil
+func (incompleteModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	reader, writer := runnable.Pipe[llm.Response](ctx)
+	go func() { _ = writer.Close() }()
+	return reader, nil
 }
 
 func (incompleteModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
 func (incompleteModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "incomplete"} }
+func (m incompleteModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m incompleteModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
+}

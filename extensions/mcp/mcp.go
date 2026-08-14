@@ -1,5 +1,5 @@
 // Package mcp integrates the mark3labs MCP client with goHarness tools.
-// Protocol details stay inside this extension; callers receive BaseTool and
+// Protocol details stay inside this extension; callers receive Tool and
 // ToolsNode abstractions from the core framework.
 package mcp
 
@@ -61,7 +61,7 @@ type Client struct {
 	mu          sync.Mutex
 	refreshMu   sync.Mutex
 	initialized bool
-	tools       []tool.BaseTool
+	tools       []tool.Tool
 	dirty       atomic.Bool
 }
 
@@ -182,7 +182,7 @@ func (c *Client) Close() error {
 // RefreshTools fetches the complete MCP tools/list result and atomically
 // replaces the adapter snapshot. Existing adapters remain valid for in-flight
 // calls; new dynamic nodes use the new schema set.
-func (c *Client) RefreshTools(ctx context.Context) ([]tool.BaseTool, error) {
+func (c *Client) RefreshTools(ctx context.Context) ([]tool.Tool, error) {
 	if c == nil {
 		return nil, errors.New("MCP client is not configured")
 	}
@@ -202,7 +202,7 @@ func (c *Client) RefreshTools(ctx context.Context) ([]tool.BaseTool, error) {
 		c.dirty.Store(true)
 		return nil, fmt.Errorf("list MCP tools: %w", err)
 	}
-	values := make([]tool.BaseTool, 0, len(result.Tools))
+	values := make([]tool.Tool, 0, len(result.Tools))
 	for index, definition := range result.Tools {
 		value, err := newMCPTool(c, definition)
 		if err != nil {
@@ -212,19 +212,19 @@ func (c *Client) RefreshTools(ctx context.Context) ([]tool.BaseTool, error) {
 		values = append(values, value)
 	}
 	c.mu.Lock()
-	c.tools = append([]tool.BaseTool(nil), values...)
+	c.tools = append([]tool.Tool(nil), values...)
 	c.mu.Unlock()
 	specs := make([]tool.Spec, len(values))
 	for index, value := range values {
 		specs[index] = value.Spec()
 	}
 	endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationListTools, ListTools: &ListToolsResponse{Tools: specs}})
-	return append([]tool.BaseTool(nil), values...), nil
+	return append([]tool.Tool(nil), values...), nil
 }
 
-func (c *Client) Tools(ctx context.Context) ([]tool.BaseTool, error) {
+func (c *Client) Tools(ctx context.Context) ([]tool.Tool, error) {
 	c.mu.Lock()
-	values := append([]tool.BaseTool(nil), c.tools...)
+	values := append([]tool.Tool(nil), c.tools...)
 	dirty := c.dirty.Load()
 	c.mu.Unlock()
 	if len(values) == 0 || dirty {
@@ -274,6 +274,8 @@ func (n *DynamicToolsNode) Description() string {
 	return n.node.Description()
 }
 
+func (*DynamicToolsNode) NodeKind() runnable.NodeKind { return runnable.NodeKindMCP }
+
 func (n *DynamicToolsNode) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	if n == nil || n.client == nil {
 		return nil, errors.New("dynamic MCP tools node is not configured")
@@ -300,6 +302,16 @@ func (n *DynamicToolsNode) Invoke(ctx context.Context, messages []schema.Message
 		return nil, errors.New("dynamic MCP tools node has no tool snapshot")
 	}
 	return value.Invoke(ctx, messages, options...)
+}
+
+func (n *DynamicToolsNode) Stream(ctx context.Context, input []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.StreamFromInvoke(ctx, input, n.Invoke, options...)
+}
+func (n *DynamicToolsNode) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, n.Invoke, options...)
+}
+func (n *DynamicToolsNode) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, n.Invoke, options...)
 }
 
 func (c *Client) watchToolChanges() {
@@ -371,19 +383,29 @@ func (t *MCPTool) Invoke(ctx context.Context, input tool.CallInput, _ ...runnabl
 		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return tool.Result{}, fmt.Errorf("call MCP tool %q: %w", t.name, err)
 	}
-	content, err := resultContent(result)
+	blocks, err := resultContent(result)
 	if err != nil {
 		errorCallback(operationCtx, invocation, callbackRequest, err)
 		return tool.Result{}, fmt.Errorf("decode MCP tool %q result: %w", t.name, err)
 	}
 	if result.IsError {
-		value := tool.ErrorResult(content)
+		value := tool.ErrorResult(blocks...)
 		endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationCallTool, CallTool: &CallToolResponse{Result: value}})
 		return value, nil
 	}
-	value := tool.Result{Content: content}
+	value := tool.BlockResult(blocks...)
 	endCallback(operationCtx, invocation, CallbackResponse{Operation: OperationCallTool, CallTool: &CallToolResponse{Result: value}})
 	return value, nil
+}
+
+func (t *MCPTool) Stream(ctx context.Context, input tool.CallInput, options ...runnable.Option) (*runnable.StreamReader[tool.Result], error) {
+	return runnable.StreamFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *MCPTool) Collect(ctx context.Context, input *runnable.StreamReader[tool.CallInput], options ...runnable.Option) (tool.Result, error) {
+	return runnable.CollectFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *MCPTool) Transform(ctx context.Context, input *runnable.StreamReader[tool.CallInput], options ...runnable.Option) (*runnable.StreamReader[tool.Result], error) {
+	return runnable.TransformFromInvoke(ctx, input, t.Invoke, options...)
 }
 
 func inputSchema(definition sdkmcp.Tool) (map[string]any, error) {
@@ -413,53 +435,50 @@ func inputSchema(definition sdkmcp.Tool) (map[string]any, error) {
 	return schema, nil
 }
 
-func resultContent(result *sdkmcp.CallToolResult) (schema.Content, error) {
+func resultContent(result *sdkmcp.CallToolResult) ([]schema.ContentBlock, error) {
 	if result == nil {
-		return schema.Content{}, errors.New("MCP returned a nil tool result")
+		return nil, errors.New("MCP returned a nil tool result")
 	}
-	items := make([]schema.ContentItem, 0, len(result.Content)+1)
+	blocks := make([]schema.ContentBlock, 0, len(result.Content)+1)
 	for _, value := range result.Content {
 		switch item := value.(type) {
 		case sdkmcp.TextContent:
-			items = append(items, schema.TextItem(item.Text))
+			blocks = append(blocks, schema.NewTextBlock(item.Text))
 		case *sdkmcp.TextContent:
 			if item != nil {
-				items = append(items, schema.TextItem(item.Text))
+				blocks = append(blocks, schema.NewTextBlock(item.Text))
 			}
 		case sdkmcp.ImageContent:
-			items = append(items, schema.ContentItem{Image: dataURI(item.MIMEType, item.Data)})
+			blocks = append(blocks, schema.NewImageBlock(dataURI(item.MIMEType, item.Data), item.MIMEType))
 		case *sdkmcp.ImageContent:
 			if item != nil {
-				items = append(items, schema.ContentItem{Image: dataURI(item.MIMEType, item.Data)})
+				blocks = append(blocks, schema.NewImageBlock(dataURI(item.MIMEType, item.Data), item.MIMEType))
 			}
 		case sdkmcp.AudioContent:
-			items = append(items, schema.ContentItem{Audio: map[string]any{"data": item.Data, "mime_type": item.MIMEType}})
+			blocks = append(blocks, schema.NewAudioBlock(dataURI(item.MIMEType, item.Data), item.MIMEType))
 		case *sdkmcp.AudioContent:
 			if item != nil {
-				items = append(items, schema.ContentItem{Audio: map[string]any{"data": item.Data, "mime_type": item.MIMEType}})
+				blocks = append(blocks, schema.NewAudioBlock(dataURI(item.MIMEType, item.Data), item.MIMEType))
 			}
 		default:
 			data, err := json.Marshal(item)
 			if err != nil {
-				return schema.Content{}, err
+				return nil, err
 			}
-			items = append(items, schema.TextItem(string(data)))
+			blocks = append(blocks, schema.NewOpaqueBlock("mcp.content", data))
 		}
 	}
-	if len(items) == 0 && result.StructuredContent != nil {
+	if result.StructuredContent != nil {
 		data, err := json.MarshalIndent(result.StructuredContent, "", "  ")
 		if err != nil {
-			return schema.Content{}, err
+			return nil, err
 		}
-		items = append(items, schema.TextItem(string(data)))
+		blocks = append(blocks, schema.NewOpaqueBlock("mcp.structured", data))
 	}
-	if len(items) == 0 {
-		return schema.TextContent(""), nil
+	if len(blocks) == 0 {
+		return []schema.ContentBlock{schema.NewTextBlock("")}, nil
 	}
-	if len(items) == 1 && items[0].Text != nil {
-		return schema.TextContent(*items[0].Text), nil
-	}
-	return schema.MultiContent(items...), nil
+	return blocks, nil
 }
 
 func dataURI(mimeType, data string) string {
@@ -480,5 +499,6 @@ func cloneHeaders(headers map[string]string) map[string]string {
 	return values
 }
 
-var _ tool.BaseTool = (*MCPTool)(nil)
+var _ tool.Tool = (*MCPTool)(nil)
 var _ runnable.NamedRunnable[[]schema.Message, []schema.Message] = (*DynamicToolsNode)(nil)
+var _ runnable.NodeDescriptor = (*DynamicToolsNode)(nil)

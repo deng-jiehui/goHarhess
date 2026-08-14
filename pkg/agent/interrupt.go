@@ -27,7 +27,7 @@ func Resume(ctx context.Context, value Agent, opts ...RunOption) ([]schema.Messa
 	return value.Invoke(ctx, nil, runOptionsAsRunnable(options)...)
 }
 
-func ResumeStream(ctx context.Context, value Agent, opts ...RunOption) (runnable.Stream[schema.MessageEvent], error) {
+func ResumeStream(ctx context.Context, value Agent, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
 	if isNilAgent(value) {
 		return nil, errors.New("resume agent cannot be nil")
 	}

@@ -7,49 +7,19 @@ import (
 
 	"goharness/internal/agentrecipe"
 	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
-type recipeToolBatch struct {
-	base  *Base
-	batch *toolTaskBatch
-}
-
-func (b *recipeToolBatch) Resolve(calls []agentrecipe.Call, messages []schema.Message) ([]agentrecipe.ToolResult, error) {
-	requests := fromRecipeCalls(calls)
-	if err := b.batch.Admit(requests, messages); err != nil {
-		return nil, err
-	}
-	results := b.batch.Join(requests)
-	converted := make([]agentrecipe.ToolResult, len(results))
-	for i, result := range results {
-		converted[i] = agentrecipe.ToolResult{Call: calls[i], Content: result.Content, Err: result.Err}
-	}
-	return converted, nil
-}
-
-func fromRecipeCalls(calls []agentrecipe.Call) []toolCallRequest {
-	result := make([]toolCallRequest, len(calls))
-	for i, call := range calls {
-		result[i] = toolCallRequest{Name: call.Name, Arguments: call.Arguments, FunctionID: call.FunctionID}
-	}
-	return result
-}
-
-func reactRecipe(base *Base, prepareModelMessages func([]schema.Message) []schema.Message) (*agentrecipe.Recipe, error) {
+func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schema.Message) (*agentrecipe.Recipe, error) {
 	return agentrecipe.NewToolRecipe(string(AgentKindReact), agentrecipe.Hooks{
-		Name: base.Name(),
-		CallModel: func(ctx context.Context, messages []schema.Message) (runnable.Stream[llm.Event], error) {
+		Model: base.modelNode,
+		Tools: base.toolNode,
+		PrepareModel: func(ctx context.Context, messages []schema.Message) (llm.Request, error) {
 			opts, _ := resolvedRunOptionsFromContext(ctx)
 			if prepareModelMessages != nil {
 				messages = prepareModelMessages(messages)
 			}
-			return base.callLLM(ctx, messages, base.toolDefinitions(), opts)
-		},
-		NewToolBatch: func(ctx context.Context) agentrecipe.ToolBatch {
-			opts, _ := resolvedRunOptionsFromContext(ctx)
-			return &recipeToolBatch{base: base, batch: base.newToolTaskBatch(ctx, opts)}
+			return base.prepareLLMRequest(ctx, messages, base.toolDefinitions(), opts)
 		},
 		DetectCalls: func(messages []schema.Message) []agentrecipe.Call {
 			actions := detectReactActions(messages)
@@ -61,9 +31,9 @@ func reactRecipe(base *Base, prepareModelMessages func([]schema.Message) []schem
 		},
 		RehydrateLLMCalls: countToolResponseTurns,
 		Observation: func(result agentrecipe.ToolResult) schema.Message {
-			content := result.Content
+			content := joinAgentTextBlocks(result.ContentBlocks)
 			if result.Err != nil {
-				content = schema.TextContent(fmt.Sprintf("An error occurred when calling tool %q: %v", result.Call.Name, result.Err))
+				content = fmt.Sprintf("An error occurred when calling tool %q: %v", result.Call.Name, result.Err)
 			}
 			return reactObservationMessage(ReactAction{
 				Thought: result.Call.Thought, Name: result.Call.Name, Input: result.Call.Arguments,
@@ -72,6 +42,16 @@ func reactRecipe(base *Base, prepareModelMessages func([]schema.Message) []schem
 		},
 		NameMessages: base.withAgentName,
 	}, true)
+}
+
+func joinAgentTextBlocks(blocks []schema.ContentBlock) string {
+	parts := make([]string, 0)
+	for _, block := range blocks {
+		if block.Type == schema.ContentBlockTypeText && block.Text != nil {
+			parts = append(parts, block.Text.Text)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // countToolResponseTurns derives the completed model-call count at the only
@@ -84,8 +64,8 @@ func countToolResponseTurns(messages []schema.Message) int {
 	inBatch := false
 	for _, message := range messages {
 		marked, _ := message.Extra["agent_observation"].(bool)
-		isToolResponse := marked || message.Role == schema.RoleFunction ||
-			(message.Role == schema.RoleAssistant && strings.HasPrefix(strings.TrimSpace(message.Text()), "Observation:"))
+		isToolResponse := marked || message.Role == schema.RoleTool || len(message.FunctionToolResults()) > 0 ||
+			(message.Role == schema.RoleAssistant && strings.HasPrefix(strings.TrimSpace(message.JoinedText("")), "Observation:"))
 		if isToolResponse {
 			if !inBatch {
 				turns++
@@ -98,7 +78,7 @@ func countToolResponseTurns(messages []schema.Message) int {
 	return turns
 }
 
-func recipeName(base *Base, fallback string) string {
+func recipeName(base *base, fallback string) string {
 	if base != nil && base.Name() != "" {
 		return base.Name()
 	}

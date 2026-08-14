@@ -151,6 +151,16 @@ func (c *CachedVectorStore) Invoke(ctx context.Context, request coreretrieval.Ve
 	}
 }
 
+func (c *CachedVectorStore) Stream(ctx context.Context, input coreretrieval.VectorRequest, options ...runnable.Option) (*runnable.StreamReader[coreretrieval.VectorResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, c.Invoke, options...)
+}
+func (c *CachedVectorStore) Collect(ctx context.Context, input *runnable.StreamReader[coreretrieval.VectorRequest], options ...runnable.Option) (coreretrieval.VectorResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, c.Invoke, options...)
+}
+func (c *CachedVectorStore) Transform(ctx context.Context, input *runnable.StreamReader[coreretrieval.VectorRequest], options ...runnable.Option) (*runnable.StreamReader[coreretrieval.VectorResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, c.Invoke, options...)
+}
+
 func (c *CachedVectorStore) Stats() VectorCacheStats {
 	return VectorCacheStats{
 		Hits:          c.stats.hits.Load(),

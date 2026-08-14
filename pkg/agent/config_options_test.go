@@ -35,7 +35,6 @@ func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 		agent.WithRetryBackoff(0),
 		agent.WithMaxTokens(1234),
 		agent.WithMaxLLMCalls(4),
-		agent.WithStreamBufferSize(4),
 		agent.WithCheckpointTimeout(time.Second),
 		agent.WithExtraGenerateConfig(llm.GenerateConfig{"temperature": 0.2, "lang": "provider-specific"}),
 	)
@@ -48,7 +47,7 @@ func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")}); err != nil {
 		t.Fatal(err)
 	}
-	if len(gotMessages) == 0 || gotMessages[0].Role != schema.RoleSystem || !strings.Contains(gotMessages[0].Text(), "system policy") {
+	if len(gotMessages) == 0 || gotMessages[0].Role != schema.RoleSystem || !strings.Contains(gotMessages[0].JoinedText(""), "system policy") {
 		t.Fatalf("model messages = %#v", gotMessages)
 	}
 	if gotOptions.ExtraGenerateConfig["max_tokens"] != 1234 ||
@@ -95,15 +94,16 @@ func TestAgentLanguageDoesNotBecomeProviderGenerateConfig(t *testing.T) {
 func TestWithContextBuilderLambdaReplacesDefaultContextNode(t *testing.T) {
 	called := false
 	model := llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-		if len(messages) != 1 || messages[0].Text() != "custom context" {
+		if len(messages) != 1 || messages[0].JoinedText("") != "custom context" {
 			return nil, fmt.Errorf("model messages = %#v", messages)
 		}
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model}, agent.WithContextBuilder(func(_ context.Context, request contextengine.Request) (contextengine.Result, error) {
+	builder := runnable.Func[contextengine.Request, contextengine.Result](func(_ context.Context, request contextengine.Request, _ ...runnable.Option) (contextengine.Result, error) {
 		called = true
 		return contextengine.Result{Messages: []schema.Message{schema.UserMessage("custom context")}}, nil
-	}))
+	})
+	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model}, agent.WithContextBuilder(builder))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,10 +116,11 @@ func TestWithContextBuilderLambdaReplacesDefaultContextNode(t *testing.T) {
 }
 
 func TestDefaultContextBuilderIsAStandardRunnable(t *testing.T) {
-	var _ runnable.Runnable[contextengine.Request, contextengine.Result] = contextengine.NewDefaultContextBuilder()
-	var _ runnable.Runnable[contextengine.Request, contextengine.Result] = contextengine.ContextBuilderFunc(func(context.Context, contextengine.Request) (contextengine.Result, error) {
-		return contextengine.Result{}, nil
-	})
+	builder, err := contextengine.NewContextBuilder(contextengine.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var _ runnable.Runnable[contextengine.Request, contextengine.Result] = builder
 }
 
 func TestAgentInitializationRejectsUnsafeNumericOptions(t *testing.T) {
@@ -134,7 +135,6 @@ func TestAgentInitializationRejectsUnsafeNumericOptions(t *testing.T) {
 		{name: "backoff", opt: agent.WithRetryBackoff(-time.Second)},
 		{name: "tokens", opt: agent.WithMaxTokens(0)},
 		{name: "LLM calls", opt: agent.WithMaxLLMCalls(0)},
-		{name: "stream buffer", opt: agent.WithStreamBufferSize(0)},
 		{name: "checkpoint timeout", opt: agent.WithCheckpointTimeout(-time.Second)},
 	}
 	for _, test := range tests {

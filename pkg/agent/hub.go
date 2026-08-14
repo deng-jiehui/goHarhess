@@ -8,8 +8,6 @@ import (
 	"reflect"
 
 	"goharness/internal/agentrecipe"
-	"goharness/pkg/callback"
-	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -122,7 +120,7 @@ type GroupChatConfig struct {
 }
 
 type GroupChat struct {
-	*Base
+	*base
 	hub       *Hub
 	selector  AgentSelector
 	maxRounds int
@@ -130,7 +128,7 @@ type GroupChat struct {
 }
 
 func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
-	base, err := NewBase(cfg.BaseConfig, opts...)
+	base, err := newBase(cfg.BaseConfig, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -153,30 +151,24 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 	if maxRounds > MaxGroupChatRounds {
 		return nil, fmt.Errorf("group chat max rounds cannot exceed %d", MaxGroupChatRounds)
 	}
-	g := &GroupChat{Base: base, hub: hub, selector: selector, maxRounds: maxRounds}
+	g := &GroupChat{base: base, hub: hub, selector: selector, maxRounds: maxRounds}
+	members := make([]agentrecipe.GroupMember, 0, len(hub.Agents()))
+	for _, child := range hub.Agents() {
+		node, nodeErr := NewAgentNode(child)
+		if nodeErr != nil {
+			return nil, nodeErr
+		}
+		members = append(members, agentrecipe.GroupMember{Name: child.Name(), Node: node})
+	}
 	recipe, err := agentrecipe.NewGroupRecipe(string(AgentKindGroupChat), agentrecipe.GroupHooks{
 		MaxRounds: maxRounds,
-		Dispatch: func(ctx context.Context, messages []schema.Message, round int, lastAgent string) (string, runnable.Stream[schema.MessageEvent], error) {
+		Members:   members,
+		Select: func(ctx context.Context, messages []schema.Message, round int, lastAgent string) (string, error) {
 			selected, err := g.selectAgent(ctx, SelectionState{Round: round, LastAgent: lastAgent, Messages: schema.CloneMessages(messages)})
 			if err != nil || selected == nil {
-				return "", nil, err
+				return "", err
 			}
-			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			childOpts := []RunOption{WithCheckpointBypass()}
-			if runOpts.DeltaStream {
-				childOpts = append(childOpts, WithDeltaStream(true))
-			}
-			childRunnableOpts := runOptionsAsRunnable(childOpts)
-			childRunnableOpts = append(childRunnableOpts, runOpts.GlobalOptions...)
-			childRunnableOpts = append(childRunnableOpts, runOpts.NodeOptions...)
-			childCtx := callback.WithStreamCallbacksIsolated(ctx)
-			childCtx = graph.WithEventSinkIsolated(childCtx, nil)
-			childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
-			stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), childRunnableOpts...)
-			if err != nil {
-				return selected.Name(), nil, err
-			}
-			return selected.Name(), stream, nil
+			return selected.Name(), nil
 		},
 	})
 	if err != nil {
@@ -186,7 +178,7 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 	return g, nil
 }
 
-func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (runnable.Stream[schema.MessageEvent], error) {
+func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
 	runOpts := resolveRunOptions(g.limits, opts...)
 	runOpts.agentKind = AgentKindGroupChat
 	loaded, session, err := g.loadConversation(ctx, messages, &runOpts)
@@ -202,24 +194,20 @@ func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts 
 	lifecycle.session = session
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
+	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	runCtx = withRecipeCompletion(runCtx, session)
 	runCtx = agentrecipe.WithGroupRunConfig(runCtx, agentrecipe.GroupRunConfig{Input: conversationInput(session, messages)})
-	var stream runnable.Stream[schema.MessageEvent]
+	var stream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
-		stream, err = g.recipe.ResumeStream(runCtx, runOpts.GraphOptions...)
+		stream, err = g.recipe.ResumeStream(runCtx, graphNodeOptions(runOpts)...)
 	} else {
-		stream, err = g.recipe.Stream(runCtx, prepared, runOpts.GraphOptions...)
+		stream, err = g.recipe.Stream(runCtx, prepared, graphNodeOptions(runOpts)...)
 	}
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err
 	}
-	stream, err = prefetchMessageEvents(runCtx, stream)
-	if err != nil {
-		lifecycle.fail(err)
-		return nil, err
-	}
-	return lifecycle.wrap(stream, runOpts.StreamBufferSize), nil
+	return lifecycle.wrap(stream)
 }
 
 func (g *GroupChat) selectAgent(ctx context.Context, state SelectionState) (Agent, error) {
@@ -245,14 +233,4 @@ func selectorForMethod(method SelectionMethod) (AgentSelector, error) {
 	default:
 		return nil, fmt.Errorf("unsupported group chat selection method %q", method)
 	}
-}
-
-func withSpeakerName(messages []schema.Message, speaker string) []schema.Message {
-	named := schema.CloneMessages(messages)
-	for i := range named {
-		if named[i].Name == "" {
-			named[i].Name = speaker
-		}
-	}
-	return named
 }

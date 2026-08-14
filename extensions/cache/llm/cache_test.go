@@ -3,7 +3,6 @@ package llm_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,45 +42,27 @@ func TestMemoryCacheLRUAndTTL(t *testing.T) {
 	}
 }
 
-func TestCachedModelReplaysStandardEvents(t *testing.T) {
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("hel"), delta("hello")}}
+func TestCachedModelCachesCompleteResponse(t *testing.T) {
+	upstream := &testModel{response: response("answer")}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model"})
-
-	first := collect(t, mustStream(t, cached, context.Background(), "same", llm.ChatOptions{}))
-	second := collect(t, mustStream(t, cached, context.Background(), "same", llm.ChatOptions{}))
-	if upstream.Calls() != 1 {
-		t.Fatalf("upstream calls = %d, want 1", upstream.Calls())
+	for range 2 {
+		got, err := cached.Invoke(context.Background(), request("same"))
+		if err != nil || got.Messages[0].JoinedText("") != "answer" {
+			t.Fatalf("response=%#v err=%v", got, err)
+		}
 	}
-	if fmt.Sprint(first) != fmt.Sprint(second) || len(second) != 2 {
-		t.Fatalf("first=%#v second=%#v", first, second)
+	if upstream.Calls() != 1 {
+		t.Fatalf("upstream calls=%d, want 1", upstream.Calls())
 	}
 	stats := cached.Stats()
 	if stats.Hits != 1 || stats.Misses != 1 || stats.Writes != 1 {
-		t.Fatalf("stats = %#v", stats)
-	}
-}
-
-func TestCachedModelInvokeUsesSameCacheProtocol(t *testing.T) {
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("answer")}}
-	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model"})
-	request := llm.Request{Messages: []schema.Message{schema.UserMessage("same")}}
-	for range 2 {
-		response, err := cached.Invoke(context.Background(), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(response.Messages) != 1 || response.Messages[0].Text() != "answer" {
-			t.Fatalf("response = %#v", response)
-		}
-	}
-	if upstream.Calls() != 1 {
-		t.Fatalf("upstream calls = %d, want 1", upstream.Calls())
+		t.Fatalf("stats=%#v", stats)
 	}
 }
 
 func TestCachedModelCombinesConcurrentMisses(t *testing.T) {
 	release := make(chan struct{})
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("shared")}, release: release}
+	upstream := &testModel{response: response("shared"), release: release}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model"})
 
 	const callers = 8
@@ -93,17 +74,12 @@ func TestCachedModelCombinesConcurrentMisses(t *testing.T) {
 		go func() {
 			ready.Done()
 			<-start
-			stream, err := cached.Stream(context.Background(), llm.Request{Messages: []schema.Message{schema.UserMessage("same")}})
+			got, err := cached.Invoke(context.Background(), request("same"))
 			if err != nil {
 				results <- "error: " + err.Error()
 				return
 			}
-			events, err := collectStream(stream)
-			if err != nil {
-				results <- "error: " + err.Error()
-				return
-			}
-			results <- events[len(events)-1].Messages[0].Text()
+			results <- got.Messages[0].JoinedText("")
 		}()
 	}
 	ready.Wait()
@@ -112,212 +88,165 @@ func TestCachedModelCombinesConcurrentMisses(t *testing.T) {
 	close(release)
 	for range callers {
 		if got := <-results; got != "shared" {
-			t.Fatalf("result = %q, want shared", got)
+			t.Fatalf("result=%q", got)
 		}
 	}
 	if cached.Stats().Shared != callers-1 {
-		t.Fatalf("shared requests = %d, want %d", cached.Stats().Shared, callers-1)
+		t.Fatalf("shared=%d, want %d", cached.Stats().Shared, callers-1)
 	}
 }
 
 func TestCachedModelIsolatesTenants(t *testing.T) {
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("ok")}}
+	upstream := &testModel{response: response("ok")}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model", Namespace: "prod"})
 	for _, tenant := range []string{"tenant-a", "tenant-b", "tenant-a"} {
-		ctx := cachellm.WithCacheTenant(context.Background(), tenant)
-		collect(t, mustStream(t, cached, ctx, "same", llm.ChatOptions{}))
+		if _, err := cached.Invoke(cachellm.WithCacheTenant(context.Background(), tenant), request("same")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if upstream.Calls() != 2 {
-		t.Fatalf("upstream calls = %d, want 2", upstream.Calls())
+		t.Fatalf("calls=%d, want 2", upstream.Calls())
 	}
 }
 
 func TestCachedModelBypassesSensitiveRequests(t *testing.T) {
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("secret")}}
+	upstream := &testModel{response: response("secret")}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{
 		ModelID: "test-model",
 		SensitiveDetector: func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) bool {
-			return messages[len(messages)-1].Text() == "password"
+			return messages[len(messages)-1].JoinedText("") == "password"
 		},
 	})
-	for range 2 {
-		collect(t, mustStream(t, cached, context.Background(), "password", llm.ChatOptions{}))
+	contexts := []context.Context{
+		context.Background(), context.Background(),
+		cachellm.WithSensitiveRequest(context.Background()),
+		cachellm.WithCacheBypass(context.Background()),
 	}
-	collect(t, mustStream(t, cached, cachellm.WithSensitiveRequest(context.Background()), "marked", llm.ChatOptions{}))
-	collect(t, mustStream(t, cached, cachellm.WithCacheBypass(context.Background()), "manual", llm.ChatOptions{}))
+	texts := []string{"password", "password", "marked", "manual"}
+	for index := range contexts {
+		if _, err := cached.Invoke(contexts[index], request(texts[index])); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if upstream.Calls() != 4 || cached.Stats().Bypasses != 4 {
 		t.Fatalf("calls=%d stats=%#v", upstream.Calls(), cached.Stats())
 	}
 }
 
 func TestCachedModelFunctionCallPolicy(t *testing.T) {
-	options := llm.ChatOptions{Functions: []schema.FunctionDefinition{{Name: "search"}}}
-	t.Run("disabled by default", func(t *testing.T) {
-		upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("tool")}}
-		cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model"})
-		for range 2 {
-			collect(t, mustStream(t, cached, context.Background(), "search", options))
-		}
-		if upstream.Calls() != 2 {
-			t.Fatalf("upstream calls = %d, want 2", upstream.Calls())
-		}
-	})
-	t.Run("explicitly enabled", func(t *testing.T) {
-		upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("tool")}}
-		cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model", CacheFunctionCalls: true})
-		for range 2 {
-			collect(t, mustStream(t, cached, context.Background(), "search", options))
-		}
-		if upstream.Calls() != 1 {
-			t.Fatalf("upstream calls = %d, want 1", upstream.Calls())
-		}
-	})
-}
-
-func TestCachedModelDoesNotCacheErrors(t *testing.T) {
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("partial"), {Err: errors.New("provider failed")}}}
-	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model"})
-	for range 2 {
-		stream := mustStream(t, cached, context.Background(), "same", llm.ChatOptions{})
-		if _, err := collectStream(stream); err == nil {
-			t.Fatal("collectStream returned nil error")
-		}
-	}
-	if upstream.Calls() != 2 || cached.Stats().Writes != 0 {
-		t.Fatalf("calls=%d stats=%#v", upstream.Calls(), cached.Stats())
+	requestWithTools := request("search")
+	requestWithTools.Options.Functions = []schema.FunctionDefinition{{Name: "search"}}
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		calls   int
+	}{{"disabled", false, 2}, {"enabled", true, 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := &testModel{response: response("tool")}
+			cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "test-model", CacheFunctionCalls: test.enabled})
+			for range 2 {
+				if _, err := cached.Invoke(context.Background(), requestWithTools); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if upstream.Calls() != test.calls {
+				t.Fatalf("calls=%d, want %d", upstream.Calls(), test.calls)
+			}
+		})
 	}
 }
 
-func TestCachedModelDoesNotCacheSilentLeaderCancellation(t *testing.T) {
-	upstream := &silentCancelModel{}
-	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "cancel-model"})
-	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := cached.Stream(ctx, llm.Request{Messages: []schema.Message{schema.UserMessage("same")}})
-	if err != nil {
+func TestCachedModelBlockOrderAffectsKeyAndCloneIsolatesMetadata(t *testing.T) {
+	upstream := &testModel{response: response("ok")}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "order"})
+	a := request("same")
+	a.Messages[0].ContentBlocks = []schema.ContentBlock{schema.NewTextBlock("a"), schema.NewTextBlock("b")}
+	b := request("same")
+	b.Messages[0].ContentBlocks = []schema.ContentBlock{schema.NewTextBlock("b"), schema.NewTextBlock("a")}
+	if _, err := cached.Invoke(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
-	if item := <-stream; item.Err != nil || item.Value.Kind != llm.EventDelta {
-		t.Fatalf("first event = %#v", item)
-	}
-	cancel()
-	for range stream {
-	}
-	second, err := cached.Stream(context.Background(), llm.Request{Messages: []schema.Message{schema.UserMessage("same")}})
-	if err != nil {
+	if _, err := cached.Invoke(context.Background(), b); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := collectStream(second); err != nil {
-		t.Fatal(err)
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2", upstream.Calls())
 	}
-	if upstream.Calls() != 2 || cached.Stats().Writes != 1 {
-		t.Fatalf("calls=%d stats=%#v", upstream.Calls(), cached.Stats())
+	entry := cachellm.CacheEntry{Response: llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("x"))}}}
+	clone := entry.Clone()
+	clone.Response.Messages[0].ContentBlocks[0].Text.Text = "changed"
+	if entry.Response.Messages[0].ContentBlocks[0].Text.Text != "x" {
+		t.Fatal("response clone shares nested blocks")
+	}
+}
+
+func TestCachedModelDoesNotCacheErrorsOrEmptyReaders(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		model *testModel
+		want  error
+	}{
+		{"error", &testModel{err: errors.New("provider failed")}, nil},
+		{"empty", &testModel{empty: true}, llm.ErrStreamTruncated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cached := newMemoryCachedModel(t, test.model, cachellm.CacheConfig{ModelID: test.name})
+			for range 2 {
+				_, err := cached.Invoke(context.Background(), request("same"))
+				if err == nil || test.want != nil && !errors.Is(err, test.want) {
+					t.Fatalf("error=%v, want %v", err, test.want)
+				}
+			}
+			if test.model.Calls() != 2 || cached.Stats().Writes != 0 {
+				t.Fatalf("calls=%d stats=%#v", test.model.Calls(), cached.Stats())
+			}
+		})
 	}
 }
 
 func TestCachedModelFollowerSurvivesLeaderCancellation(t *testing.T) {
 	release := make(chan struct{})
-	upstream := &streamModel{items: []runnable.Item[llm.Event]{delta("shared")}, release: release}
+	upstream := &testModel{response: response("shared"), release: release}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "leader-cancel"})
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
-	leader := mustStream(t, cached, leaderCtx, "same", llm.ChatOptions{})
-	follower := mustStream(t, cached, context.Background(), "same", llm.ChatOptions{})
-	deadline := time.Now().Add(time.Second)
-	for cached.Stats().Shared != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if cached.Stats().Shared != 1 {
-		t.Fatalf("stats=%#v", cached.Stats())
-	}
-	cancelLeader()
-	for range leader {
-	}
-	close(release)
-	events, err := collectStream(follower)
+	leader, err := cached.Stream(leaderCtx, request("same"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Messages[0].Text() != "shared" {
-		t.Fatalf("events=%#v", events)
+	follower, err := cached.Stream(context.Background(), request("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForShared(t, cached, 1)
+	cancelLeader()
+	if _, err := leader.Recv(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader error=%v", err)
+	}
+	close(release)
+	got, err := llm.CollectResponse(context.Background(), follower)
+	if err != nil || got.Messages[0].JoinedText("") != "shared" {
+		t.Fatalf("follower=%#v err=%v", got, err)
 	}
 	if upstream.Calls() != 1 || cached.Stats().Writes != 1 {
 		t.Fatalf("calls=%d stats=%#v", upstream.Calls(), cached.Stats())
 	}
 }
 
-type stagedStreamModel struct {
-	release chan struct{}
-	calls   atomic.Int64
-}
-
-func (m *stagedStreamModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
-	stream, err := m.Stream(ctx, request, options...)
+func TestCachedModelCancelsUpstreamWhenAllSubscribersLeave(t *testing.T) {
+	canceled := make(chan struct{})
+	upstream := &testModel{waitForCancel: canceled}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "cancel-all"})
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, err := cached.Stream(ctx, request("same"))
 	if err != nil {
-		return llm.Response{}, err
+		t.Fatal(err)
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
-}
-
-func (m *stagedStreamModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
-	m.calls.Add(1)
-	out := make(chan runnable.Item[llm.Event])
-	go func() {
-		defer close(out)
-		select {
-		case <-ctx.Done():
-			return
-		case out <- delta("first"):
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-m.release:
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case out <- delta("second"):
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}:
-		}
-	}()
-	return out, nil
-}
-
-func (*stagedStreamModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
-func (*stagedStreamModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "staged"} }
-
-func TestCachedModelFollowerReceivesIncrementalHistory(t *testing.T) {
-	release := make(chan struct{})
-	released := false
-	defer func() {
-		if !released {
-			close(release)
-		}
-	}()
-	upstream := &stagedStreamModel{release: release}
-	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "incremental"})
-	leader := mustStream(t, cached, context.Background(), "same", llm.ChatOptions{})
-	first := <-leader
-	if first.Err != nil || first.Value.Messages[0].Text() != "first" {
-		t.Fatalf("leader first=%#v", first)
-	}
-	follower := mustStream(t, cached, context.Background(), "same", llm.ChatOptions{})
+	cancel()
+	_ = reader.Close()
 	select {
-	case item := <-follower:
-		if item.Err != nil || item.Value.Messages[0].Text() != "first" {
-			t.Fatalf("follower first=%#v", item)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("follower did not receive incremental history")
-	}
-	close(release)
-	released = true
-	for range leader {
-	}
-	for range follower {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream was not canceled")
 	}
 }
 
@@ -329,104 +258,92 @@ func TestRedisCacheRoundTripAndTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := cachellm.CacheEntry{Events: []llm.Event{{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage("redis")}}}, CreatedAt: time.Now().UTC()}
+	entry := cachellm.CacheEntry{Response: response("redis"), CreatedAt: time.Now().UTC()}
 	if err := store.Set(context.Background(), "key", entry, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := store.Get(context.Background(), "key")
-	if err != nil || !found || got.Events[0].Messages[0].Text() != "redis" {
-		t.Fatalf("Get() entry=%#v found=%v err=%v", got, found, err)
+	if err != nil || !found || got.Response.Messages[0].JoinedText("") != "redis" {
+		t.Fatalf("entry=%#v found=%v err=%v", got, found, err)
 	}
 	server.FastForward(2 * time.Minute)
 	if _, found, err := store.Get(context.Background(), "key"); err != nil || found {
-		t.Fatalf("expired Get() found=%v err=%v", found, err)
+		t.Fatalf("expired found=%v err=%v", found, err)
 	}
 }
 
-type streamModel struct {
-	items   []runnable.Item[llm.Event]
-	release <-chan struct{}
-	calls   atomic.Int64
+type testModel struct {
+	response      llm.Response
+	err           error
+	empty         bool
+	release       <-chan struct{}
+	waitForCancel chan<- struct{}
+	calls         atomic.Int64
 }
 
-type silentCancelModel struct{ calls atomic.Int64 }
-
-func (m *silentCancelModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
-	stream, err := m.Stream(ctx, request, options...)
+func (m *testModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
+	reader, err := m.Stream(ctx, request, options...)
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return llm.CollectResponse(ctx, reader)
 }
 
-func (m *silentCancelModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
-	call := m.calls.Add(1)
-	out := make(chan runnable.Item[llm.Event], 2)
-	out <- delta("partial")
-	if call > 1 {
-		out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
-		close(out)
-		return out, nil
-	}
-	go func() {
-		defer close(out)
-		<-ctx.Done()
-	}()
-	return out, nil
-}
-
-func (*silentCancelModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
-func (*silentCancelModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "silent-cancel"} }
-func (m *silentCancelModel) Calls() int                   { return int(m.calls.Load()) }
-
-func (m *streamModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
-	stream, err := m.Stream(ctx, request, options...)
-	if err != nil {
-		return llm.Response{}, err
-	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
-}
-
-func (m *streamModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
+func (m *testModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
 	m.calls.Add(1)
-	out := make(chan runnable.Item[llm.Event])
+	reader, writer := runnable.Pipe[llm.Response](context.WithoutCancel(ctx))
 	go func() {
-		defer close(out)
+		if m.waitForCancel != nil {
+			<-ctx.Done()
+			close(m.waitForCancel)
+			_ = writer.CloseWithError(ctx.Err())
+			return
+		}
 		if m.release != nil {
 			select {
 			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+				_ = writer.CloseWithError(ctx.Err())
 				return
 			case <-m.release:
 			}
 		}
-		for _, item := range m.items {
-			select {
-			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
-				return
-			case out <- item:
-			}
-			if item.Err != nil {
-				return
-			}
+		if m.err != nil {
+			_ = writer.CloseWithError(m.err)
+			return
 		}
-		out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
+		if m.empty {
+			_ = writer.Close()
+			return
+		}
+		if err := writer.Send(m.response.Clone()); err != nil {
+			return
+		}
+		_ = writer.Close()
 	}()
-	return out, nil
+	return reader, nil
 }
 
-func (m *streamModel) Capabilities() llm.Capabilities {
-	return llm.Capabilities{Streaming: true, ToolCalls: true, Reasoning: true}
+func (m *testModel) Collect(ctx context.Context, input *runnable.StreamReader[llm.Request], options ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, input, m.Invoke, options...)
+}
+func (m *testModel) Transform(ctx context.Context, input *runnable.StreamReader[llm.Request], options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, input, m.Invoke, options...)
+}
+func (*testModel) Capabilities() llm.Capabilities {
+	return llm.Capabilities{Streaming: true, ToolCalls: true}
+}
+func (*testModel) ModelInfo() llm.ModelInfo { return llm.ModelInfo{Name: "test"} }
+func (m *testModel) Calls() int             { return int(m.calls.Load()) }
+
+func response(text string) llm.Response {
+	return llm.Response{Messages: []schema.Message{schema.AssistantMessage(text)}}
 }
 
-func (m *streamModel) ModelInfo() llm.ModelInfo {
-	return llm.ModelInfo{Name: "stream", Provider: "test", ModelType: "scripted"}
+func request(text string) llm.Request {
+	return llm.Request{Messages: []schema.Message{schema.UserMessage(text)}}
 }
 
-func (m *streamModel) Calls() int { return int(m.calls.Load()) }
-
-func newMemoryCachedModel(t *testing.T, upstream llm.Model, cfg cachellm.CacheConfig) *cachellm.CachedModel {
+func newMemoryCachedModel(t *testing.T, upstream llm.ChatModel, cfg cachellm.CacheConfig) *cachellm.CachedModel {
 	t.Helper()
 	store, err := cachellm.NewMemoryCache(cachellm.MemoryCacheConfig{Capacity: 100})
 	if err != nil {
@@ -440,59 +357,31 @@ func newMemoryCachedModel(t *testing.T, upstream llm.Model, cfg cachellm.CacheCo
 	return cached
 }
 
-func mustStream(t *testing.T, model llm.Model, ctx context.Context, text string, opts llm.ChatOptions) runnable.Stream[llm.Event] {
-	t.Helper()
-	stream, err := model.Stream(ctx, llm.Request{Messages: []schema.Message{schema.UserMessage(text)}, Options: opts})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return stream
-}
-
-func collect(t *testing.T, stream runnable.Stream[llm.Event]) []llm.Event {
-	t.Helper()
-	events, err := collectStream(stream)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return events
-}
-
-func collectStream(stream runnable.Stream[llm.Event]) ([]llm.Event, error) {
-	var events []llm.Event
-	for item := range stream {
-		if item.Err != nil {
-			return events, item.Err
-		}
-		if item.Value.Kind != llm.EventDone {
-			events = append(events, item.Value)
-		}
-	}
-	return events, nil
-}
-
-func delta(text string) runnable.Item[llm.Event] {
-	return runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage(text)}}}
-}
-
 func mustSet(t *testing.T, store cachellm.CacheStore, key, text string, ttl time.Duration) {
 	t.Helper()
-	err := store.Set(context.Background(), key, cachellm.CacheEntry{
-		Events:    []llm.Event{{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage(text)}}},
-		CreatedAt: time.Now().UTC(),
-	}, ttl)
-	if err != nil {
+	if err := store.Set(context.Background(), key, cachellm.CacheEntry{Response: response(text), CreatedAt: time.Now().UTC()}, ttl); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func waitForCalls(t *testing.T, model *streamModel, want int) {
+func waitForCalls(t *testing.T, model *testModel, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for model.Calls() != want && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if model.Calls() != want {
-		t.Fatalf("upstream calls = %d, want %d", model.Calls(), want)
+		t.Fatalf("calls=%d, want %d", model.Calls(), want)
+	}
+}
+
+func waitForShared(t *testing.T, model *cachellm.CachedModel, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for model.Stats().Shared != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if model.Stats().Shared != want {
+		t.Fatalf("shared=%d, want %d", model.Stats().Shared, want)
 	}
 }

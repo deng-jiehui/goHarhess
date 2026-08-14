@@ -1,6 +1,6 @@
 # HTTP Tools and External APIs
 
-Every tool call managed by `internal/toolruntime` receives a pooled client in
+Every tool call managed by `tool.Runtime` receives a pooled client in
 `tool.CallInput.HTTPClient`. The same client is available through
 `tool.HTTPClient(ctx)`. Built-in defaults use `httpclient.DefaultPool`, so tool
 requests share the framework Transport with LLM, retrieval, embedding and

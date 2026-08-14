@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"goharness/pkg/agent"
@@ -17,14 +18,7 @@ func TestReactAgentCallsToolAndContinues(t *testing.T) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
 	})
 	model := llm.NewScriptedModel(
-		[]schema.Message{{
-			Role:    schema.RoleAssistant,
-			Content: schema.TextContent(""),
-			FunctionCall: &schema.FunctionCall{
-				Name:      "echo",
-				Arguments: `{"text":"hello"}`,
-			},
-		}},
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{"text":"hello"}`))},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
 
@@ -44,14 +38,15 @@ func TestReactAgentCallsToolAndContinues(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("len(last) = %d, want 3: %#v", len(last), last)
 	}
-	if last[1].Role != schema.RoleFunction || last[1].Name != "echo" {
+	results := last[1].FunctionToolResults()
+	if last[1].Role != schema.RoleTool || len(results) != 1 || results[0].Name != "echo" || results[0].CallID != "call-1" {
 		t.Fatalf("tool message = %#v", last[1])
 	}
-	if last[1].Text() != "hello" {
-		t.Fatalf("tool content = %q, want hello", last[1].Text())
+	if toolResultText(last[1]) != "hello" {
+		t.Fatalf("tool content = %q, want hello", toolResultText(last[1]))
 	}
-	if last[2].Text() != "done" {
-		t.Fatalf("final content = %q, want done", last[2].Text())
+	if last[2].JoinedText("") != "done" {
+		t.Fatalf("final content = %q, want done", last[2].JoinedText(""))
 	}
 }
 
@@ -64,7 +59,7 @@ func TestReactAgentAcceptsBlankArgumentsForNoArgumentTool(t *testing.T) {
 		}
 		return tool.TextResult("pong"), nil
 	})
-	call := schema.Message{Role: schema.RoleAssistant, FunctionCall: &schema.FunctionCall{Name: "ping", Arguments: ""}}
+	call := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("ping-1", "ping", `{}`))
 	model := llm.NewScriptedModel([]schema.Message{call}, []schema.Message{schema.AssistantMessage("done")})
 	value, err := agent.New(agent.BaseConfig{Model: model, Tools: []tool.Tool{ping}})
 	if err != nil {
@@ -74,7 +69,21 @@ func TestReactAgentAcceptsBlankArgumentsForNoArgumentTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || len(output) != 3 || output[1].Text() != "pong" {
+	if calls != 1 || len(output) != 3 || toolResultText(output[1]) != "pong" {
 		t.Fatalf("calls=%d output=%#v", calls, output)
 	}
+}
+
+func toolResultText(message schema.Message) string {
+	results := message.FunctionToolResults()
+	if len(results) != 1 {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, block := range results[0].ContentBlocks {
+		if block.Type == schema.ContentBlockTypeText && block.Text != nil {
+			parts = append(parts, block.Text.Text)
+		}
+	}
+	return strings.Join(parts, "")
 }

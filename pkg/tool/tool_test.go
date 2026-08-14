@@ -1,10 +1,10 @@
 package tool_test
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
+	"goharness/pkg/schema"
 	"goharness/pkg/tool"
 )
 
@@ -39,25 +39,44 @@ func TestParseArgsRemainsTolerantForPartialStreams(t *testing.T) {
 	}
 }
 
-func TestNewWrapsFactoryErrorWithToolName(t *testing.T) {
-	factoryErr := errors.New("missing endpoint")
-	const name = "factory-error-quality-test"
-	err := tool.Register(name, func(tool.Config) (tool.Tool, error) {
-		return nil, factoryErr
-	}, true)
+func TestResultToContentBlocksPreservesExplicitBlocks(t *testing.T) {
+	result := tool.Result{ContentBlocks: []schema.ContentBlock{
+		schema.NewTextBlock("first"),
+		schema.NewImageBlock("https://example.test/a.png", "image/png"),
+	}}
+	blocks, err := result.ToContentBlocks()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, err = tool.New(name, nil)
-	if !errors.Is(err, factoryErr) || !strings.Contains(err.Error(), `create tool "factory-error-quality-test"`) {
-		t.Fatalf("New error = %v", err)
+	if len(blocks) != 2 || blocks[0].Text == nil || blocks[0].Text.Text != "first" {
+		t.Fatalf("blocks=%#v", blocks)
+	}
+	blocks[0].Text.Text = "mutated"
+	if result.ContentBlocks[0].Text.Text != "first" {
+		t.Fatalf("result blocks aliased returned blocks: %#v", result.ContentBlocks)
 	}
 }
 
-func TestResultToContentAddsSerializationContext(t *testing.T) {
-	_, err := tool.DataResult(make(chan int)).ToContent()
+func TestResultToContentBlocksRejectsUnsupportedMutableValues(t *testing.T) {
+	result := tool.BlockResult(schema.ContentBlock{Type: schema.ContentBlockTypeText, Text: &schema.Text{Text: "x", Extra: map[string]any{"bad": make(chan int)}}})
+	if _, err := result.ToContentBlocks(); err == nil {
+		t.Fatal("ToContentBlocks() error = nil, want unsupported mutable value error")
+	}
+}
+
+func TestResultDataProducesIndentedJSONTextBlock(t *testing.T) {
+	blocks, err := tool.DataResult(map[string]any{"ok": true}).ToContentBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Text == nil || blocks[0].Text.Text != "{\n  \"ok\": true\n}" {
+		t.Fatalf("blocks=%#v", blocks)
+	}
+}
+
+func TestResultToContentBlocksAddsSerializationContext(t *testing.T) {
+	_, err := tool.DataResult(make(chan int)).ToContentBlocks()
 	if err == nil || !strings.Contains(err.Error(), "marshal tool result") {
-		t.Fatalf("ToContent error = %v", err)
+		t.Fatalf("ToContentBlocks error = %v", err)
 	}
 }

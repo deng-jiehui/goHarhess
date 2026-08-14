@@ -9,7 +9,6 @@ import (
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 type typedState struct {
@@ -128,7 +127,7 @@ func TestResumeRequiresStatePreHandler(t *testing.T) {
 	for _, edge := range [][2]string{{graph.Start, "first"}, {"first", "second"}, {"second", graph.End}} {
 		_ = g.AddEdge(edge[0], edge[1])
 	}
-	ctx := state.WithCursorStack(context.Background(), state.CursorStack{{Graph: "resume-mismatch", Node: "second", Step: 1}})
+	ctx := graph.WithCursorStack(context.Background(), graph.CursorStack{{Graph: "resume-mismatch", Node: "second", Step: 1}})
 	_, err := mustCompile(t, g).Invoke(ctx, "hello")
 	if err == nil || !strings.Contains(err.Error(), "graph.resume.type_mismatch") {
 		t.Fatalf("Invoke error=%v", err)
@@ -212,7 +211,7 @@ func (a recordingAgent) Invoke(context.Context, []schema.Message, ...runnable.Op
 	return []schema.Message{schema.AssistantMessage(a.text)}, nil
 }
 
-func TestComposeMessageGraphAdaptsAgents(t *testing.T) {
+func TestMessageGraphAdaptsAgents(t *testing.T) {
 	type teamState struct {
 		Messages []schema.Message
 		Output   []schema.Message
@@ -259,7 +258,7 @@ func TestComposeMessageGraphAdaptsAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := compiled.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")})
-	if err != nil || len(output) != 2 || output[0].Text() != "one" || output[1].Text() != "two" {
+	if err != nil || len(output) != 2 || output[0].JoinedText("") != "one" || output[1].JoinedText("") != "two" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
 }

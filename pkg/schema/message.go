@@ -1,8 +1,6 @@
 package schema
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 )
@@ -13,13 +11,8 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
-	RoleFunction  Role = "function"
+	RoleTool      Role = "tool"
 )
-
-type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
 
 type FunctionDefinition struct {
 	Name        string         `json:"name"`
@@ -28,51 +21,18 @@ type FunctionDefinition struct {
 }
 
 type Message struct {
-	Role             Role           `json:"role"`
-	Content          Content        `json:"content"`
-	ReasoningContent Content        `json:"reasoning_content,omitempty"`
-	Name             string         `json:"name,omitempty"`
-	FunctionCall     *FunctionCall  `json:"function_call,omitempty"`
-	Extra            map[string]any `json:"extra,omitempty"`
+	Role          Role           `json:"role"`
+	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
+	ResponseMeta  *ResponseMeta  `json:"response_meta,omitempty"`
+	Extra         map[string]any `json:"extra,omitempty"`
 }
 
-func (m Message) MarshalJSON() ([]byte, error) {
-	type messageJSON struct {
-		Role             Role           `json:"role"`
-		Content          Content        `json:"content"`
-		ReasoningContent *Content       `json:"reasoning_content,omitempty"`
-		Name             string         `json:"name,omitempty"`
-		FunctionCall     *FunctionCall  `json:"function_call,omitempty"`
-		Extra            map[string]any `json:"extra,omitempty"`
-	}
-
-	var reasoning *Content
-	if !m.ReasoningContent.IsZero() {
-		rc := m.ReasoningContent
-		reasoning = &rc
-	}
-
-	var extra map[string]any
-	if len(m.Extra) > 0 {
-		extra = m.Extra
-	}
-
-	return json.Marshal(messageJSON{
-		Role:             m.Role,
-		Content:          m.Content,
-		ReasoningContent: reasoning,
-		Name:             m.Name,
-		FunctionCall:     m.FunctionCall,
-		Extra:            extra,
-	})
-}
-
-func NewMessage(role Role, content Content) Message {
-	return Message{Role: role, Content: content}
+func NewMessage(role Role, blocks ...ContentBlock) Message {
+	return Message{Role: role, ContentBlocks: append([]ContentBlock(nil), blocks...)}
 }
 
 func TextMessage(role Role, text string) Message {
-	return NewMessage(role, TextContent(text))
+	return NewMessage(role, NewTextBlock(text))
 }
 
 func SystemMessage(text string) Message {
@@ -87,45 +47,78 @@ func AssistantMessage(text string) Message {
 	return TextMessage(RoleAssistant, text)
 }
 
-func FunctionMessage(name string, content Content) Message {
-	return Message{Role: RoleFunction, Name: name, Content: content}
-}
-
 func (m Message) Validate() error {
 	switch m.Role {
-	case RoleSystem, RoleUser, RoleAssistant, RoleFunction:
+	case RoleSystem, RoleUser, RoleAssistant, RoleTool:
 	default:
 		return fmt.Errorf("invalid role %q", m.Role)
 	}
-	if err := m.Content.Validate(); err != nil {
-		return err
-	}
-	if !m.ReasoningContent.IsZero() {
-		if err := m.ReasoningContent.Validate(); err != nil {
-			return err
+	for i, block := range m.ContentBlocks {
+		if err := block.Validate(); err != nil {
+			return fmt.Errorf("content_blocks[%d]: %w", i, err)
 		}
 	}
-	if m.Role == RoleFunction && strings.TrimSpace(m.Name) == "" {
-		return errors.New("function message requires a tool name")
-	}
-	if m.FunctionCall != nil && strings.TrimSpace(m.FunctionCall.Name) == "" {
-		return errors.New("function call requires a name")
+	if err := m.ResponseMeta.validate(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (m Message) Text() string {
-	return m.Content.String()
+func (m Message) TextBlocks() []Text {
+	texts := make([]Text, 0)
+	for i, block := range m.ContentBlocks {
+		if block.Type != ContentBlockTypeText || block.Text == nil {
+			continue
+		}
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		texts = append(texts, *cloned.Text)
+	}
+	return texts
 }
 
-func (m Message) FunctionID(defaultID string) string {
-	if m.Extra == nil {
-		return defaultID
+func (m Message) JoinedText(separator string) string {
+	texts := m.TextBlocks()
+	parts := make([]string, len(texts))
+	for i := range texts {
+		parts[i] = texts[i].Text
 	}
-	if value, ok := m.Extra["function_id"]; ok {
-		return fmt.Sprint(value)
+	return strings.Join(parts, separator)
+}
+
+func (m Message) ReasoningBlocks() []Reasoning {
+	reasoning := make([]Reasoning, 0)
+	for i, block := range m.ContentBlocks {
+		if block.Type != ContentBlockTypeReasoning || block.Reasoning == nil {
+			continue
+		}
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		reasoning = append(reasoning, *cloned.Reasoning)
 	}
-	return defaultID
+	return reasoning
+}
+
+func (m Message) FunctionToolCalls() []FunctionToolCall {
+	calls := make([]FunctionToolCall, 0)
+	for i, block := range m.ContentBlocks {
+		if block.Type != ContentBlockTypeFunctionToolCall || block.FunctionToolCall == nil {
+			continue
+		}
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		calls = append(calls, *cloned.FunctionToolCall)
+	}
+	return calls
+}
+
+func (m Message) FunctionToolResults() []FunctionToolResult {
+	results := make([]FunctionToolResult, 0)
+	for i, block := range m.ContentBlocks {
+		if block.Type != ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
+			continue
+		}
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		results = append(results, *cloned.FunctionToolResult)
+	}
+	return results
 }
 
 func CloneMessages(messages []Message) []Message {
@@ -143,20 +136,16 @@ func cloneMessages(messages []Message, strict bool) ([]Message, error) {
 	copied := make([]Message, len(messages))
 	for i, msg := range messages {
 		copied[i] = msg
-		content, err := cloneMessageContent(msg.Content, strict, fmt.Sprintf("messages[%d].content", i))
+		blocks, err := cloneContentBlocks(msg.ContentBlocks, strict, fmt.Sprintf("messages[%d].content_blocks", i))
 		if err != nil {
 			return nil, err
 		}
-		copied[i].Content = content
-		reasoning, err := cloneMessageContent(msg.ReasoningContent, strict, fmt.Sprintf("messages[%d].reasoning_content", i))
+		copied[i].ContentBlocks = blocks
+		meta, err := cloneResponseMeta(msg.ResponseMeta, strict, fmt.Sprintf("messages[%d].response_meta", i))
 		if err != nil {
 			return nil, err
 		}
-		copied[i].ReasoningContent = reasoning
-		if msg.FunctionCall != nil {
-			fc := *msg.FunctionCall
-			copied[i].FunctionCall = &fc
-		}
+		copied[i].ResponseMeta = meta
 		if msg.Extra != nil {
 			copied[i].Extra = make(map[string]any, len(msg.Extra))
 			for k, v := range msg.Extra {
@@ -171,33 +160,9 @@ func cloneMessages(messages []Message, strict bool) ([]Message, error) {
 	return copied, nil
 }
 
-func cloneMessageContent(content Content, strict bool, path string) (Content, error) {
-	if !content.IsMultimodal() {
-		return cloneContent(content), nil
-	}
-	items := content.Items()
-	for index := range items {
-		if items[index].Audio != nil {
-			value, err := cloneAnyValue(items[index].Audio, strict, fmt.Sprintf("%s[%d].audio", path, index), 0)
-			if err != nil {
-				return Content{}, err
-			}
-			items[index].Audio = value
-		}
-		if items[index].Video != nil {
-			value, err := cloneAnyValue(items[index].Video, strict, fmt.Sprintf("%s[%d].video", path, index), 0)
-			if err != nil {
-				return Content{}, err
-			}
-			items[index].Video = value
-		}
-	}
-	return MultiContent(items...), nil
-}
-
 func HasChinese(messages []Message) bool {
 	for _, msg := range messages {
-		for _, r := range msg.Text() {
+		for _, r := range msg.JoinedText("") {
 			if r >= '\u4e00' && r <= '\u9fff' {
 				return true
 			}
@@ -209,7 +174,7 @@ func HasChinese(messages []Message) bool {
 func LastUserText(messages []Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == RoleUser {
-			return messages[i].Text()
+			return messages[i].JoinedText("")
 		}
 	}
 	return ""
@@ -230,12 +195,12 @@ func ExtractFiles(messages []Message, includeImages bool) []string {
 	}
 
 	for _, msg := range messages {
-		for _, item := range msg.Content.Items() {
-			if item.File != "" {
-				add(item.File)
+		for _, block := range msg.ContentBlocks {
+			if block.Type == ContentBlockTypeFile && block.File != nil {
+				add(block.File.URI)
 			}
-			if includeImages && item.Image != "" {
-				add(item.Image)
+			if includeImages && block.Type == ContentBlockTypeImage && block.Image != nil {
+				add(block.Image.URI)
 			}
 		}
 	}

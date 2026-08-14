@@ -15,7 +15,7 @@ func TestToolModelVisibleErrorUsesEndLifecycle(t *testing.T) {
 	observer := tool.CallbackFuncs{CallbackName: "audit", End: func(context.Context, tool.Spec, tool.CallInput, tool.Result) error { endCalls++; return nil }, Error: func(context.Context, tool.Spec, tool.CallInput, error) error { errorCalls++; return nil }}
 	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
 	ctx, invocation := tool.BeginCallback(callback.WithManager(context.Background(), manager), tool.Spec{Name: "search"}, tool.CallInput{})
-	tool.EndCallback(ctx, invocation, tool.Spec{Name: "search"}, tool.CallInput{}, tool.ErrorResult(schema.TextContent("denied")), nil)
+	tool.EndCallback(ctx, invocation, tool.Spec{Name: "search"}, tool.CallInput{}, tool.ErrorResult(schema.NewTextBlock("denied")), nil)
 	if endCalls != 1 || errorCalls != 0 {
 		t.Fatalf("end/error=%d/%d", endCalls, errorCalls)
 	}

@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 func TestMemoryStoreVersionsClonesAndRejectsStaleWrites(t *testing.T) {
 	store := NewMemoryStore(MemoryStoreConfig{})
 	message := schema.UserMessage("hello")
+	message = schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock("call-1", "lookup", false, schema.NewTextBlock("value"), schema.NewOpaqueBlock("provider.citation", json.RawMessage(`{"page":3}`))))
+	message.ResponseMeta = &schema.ResponseMeta{ID: "resp-1", Usage: &schema.TokenUsage{CacheReadTokens: 32}}
 	message.Extra = map[string]any{"nested": map[string]any{"value": "message-original"}}
 	created, err := store.Save(context.Background(), Checkpoint{
 		ConversationID: "conversation-1",
@@ -24,14 +27,15 @@ func TestMemoryStoreVersionsClonesAndRejectsStaleWrites(t *testing.T) {
 	if created.Version != 1 || created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 		t.Fatalf("created checkpoint = %#v", created)
 	}
-	created.Messages[0].Content = schema.TextContent("changed")
+	created.Messages[0].ContentBlocks[0] = schema.NewTextBlock("changed")
 	created.Messages[0].Extra["nested"].(map[string]any)["value"] = "message-changed"
 	created.Values["nested"].(map[string]any)["value"] = "changed"
 	loaded, found, err := store.Load(context.Background(), "conversation-1")
 	if err != nil || !found {
 		t.Fatalf("Load found=%t err=%v", found, err)
 	}
-	if loaded.Messages[0].Text() != "hello" || loaded.Messages[0].Extra["nested"].(map[string]any)["value"] != "message-original" || loaded.Values["nested"].(map[string]any)["value"] != "original" {
+	results := loaded.Messages[0].FunctionToolResults()
+	if len(results) != 1 || results[0].CallID != "call-1" || results[0].ContentBlocks[1].Opaque == nil || string(results[0].ContentBlocks[1].Opaque.Raw) != `{"page":3}` || loaded.Messages[0].ResponseMeta.Usage.CacheReadTokens != 32 || loaded.Messages[0].Extra["nested"].(map[string]any)["value"] != "message-original" || loaded.Values["nested"].(map[string]any)["value"] != "original" {
 		t.Fatalf("stored checkpoint was mutated: %#v", loaded)
 	}
 

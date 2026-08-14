@@ -80,11 +80,7 @@ func cloneCallInput(input CallInput) CallInput {
 }
 
 func cloneResult(result Result) Result {
-	if result.Content.IsMultimodal() {
-		result.Content = schema.MultiContent(result.Content.Items()...)
-	} else {
-		result.Content = schema.TextContent(result.Content.String())
-	}
+	result.ContentBlocks = cloneResultBlocks(result.ContentBlocks)
 	result.Data = callback.CloneValue(result.Data)
 	return result
 }

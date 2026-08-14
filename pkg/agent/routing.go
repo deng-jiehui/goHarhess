@@ -7,8 +7,6 @@ import (
 	"strings"
 
 	"goharness/internal/agentrecipe"
-	"goharness/pkg/callback"
-	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -55,8 +53,7 @@ func DefaultSupervisorConfig() SupervisorConfig {
 // calls. It never owns a bespoke execution loop; its workflow is an internal
 // Graph recipe like the other built-in Agents.
 type RoutingAgent struct {
-	*Base
-	hub           *Hub
+	*base
 	returnControl bool
 	maxSteps      int
 	functions     []schema.FunctionDefinition
@@ -68,12 +65,12 @@ func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error
 	if cfg.Model != nil {
 		baseConfig.Model = cfg.Model
 	}
-	base, err := NewBase(baseConfig, opts...)
+	base, err := newBase(baseConfig, opts...)
 	if err != nil {
 		return nil, err
 	}
 	if len(base.toolOrder) > 0 {
-		return nil, errors.New("RoutingAgent routes SubAgents; use ReactAgent for BaseTool execution")
+		return nil, errors.New("RoutingAgent routes SubAgents; use ReactAgent for Tool execution")
 	}
 	hub, err := NewHub(cfg.SubAgents)
 	if err != nil {
@@ -96,21 +93,28 @@ func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error
 		return nil, err
 	}
 	a := &RoutingAgent{
-		Base:          base,
-		hub:           hub,
+		base:          base,
 		returnControl: returnControl,
 		maxSteps:      maxSteps,
 		functions:     functions,
 	}
+	agentNodes := make([]agentrecipe.RoutedAgent, 0, len(hub.Agents()))
+	for _, child := range hub.Agents() {
+		node, nodeErr := NewAgentNode(child)
+		if nodeErr != nil {
+			return nil, nodeErr
+		}
+		agentNodes = append(agentNodes, agentrecipe.RoutedAgent{Name: child.Name(), Node: node})
+	}
 	a.recipe, err = agentrecipe.NewRoutingRecipe(recipeName(base, string(AgentKindRouting)), agentrecipe.RoutingHooks{
-		MaxSteps:      maxSteps,
-		ReturnControl: returnControl,
-		CallModel: func(ctx context.Context, messages []schema.Message) (runnable.Stream[llm.Event], error) {
+		MaxSteps: maxSteps,
+		Model:    a.modelNode,
+		Agents:   agentNodes,
+		PrepareModel: func(ctx context.Context, messages []schema.Message) (llm.Request, error) {
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			return a.callLLM(ctx, messages, a.functions, runOpts)
+			return a.prepareLLMRequest(ctx, messages, a.functions, runOpts)
 		},
 		DetectCalls:  detectRoutingCalls,
-		Dispatch:     a.dispatch,
 		Observation:  routingObservation,
 		NameMessages: a.withAgentName,
 	})
@@ -135,7 +139,7 @@ func resolveRoutingMode(cfg SupervisorConfig) (bool, error) {
 	}
 }
 
-func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (runnable.Stream[schema.MessageEvent], error) {
+func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
 	runOpts := resolveRunOptions(a.limits, opts...)
 	runOpts.agentKind = AgentKindRouting
 	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
@@ -151,28 +155,25 @@ func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, op
 	lifecycle.session = session
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
+	runCtx = a.bindModelStream(runCtx)
+	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	runCtx = withRecipeCompletion(runCtx, session)
 	runCtx = agentrecipe.WithRoutingRunConfig(runCtx, agentrecipe.RoutingRunConfig{
 		MaxSteps:      a.maxSteps,
 		ReturnControl: a.returnControl,
 		Input:         conversationInput(session, messages),
 	})
-	var stream runnable.Stream[schema.MessageEvent]
+	var stream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
-		stream, err = a.recipe.ResumeStream(runCtx, runOpts.GraphOptions...)
+		stream, err = a.recipe.ResumeStream(runCtx, graphNodeOptions(runOpts)...)
 	} else {
-		stream, err = a.recipe.Stream(runCtx, prepared, runOpts.GraphOptions...)
+		stream, err = a.recipe.Stream(runCtx, prepared, graphNodeOptions(runOpts)...)
 	}
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err
 	}
-	stream, err = prefetchMessageEvents(runCtx, stream)
-	if err != nil {
-		lifecycle.fail(err)
-		return nil, err
-	}
-	return lifecycle.wrap(stream, runOpts.StreamBufferSize), nil
+	return lifecycle.wrap(stream)
 }
 
 func routingFunctions(agents []Agent) ([]schema.FunctionDefinition, error) {
@@ -202,106 +203,16 @@ func routingFunctions(agents []Agent) ([]schema.FunctionDefinition, error) {
 func detectRoutingCalls(messages []schema.Message) []agentrecipe.Call {
 	calls := make([]agentrecipe.Call, 0)
 	for _, message := range messages {
-		if message.FunctionCall == nil {
-			continue
+		for _, call := range message.FunctionToolCalls() {
+			calls = append(calls, agentrecipe.Call{
+				Name:       call.Name,
+				Arguments:  call.Arguments,
+				FunctionID: call.ID,
+				Structured: true,
+			})
 		}
-		calls = append(calls, agentrecipe.Call{
-			Name:       message.FunctionCall.Name,
-			Arguments:  message.FunctionCall.Arguments,
-			FunctionID: message.FunctionID(fmt.Sprint(len(calls) + 1)),
-			Structured: true,
-		})
 	}
 	return calls
-}
-
-func (a *RoutingAgent) dispatch(ctx context.Context, calls []agentrecipe.Call, messages []schema.Message) ([]agentrecipe.RoutedResult, error) {
-	runOpts, _ := resolvedRunOptionsFromContext(ctx)
-	results := make([]agentrecipe.RoutedResult, len(calls))
-	for index, call := range calls {
-		results[index].Call = call
-		selected, err := a.selectSubAgent(call.Name)
-		if err != nil {
-			results[index].Err = err
-			continue
-		}
-		childOptions := []RunOption{WithCheckpointBypass()}
-		if runOpts.DeltaStream {
-			childOptions = append(childOptions, WithDeltaStream(true))
-		}
-		runnableOptions := runOptionsAsRunnable(childOptions)
-		runnableOptions = append(runnableOptions, runOpts.GlobalOptions...)
-		runnableOptions = append(runnableOptions, runOpts.NodeOptions...)
-		childCtx := callback.WithStreamCallbacksIsolated(ctx)
-		childCtx = graph.WithEventSinkIsolated(childCtx, nil)
-		childCtx = runnable.WithOptionPlan(childCtx, runnable.OptionPlan{})
-		stream, err := selected.Stream(childCtx, schema.CloneMessages(messages), runnableOptions...)
-		if err != nil {
-			results[index].Err = err
-			continue
-		}
-		output, err := consumeRoutedStream(ctx, stream)
-		if err != nil {
-			results[index].Err = err
-			continue
-		}
-		results[index].Messages = withSpeakerName(output, selected.Name())
-	}
-	return results, nil
-}
-
-func (a *RoutingAgent) selectSubAgent(name string) (Agent, error) {
-	for _, candidate := range a.hub.Agents() {
-		if candidate.Name() == name {
-			return candidate, nil
-		}
-	}
-	return nil, fmt.Errorf("routing model selected unregistered sub-agent %q", name)
-}
-
-func consumeRoutedStream(ctx context.Context, stream runnable.Stream[schema.MessageEvent]) ([]schema.Message, error) {
-	if stream == nil {
-		return nil, errors.New("routed agent returned a nil stream")
-	}
-	accumulator := llm.NewDeltaAccumulator(true)
-	var output []schema.Message
-	done := false
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case item, open := <-stream:
-			if !open {
-				if !done {
-					return nil, errors.New("routed agent stream closed without done event")
-				}
-				return schema.CloneMessages(output), nil
-			}
-			if item.Err != nil {
-				return nil, item.Err
-			}
-			event := item.Value
-			if event.Kind != schema.MessageEventDone {
-				callback.EmitStream(ctx, event)
-			}
-			switch event.Kind {
-			case schema.MessageEventDelta:
-				merged, err := accumulator.Apply(llm.Event{Kind: llm.EventDelta, Messages: event.Messages})
-				if err != nil {
-					return nil, err
-				}
-				output = merged
-			case schema.MessageEventSnapshot:
-				output = schema.CloneMessages(event.Messages)
-				accumulator = llm.NewDeltaAccumulator(true)
-			case schema.MessageEventDone:
-				done = true
-				return schema.CloneMessages(output), nil
-			default:
-				return nil, fmt.Errorf("routed agent returned unsupported event kind %q", event.Kind)
-			}
-		}
-	}
 }
 
 func routingObservation(result agentrecipe.RoutedResult) schema.Message {
@@ -311,13 +222,13 @@ func routingObservation(result agentrecipe.RoutedResult) schema.Message {
 	} else {
 		parts := make([]string, 0, len(result.Messages))
 		for _, message := range result.Messages {
-			if text := strings.TrimSpace(message.Text()); text != "" {
+			if text := strings.TrimSpace(message.JoinedText("")); text != "" {
 				parts = append(parts, text)
 			}
 		}
 		content = strings.Join(parts, "\n")
 	}
-	message := schema.FunctionMessage(result.Call.Name, schema.TextContent(content))
+	message := schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock(result.Call.FunctionID, result.Call.Name, result.Err != nil, schema.NewTextBlock(content)))
 	message.Extra = map[string]any{
 		"function_id":       result.Call.FunctionID,
 		"agent_observation": true,

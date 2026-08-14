@@ -49,7 +49,7 @@ func withRecipeCompletion(ctx context.Context, session *conversationSession) con
 	})
 }
 
-func (b *Base) loadConversation(
+func (b *base) loadConversation(
 	ctx context.Context,
 	incoming []schema.Message,
 	opts *RunOptions,

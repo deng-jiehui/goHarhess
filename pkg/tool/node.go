@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -29,24 +31,27 @@ type ToolCall struct {
 type ToolNodeConfig struct {
 	Name           string
 	Description    string
-	Tools          []BaseTool
+	Tools          []Tool
 	BeforeBatch    []BeforeBatchHook
+	Middlewares    []Middleware
 	MaxConcurrency int
+	MaxDepth       int
+	Timeout        time.Duration
+	MaxRetries     int
+	RetryBackoff   time.Duration
 }
 
 // ToolsNode executes only the assistant tool calls at the message tail. It
 // returns append-only tool result messages; callers append those results to
 // the existing conversation before the next model loop.
 type ToolsNode struct {
-	name           string
-	description    string
-	tools          map[string]BaseTool
-	policies       map[string]ConcurrencyPolicy
-	order          []string
-	maxConcurrency int
-	semaphore      chan struct{}
-	scheduler      *toolNodeScheduler
-	beforeBatch    []BeforeBatchHook
+	name        string
+	description string
+	tools       map[string]*Binding
+	order       []string
+	scope       *Scope
+	maxParallel int
+	beforeBatch []BeforeBatchHook
 }
 
 func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
@@ -60,15 +65,29 @@ func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
 	if config.MaxConcurrency < 1 || config.MaxConcurrency > MaxToolsNodeConcurrency {
 		return nil, fmt.Errorf("tools node concurrency must be between 1 and %d", MaxToolsNodeConcurrency)
 	}
+	runtimeConfig := defaultRuntimeConfig()
+	runtimeConfig.MaxConcurrency = config.MaxConcurrency
+	if config.MaxDepth != 0 {
+		runtimeConfig.MaxDepth = config.MaxDepth
+	}
+	if config.Timeout != 0 {
+		runtimeConfig.Timeout = config.Timeout
+	}
+	runtimeConfig.MaxRetries = config.MaxRetries
+	if config.RetryBackoff != 0 {
+		runtimeConfig.RetryBackoff = config.RetryBackoff
+	}
+	runtime, err := NewRuntime(config.Middlewares, runtimeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("configure tools node runtime: %w", err)
+	}
 	node := &ToolsNode{
-		name:           name,
-		description:    config.Description,
-		tools:          map[string]BaseTool{},
-		policies:       map[string]ConcurrencyPolicy{},
-		maxConcurrency: config.MaxConcurrency,
-		semaphore:      make(chan struct{}, config.MaxConcurrency),
-		scheduler:      newToolNodeScheduler(),
-		beforeBatch:    append([]BeforeBatchHook(nil), config.BeforeBatch...),
+		name:        name,
+		description: config.Description,
+		tools:       map[string]*Binding{},
+		scope:       runtime.NewScope(config.MaxConcurrency),
+		maxParallel: config.MaxConcurrency,
+		beforeBatch: append([]BeforeBatchHook(nil), config.BeforeBatch...),
 	}
 	if node.description == "" {
 		node.description = "append-only tool execution node"
@@ -77,19 +96,15 @@ func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
 		if value == nil {
 			return nil, fmt.Errorf("tools node tool %d is nil", index)
 		}
-		spec := value.Spec()
-		if err := spec.Validate(); err != nil {
+		binding, err := runtime.Register(value)
+		if err != nil {
 			return nil, fmt.Errorf("tools node tool %d: %w", index, err)
 		}
-		policy := spec.Concurrency.Normalize()
-		if err := node.scheduler.register(policy); err != nil {
-			return nil, fmt.Errorf("tools node tool %d: %w", index, err)
-		}
+		spec := binding.Spec()
 		if _, exists := node.tools[spec.Name]; exists {
 			return nil, fmt.Errorf("tools node duplicate tool %q", spec.Name)
 		}
-		node.tools[spec.Name] = value
-		node.policies[spec.Name] = policy
+		node.tools[spec.Name] = binding
 		node.order = append(node.order, spec.Name)
 	}
 	return node, nil
@@ -109,14 +124,16 @@ func (n *ToolsNode) Description() string {
 	return n.description
 }
 
+func (*ToolsNode) NodeKind() runnable.NodeKind { return runnable.NodeKindTools }
+
 // Tools returns a defensive copy of the registered tool map.
-func (n *ToolsNode) Tools() []BaseTool {
+func (n *ToolsNode) Tools() []Tool {
 	if n == nil {
 		return nil
 	}
-	values := make([]BaseTool, 0, len(n.order))
+	values := make([]Tool, 0, len(n.order))
 	for _, name := range n.order {
-		values = append(values, n.tools[name])
+		values = append(values, n.tools[name].value)
 	}
 	return values
 }
@@ -133,25 +150,34 @@ func (n *ToolsNode) Definitions() []schema.FunctionDefinition {
 	return definitions
 }
 
-// TailToolCalls extracts only a contiguous suffix of assistant function-call
+// TailToolCalls extracts only a contiguous suffix of assistant messages containing call blocks
 // messages. Historical calls are intentionally ignored, preventing a resumed
 // graph from executing an already completed tool a second time.
 func TailToolCalls(messages []schema.Message) []ToolCall {
-	calls := make([]ToolCall, 0)
+	groups := make([][]ToolCall, 0)
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
-		if message.Role != schema.RoleAssistant || message.FunctionCall == nil {
+		if message.Role != schema.RoleAssistant {
 			break
 		}
-		calls = append(calls, ToolCall{
-			Name:       message.FunctionCall.Name,
-			Arguments:  message.FunctionCall.Arguments,
-			FunctionID: message.FunctionID(fmt.Sprintf("call-%d", index+1)),
-			Metadata:   cloneAnyMap(message.Extra),
-		})
+		messageCalls := message.FunctionToolCalls()
+		if len(messageCalls) == 0 {
+			break
+		}
+		group := make([]ToolCall, len(messageCalls))
+		for callIndex, call := range messageCalls {
+			group[callIndex] = ToolCall{
+				Name:       call.Name,
+				Arguments:  call.Arguments,
+				FunctionID: call.ID,
+				Metadata:   cloneAnyMap(call.Extra),
+			}
+		}
+		groups = append(groups, group)
 	}
-	for left, right := 0, len(calls)-1; left < right; left, right = left+1, right-1 {
-		calls[left], calls[right] = calls[right], calls[left]
+	calls := make([]ToolCall, 0)
+	for index := len(groups) - 1; index >= 0; index-- {
+		calls = append(calls, groups[index]...)
 	}
 	return calls
 }
@@ -179,6 +205,16 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 	}
 	ctx = runnable.WithOptionPlan(ctx, nodePlan)
 	options = nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)
+	executionOptions := nodeExecutionOptionsFromPlan(nodePlan)
+	contextLimits := executionLimitsFromContext(ctx)
+	maxParallel := n.maxParallel
+	if contextLimits.MaxConcurrency > 0 && contextLimits.MaxConcurrency < maxParallel {
+		maxParallel = contextLimits.MaxConcurrency
+	}
+	if executionOptions.MaxConcurrency > 0 && executionOptions.MaxConcurrency < maxParallel {
+		maxParallel = executionOptions.MaxConcurrency
+	}
+	invocationSlots := make(chan struct{}, maxParallel)
 	isolatedMessages, err := schema.CloneMessagesStrict(messages)
 	if err != nil {
 		return nil, fmt.Errorf("clone tools node messages: %w", err)
@@ -191,7 +227,7 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 	batch := Batch{Calls: make([]BatchCall, 0, len(calls))}
 	batch.Subject, _ = SubjectFromContext(ctx)
 	for _, call := range calls {
-		value, exists := n.tools[call.Name]
+		binding, exists := n.tools[call.Name]
 		if !exists {
 			continue
 		}
@@ -201,7 +237,7 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 		}
 		batch.Calls = append(batch.Calls, BatchCall{
 			ID:       call.FunctionID,
-			Spec:     cloneSpec(value.Spec()),
+			Spec:     cloneSpec(binding.Spec()),
 			RawArgs:  call.Arguments,
 			Args:     cloneAnyMap(args),
 			Metadata: cloneAnyMap(call.Metadata),
@@ -222,14 +258,13 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 	for index, call := range calls {
 		go func(index int, call ToolCall) {
 			defer workers.Done()
-			select {
-			case <-ctx.Done():
-				results <- indexedResult{index: index, message: toolErrorMessage(call, ctx.Err())}
-			case n.semaphore <- struct{}{}:
-				message := n.invokeCall(ctx, call, messages, options...)
-				<-n.semaphore
-				results <- indexedResult{index: index, message: message}
+			if err := acquire(ctx, invocationSlots); err != nil {
+				results <- indexedResult{index: index, message: toolErrorMessage(call, err)}
+				return
 			}
+			defer release(invocationSlots)
+			message := n.invokeCall(ctx, n.scope, call, messages, options...)
+			results <- indexedResult{index: index, message: message}
 		}(index, call)
 	}
 	go func() {
@@ -246,8 +281,18 @@ func (n *ToolsNode) Invoke(ctx context.Context, messages []schema.Message, optio
 	return output, nil
 }
 
-func (n *ToolsNode) invokeCall(ctx context.Context, call ToolCall, messages []schema.Message, options ...runnable.Option) schema.Message {
-	value, exists := n.tools[call.Name]
+func (n *ToolsNode) Stream(ctx context.Context, input []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.StreamFromInvoke(ctx, input, n.Invoke, options...)
+}
+func (n *ToolsNode) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, n.Invoke, options...)
+}
+func (n *ToolsNode) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, n.Invoke, options...)
+}
+
+func (n *ToolsNode) invokeCall(ctx context.Context, scope *Scope, call ToolCall, messages []schema.Message, options ...runnable.Option) schema.Message {
+	binding, exists := n.tools[call.Name]
 	if !exists {
 		return toolErrorMessage(call, fmt.Errorf("tool %q does not exist", call.Name))
 	}
@@ -264,48 +309,37 @@ func (n *ToolsNode) invokeCall(ctx context.Context, call ToolCall, messages []sc
 		Args:       args,
 		HTTPClient: HTTPClient(ctx),
 		Messages:   isolatedMessages,
+		Metadata:   callback.MetadataFromContext(ctx),
 	}
-	callbackCtx, invocation := BeginCallback(ctx, value.Spec(), input)
-	policy := n.policies[call.Name]
-	result, err := n.scheduler.execute(ctx, policy, func() (Result, error) {
-		return invokeBaseTool(callbackCtx, call.Name, value, input, options...)
-	})
-	EndCallback(callbackCtx, invocation, value.Spec(), input, result, err)
+	for key, value := range cloneAnyMap(call.Metadata) {
+		input.Metadata[key] = value
+	}
+	if binding.Spec().FileAccess {
+		input.Files = schema.ExtractFiles(messages, true)
+	}
+	result, err := scope.Execute(ctx, binding, input, options...)
 	if err != nil {
 		return toolErrorMessage(call, err)
 	}
-	content, err := result.ToContent()
+	blocks, err := result.ToContentBlocks()
 	if err != nil {
 		return toolErrorMessage(call, err)
 	}
-	return toolResultMessage(call, content, result.IsError)
+	return toolResultMessage(call, blocks, result.IsError)
 }
 
-func invokeBaseTool(ctx context.Context, name string, value BaseTool, input CallInput, options ...runnable.Option) (result Result, err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("tool %q panicked: %v", name, recovered)
-		}
-	}()
-	return value.Invoke(ctx, input, options...)
-}
-
-func toolResultMessage(call ToolCall, content schema.Content, isError bool) schema.Message {
-	message := schema.FunctionMessage(call.Name, content)
-	message.Extra = map[string]any{
-		"function_id":       call.FunctionID,
-		"tool_call_id":      call.FunctionID,
-		"agent_observation": true,
-		"tool_error":        isError,
-	}
-	return message
+func toolResultMessage(call ToolCall, blocks []schema.ContentBlock, isError bool) schema.Message {
+	return schema.NewMessage(schema.RoleTool,
+		schema.NewFunctionToolResultBlock(call.FunctionID, call.Name, isError, blocks...),
+	)
 }
 
 func toolErrorMessage(call ToolCall, err error) schema.Message {
 	if err == nil {
 		err = errors.New("unknown tool error")
 	}
-	return toolResultMessage(call, schema.TextContent(fmt.Sprintf("tool %q failed: %v", call.Name, err)), true)
+	return toolResultMessage(call, []schema.ContentBlock{schema.NewTextBlock(fmt.Sprintf("tool %q failed: %v", call.Name, err))}, true)
 }
 
 var _ runnable.NamedRunnable[[]schema.Message, []schema.Message] = (*ToolsNode)(nil)
+var _ runnable.NodeDescriptor = (*ToolsNode)(nil)

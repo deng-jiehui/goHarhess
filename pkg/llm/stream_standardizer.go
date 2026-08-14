@@ -3,7 +3,9 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -16,85 +18,95 @@ const (
 	wireEventDone  wireEventKind = "done"
 )
 
-// wireEvent is private: provider decoders normalize their protocol here, and
-// only public llm.Event values cross the Streamer boundary.
+// wireEvent is private: provider decoders normalize their protocol here, then
+// the adapter emits one complete public Response through StreamReader.
 type wireEvent struct {
 	kind         wireEventKind
 	messages     []schema.Message
 	usage        *Usage
 	finishReason string
+	responseID   string
+	model        string
 	err          error
 }
 
-func snapshotWireEvents(ctx context.Context, events <-chan wireEvent) <-chan wireEvent {
-	out := make(chan wireEvent)
+func responseReaderFromWire(ctx context.Context, events <-chan wireEvent, cancelUpstream context.CancelFunc) (*runnable.StreamReader[Response], error) {
+	if ctx == nil {
+		return nil, errors.New("model stream context cannot be nil")
+	}
+	if events == nil {
+		return nil, errors.New("model wire event stream cannot be nil")
+	}
+	reader, writer := runnable.Pipe[Response](context.WithoutCancel(ctx))
 	go func() {
-		defer close(out)
-		if ctx == nil {
-			sendWireEvent(context.Background(), out, wireEvent{err: errors.New("snapshot stream context cannot be nil")})
-			return
-		}
-		if events == nil {
-			sendWireEvent(ctx, out, wireEvent{err: errors.New("snapshot stream events cannot be nil")})
-			return
-		}
-		accumulator := NewDeltaAccumulator(true)
-		for event := range events {
-			if event.err != nil {
-				sendWireEvent(ctx, out, event)
-				return
+		defer func() {
+			if cancelUpstream != nil {
+				cancelUpstream()
 			}
-			if event.kind == wireEventDelta && len(event.messages) > 0 {
-				messages, err := accumulator.Apply(Event{Kind: EventDelta, Messages: event.messages})
-				if err != nil {
-					sendWireEvent(ctx, out, wireEvent{err: err})
+			_ = writer.Close()
+		}()
+		accumulator := NewDeltaAccumulator(true)
+		response := Response{}
+		var responseID, model string
+		for {
+			select {
+			case <-reader.Context().Done():
+				return
+			case <-ctx.Done():
+				_ = writer.CloseWithError(ctx.Err())
+				return
+			case event, open := <-events:
+				if !open {
+					_ = writer.CloseWithError(errors.New("model wire stream closed without completion"))
 					return
 				}
-				event.messages = messages
-			}
-			if !sendWireEvent(ctx, out, event) || event.kind == wireEventDone {
-				return
+				if event.err != nil {
+					_ = writer.CloseWithError(event.err)
+					return
+				}
+				if event.usage != nil {
+					response.Usage = cloneUsage(event.usage)
+				}
+				if event.finishReason != "" {
+					response.FinishReason = event.finishReason
+				}
+				if event.responseID != "" {
+					responseID = event.responseID
+				}
+				if event.model != "" {
+					model = event.model
+				}
+				switch event.kind {
+				case wireEventDelta:
+					messages, err := accumulator.Apply(Response{Messages: event.messages})
+					if err != nil {
+						_ = writer.CloseWithError(err)
+						return
+					}
+					response.Messages = messages
+					callback.EmitStream(ctx, response.Clone())
+				case wireEventUsage:
+					callback.EmitStream(ctx, response.Clone())
+				case wireEventDone:
+					response.Messages = attachResponseMeta(response.Messages, responseID, model, response.FinishReason, response.Usage)
+					for i := range response.Messages {
+						if err := response.Messages[i].Validate(); err != nil {
+							_ = writer.CloseWithError(fmt.Errorf("final response message %d: %w", i, err))
+							return
+						}
+					}
+					if err := writer.Send(response.Clone()); err != nil {
+						return
+					}
+					return
+				default:
+					_ = writer.CloseWithError(errors.New("unknown model wire event kind"))
+					return
+				}
 			}
 		}
 	}()
-	return out
-}
-
-func standardizeWireEvents(ctx context.Context, events <-chan wireEvent) runnable.Stream[Event] {
-	out := make(chan runnable.Item[Event])
-	go func() {
-		defer close(out)
-		if ctx == nil {
-			out <- runnable.Item[Event]{Err: errors.New("model stream context cannot be nil")}
-			return
-		}
-		if events == nil {
-			out <- runnable.Item[Event]{Err: errors.New("model wire event stream cannot be nil")}
-			return
-		}
-		for event := range events {
-			if event.err != nil {
-				sendModelEvent(ctx, out, runnable.Item[Event]{Err: event.err})
-				return
-			}
-			value := Event{Messages: event.messages, Usage: event.usage, FinishReason: event.finishReason}
-			switch event.kind {
-			case wireEventDelta:
-				value.Kind = EventDelta
-			case wireEventUsage:
-				value.Kind = EventUsage
-			case wireEventDone:
-				value.Kind = EventDone
-			default:
-				sendModelEvent(ctx, out, runnable.Item[Event]{Err: errors.New("unknown model wire event kind")})
-				return
-			}
-			if !sendModelEvent(ctx, out, runnable.Item[Event]{Value: value}) || value.Kind == EventDone {
-				return
-			}
-		}
-	}()
-	return out
+	return reader, nil
 }
 
 func sendWireEvent(ctx context.Context, out chan<- wireEvent, event wireEvent) bool {

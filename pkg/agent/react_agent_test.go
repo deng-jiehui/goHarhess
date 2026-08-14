@@ -42,10 +42,10 @@ func TestReactAgentTextActionLoop(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("len(last) = %d, want 3: %#v", len(last), last)
 	}
-	if last[1].Role != schema.RoleAssistant || !strings.Contains(last[1].Text(), "Observation: hello") {
+	if last[1].Role != schema.RoleAssistant || !strings.Contains(last[1].JoinedText(""), "Observation: hello") {
 		t.Fatalf("observation message = %#v", last[1])
 	}
-	if !strings.Contains(last[2].Text(), "Final Answer: done") {
+	if !strings.Contains(last[2].JoinedText(""), "Final Answer: done") {
 		t.Fatalf("final message = %#v", last[2])
 	}
 }
@@ -55,15 +55,7 @@ func TestReactAgentAcceptsStructuredFunctionCall(t *testing.T) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
 	})
 	model := llm.NewScriptedModel(
-		[]schema.Message{{
-			Role:    schema.RoleAssistant,
-			Content: schema.TextContent(""),
-			FunctionCall: &schema.FunctionCall{
-				Name:      "echo",
-				Arguments: `{"text":"structured"}`,
-			},
-			Extra: map[string]any{"function_id": "call-1"},
-		}},
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{"text":"structured"}`))},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
 
@@ -85,11 +77,12 @@ func TestReactAgentAcceptsStructuredFunctionCall(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("len(last) = %d, want 3: %#v", len(last), last)
 	}
-	if last[1].Role != schema.RoleFunction || last[1].Name != "echo" {
+	results := last[1].FunctionToolResults()
+	if last[1].Role != schema.RoleTool || len(results) != 1 || results[0].Name != "echo" {
 		t.Fatalf("function observation = %#v", last[1])
 	}
-	if last[1].FunctionID("") != "call-1" {
-		t.Fatalf("function id = %q, want call-1", last[1].FunctionID(""))
+	if results[0].CallID != "call-1" {
+		t.Fatalf("function id = %q, want call-1", results[0].CallID)
 	}
 }
 

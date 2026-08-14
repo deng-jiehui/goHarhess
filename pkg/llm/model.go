@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,9 +30,7 @@ type ChatOptions struct {
 	ExtraGenerateConfig GenerateConfig
 }
 
-// Request is the provider-neutral model invocation envelope. Providers may
-// still expose Chat internally, but framework composition only depends on
-// Runnable[Request, Stream].
+// Request is the provider-neutral model invocation envelope.
 type Request struct {
 	Messages []schema.Message
 	Options  ChatOptions
@@ -53,55 +50,23 @@ type Response struct {
 	FinishReason string
 }
 
+// ErrStreamTruncated reports a model Reader that ended before producing a
+// complete Response.
+var ErrStreamTruncated = errors.New("model response stream ended without a result")
+
 func (r Response) Clone() Response {
 	r.Messages = schema.CloneMessages(r.Messages)
 	r.Usage = cloneUsage(r.Usage)
 	return r
 }
 
-type EventKind string
-
-const (
-	EventDelta EventKind = "delta"
-	EventUsage EventKind = "usage"
-	EventDone  EventKind = "done"
-)
-
-// Event is the canonical model data-plane event. Errors are carried by
-// runnable.Item.Err, never encoded as a competing Chunk kind.
-type Event struct {
-	Kind         EventKind
-	Messages     []schema.Message
-	Usage        *Usage
-	FinishReason string
-}
-
-func (e Event) Clone() Event {
-	e.Messages = schema.CloneMessages(e.Messages)
-	e.Usage = cloneUsage(e.Usage)
-	return e
-}
-
-type Model interface {
+type ChatModel interface {
 	runnable.Runnable[Request, Response]
-	runnable.Streamer[Request, Event]
 	Capabilities() Capabilities
 	ModelInfo() ModelInfo
 }
 
-// ChatModel is the provider-neutral chat model contract used by supervisors
-// and other orchestration components.
-type ChatModel = Model
-
-// Usage contains provider-neutral token accounting when a provider returns it.
-// Providers may leave fields at zero when the upstream API does not report them.
-type Usage struct {
-	PromptTokens     int            `json:"prompt_tokens,omitempty"`
-	CompletionTokens int            `json:"completion_tokens,omitempty"`
-	TotalTokens      int            `json:"total_tokens,omitempty"`
-	ReasoningTokens  int            `json:"reasoning_tokens,omitempty"`
-	Raw              map[string]any `json:"raw,omitempty"`
-}
+type Usage = schema.TokenUsage
 
 // Capabilities describes optional behavior exposed by a Model.
 type Capabilities struct {
@@ -122,7 +87,7 @@ type ModelInfo struct {
 }
 
 // DescribeModel returns callback-safe metadata without exposing credentials.
-func DescribeModel(model Model) ModelInfo {
+func DescribeModel(model ChatModel) ModelInfo {
 	if model == nil {
 		return ModelInfo{}
 	}
@@ -131,7 +96,7 @@ func DescribeModel(model Model) ModelInfo {
 	return info
 }
 
-type Factory func(Config) (Model, error)
+type Factory func(Config) (ChatModel, error)
 
 var registry = struct {
 	sync.RWMutex
@@ -160,7 +125,7 @@ func MustRegister(modelType string, factory Factory) {
 	}
 }
 
-func New(cfg Config) (Model, error) {
+func New(cfg Config) (ChatModel, error) {
 	modelType := cfg.ModelType
 	if modelType == "" {
 		return nil, errors.New("model type is required")
@@ -197,57 +162,6 @@ func MergeGenerateConfig(base GenerateConfig, override GenerateConfig) GenerateC
 	return merged
 }
 
-func ReduceEvents(ctx context.Context, stream runnable.Stream[Event], deltas bool) (Response, error) {
-	if ctx == nil {
-		return Response{}, errors.New("model reduce context is nil")
-	}
-	if stream == nil {
-		return Response{}, errors.New("model event stream is nil")
-	}
-	accumulator := NewDeltaAccumulator(deltas)
-	response := Response{}
-	for {
-		select {
-		case <-ctx.Done():
-			return Response{}, ctx.Err()
-		case item, ok := <-stream:
-			if !ok {
-				return Response{}, errors.New("model event stream closed without done event")
-			}
-			if item.Err != nil {
-				return Response{}, item.Err
-			}
-			event := item.Value
-			if event.Usage != nil {
-				response.Usage = cloneUsage(event.Usage)
-			}
-			if event.FinishReason != "" {
-				response.FinishReason = event.FinishReason
-			}
-			if event.Kind == EventDelta && len(event.Messages) > 0 {
-				messages, err := accumulator.Apply(event)
-				if err != nil {
-					return Response{}, err
-				}
-				response.Messages = messages
-			}
-			if event.Kind == EventDone {
-				return response.Clone(), nil
-			}
-		}
-	}
-}
-
-func sendModelEvent(ctx context.Context, out chan<- runnable.Item[Event], item runnable.Item[Event]) bool {
-	item.Value = item.Value.Clone()
-	select {
-	case <-ctx.Done():
-		return false
-	case out <- item:
-		return true
-	}
-}
-
 func cloneAnyMap(input map[string]any) map[string]any {
 	if input == nil {
 		return nil
@@ -273,6 +187,6 @@ func cloneUsage(usage *Usage) *Usage {
 		return nil
 	}
 	cloned := *usage
-	cloned.Raw = cloneAnyMap(usage.Raw)
+	cloned.Extra = cloneAnyMap(usage.Extra)
 	return &cloned
 }

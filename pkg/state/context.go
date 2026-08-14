@@ -3,7 +3,6 @@ package state
 import "context"
 
 type checkpointContextKey struct{}
-type cursorStackContextKey struct{}
 
 // WithCheckpoint makes an immutable checkpoint snapshot available to nested
 // retrievers, callbacks, middleware and tools.
@@ -34,19 +33,4 @@ func ValuesFromContext(ctx context.Context) map[string]any {
 		return map[string]any{}
 	}
 	return cloneMap(checkpoint.Values)
-}
-
-func WithCursorStack(ctx context.Context, stack CursorStack) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, cursorStackContextKey{}, stack.Clone())
-}
-
-func CursorStackFromContext(ctx context.Context) CursorStack {
-	if ctx == nil {
-		return nil
-	}
-	stack, _ := ctx.Value(cursorStackContextKey{}).(CursorStack)
-	return stack.Clone()
 }

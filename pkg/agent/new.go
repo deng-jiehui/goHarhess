@@ -6,11 +6,6 @@ import "fmt"
 // configurations use the standard ReAct recipe; otherwise the minimal
 // one-model graph is used.
 func New(cfg BaseConfig, opts ...Option) (Agent, error) {
-	return NewAgent(cfg, opts...)
-}
-
-// NewAgent is the explicit spelling of New for application builders.
-func NewAgent(cfg BaseConfig, opts ...Option) (Agent, error) {
 	resolved, err := resolveBaseConfig(cfg, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("configure agent %q: %w", cfg.Name, err)

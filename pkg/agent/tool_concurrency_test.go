@@ -13,7 +13,6 @@ import (
 	"goharness/pkg/agent"
 	"goharness/pkg/callback"
 	"goharness/pkg/control"
-	"goharness/pkg/graph"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
@@ -88,14 +87,14 @@ func TestReactAgentStartsToolOnlyAfterLLMStreamEnds(t *testing.T) {
 	if result.err != nil {
 		t.Fatal(result.err)
 	}
-	if len(result.messages) != 3 || result.messages[1].Name != "early-tool" || result.messages[2].Text() != "done" {
+	if len(result.messages) != 3 || len(result.messages[1].FunctionToolResults()) != 1 || result.messages[1].FunctionToolResults()[0].Name != "early-tool" || result.messages[2].JoinedText("") != "done" {
 		t.Fatalf("messages = %#v", result.messages)
 	}
 }
 
 func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
 	var calls atomic.Int32
-	makeTool := func(name string) tool.BaseTool {
+	makeTool := func(name string) tool.Tool {
 		return tool.NewFunctionTool(tool.Spec{Name: name}, func(context.Context, tool.CallInput) (tool.Result, error) {
 			calls.Add(1)
 			return tool.TextResult(name), nil
@@ -106,12 +105,14 @@ func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
 		functionCallMessage("write", "write-1"),
 	})
 	hookCalls := 0
+	hookCalled := make(chan struct{}, 1)
 	value, err := agent.New(agent.BaseConfig{
 		Name:  "approval",
 		Model: model,
-		Tools: []tool.BaseTool{makeTool("read"), makeTool("write")},
+		Tools: []tool.Tool{makeTool("read"), makeTool("write")},
 	}, agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
 		hookCalls++
+		hookCalled <- struct{}{}
 		if len(batch.Calls) != 2 || batch.Calls[0].ID != "read-1" || batch.Calls[1].ID != "write-1" {
 			t.Fatalf("batch=%#v", batch)
 		}
@@ -121,12 +122,26 @@ func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = value.Invoke(context.Background(), []schema.Message{schema.UserMessage("run")})
-	if !errors.Is(err, graph.ErrCheckpointRequired) {
-		t.Fatalf("Invoke error=%v", err)
+	store := &agentExecutionStore{}
+	stream, err := value.Stream(context.Background(), []schema.Message{schema.UserMessage("run")}, agent.WithCheckpoint(store, "batch-interrupt"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	select {
+	case <-hookCalled:
+	case <-time.After(time.Second):
+		t.Fatal("before-batch hook did not run")
+	}
+	deadline := time.Now().Add(time.Second)
+	for store.saveCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	_ = stream.Close()
 	if hookCalls != 1 || calls.Load() != 0 {
 		t.Fatalf("hook calls=%d tool calls=%d", hookCalls, calls.Load())
+	}
+	if store.saveCount() != 1 {
+		t.Fatalf("checkpoint saves=%d", store.saveCount())
 	}
 }
 
@@ -167,10 +182,10 @@ func TestReactAgentToolTimeoutJoinsAsObservation(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("messages = %#v", last)
 	}
-	if !strings.Contains(last[1].Text(), "context deadline exceeded") || last[1].FunctionID("") != "slow-1" {
+	if !strings.Contains(toolResultText(last[1]), "context deadline exceeded") || last[1].FunctionToolResults()[0].CallID != "slow-1" {
 		t.Fatalf("timeout observation = %#v", last[1])
 	}
-	if last[2].Text() != "continued" {
+	if last[2].JoinedText("") != "continued" {
 		t.Fatalf("final response = %#v", last[2])
 	}
 }
@@ -210,10 +225,12 @@ func TestReactAgentRunsToolBatchConcurrentlyAndPreservesOrder(t *testing.T) {
 	if len(result.messages) != 5 {
 		t.Fatalf("messages = %#v", result.messages)
 	}
-	if result.messages[2].Name != "first" || result.messages[2].FunctionID("") != "call-1" {
+	firstResults := result.messages[2].FunctionToolResults()
+	if len(firstResults) != 1 || firstResults[0].Name != "first" || firstResults[0].CallID != "call-1" {
 		t.Fatalf("first result = %#v", result.messages[2])
 	}
-	if result.messages[3].Name != "second" || result.messages[3].FunctionID("") != "call-2" {
+	secondResults := result.messages[3].FunctionToolResults()
+	if len(secondResults) != 1 || secondResults[0].Name != "second" || secondResults[0].CallID != "call-2" {
 		t.Fatalf("second result = %#v", result.messages[3])
 	}
 }
@@ -239,20 +256,16 @@ func TestReactAgentEmitsToolObservationsAsOneBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var chunks [][]schema.Message
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		if item.Value.Kind != schema.MessageEventDone {
-			chunks = append(chunks, item.Value.Messages)
-		}
+	output, err := stream.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
+	chunks := [][]schema.Message{output}
 	observationBatches := 0
 	for _, messages := range chunks {
 		functions := 0
 		for _, message := range messages {
-			if message.Role == schema.RoleFunction {
+			if message.Role == schema.RoleTool && len(message.FunctionToolResults()) == 1 {
 				functions++
 			}
 		}
@@ -263,9 +276,8 @@ func TestReactAgentEmitsToolObservationsAsOneBatch(t *testing.T) {
 			}
 		}
 	}
-	if observationBatches != 2 {
-		// The cumulative final chunk includes the same complete batch; no partial one-tool batch is allowed.
-		t.Fatalf("observation-bearing chunks = %d, want 2 cumulative chunks: %#v", observationBatches, chunks)
+	if observationBatches != 1 {
+		t.Fatalf("observation-bearing chunks = %d, want one complete batch: %#v", observationBatches, chunks)
 	}
 }
 
@@ -339,10 +351,12 @@ func TestReactAgentRunsStructuredToolBatchConcurrently(t *testing.T) {
 	if len(result.messages) != 5 {
 		t.Fatalf("messages = %#v", result.messages)
 	}
-	if result.messages[2].Name != "first" || result.messages[2].FunctionID("") != "call-1" {
+	firstResults := result.messages[2].FunctionToolResults()
+	if len(firstResults) != 1 || firstResults[0].Name != "first" || firstResults[0].CallID != "call-1" {
 		t.Fatalf("first result = %#v", result.messages[2])
 	}
-	if result.messages[3].Name != "second" || result.messages[3].FunctionID("") != "call-2" {
+	secondResults := result.messages[3].FunctionToolResults()
+	if len(secondResults) != 1 || secondResults[0].Name != "second" || secondResults[0].CallID != "call-2" {
 		t.Fatalf("second result = %#v", result.messages[3])
 	}
 }
@@ -453,10 +467,10 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("messages = %#v", messages)
 	}
-	if !strings.Contains(messages[1].Text(), `tool "delete" permission denied by middleware "rbac": viewer cannot call mutating tools`) {
-		t.Fatalf("permission observation = %q", messages[1].Text())
+	if !strings.Contains(toolResultText(messages[1]), `tool "delete" permission denied by middleware "rbac": viewer cannot call mutating tools`) {
+		t.Fatalf("permission observation = %q", toolResultText(messages[1]))
 	}
-	if messages[1].FunctionID("") != "delete-1" || messages[2].Text() != "denied safely" {
+	if messages[1].FunctionToolResults()[0].CallID != "delete-1" || messages[2].JoinedText("") != "denied safely" {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
@@ -542,11 +556,7 @@ func blockingTool(
 }
 
 func functionCallMessage(name, id string) schema.Message {
-	return schema.Message{
-		Role:         schema.RoleAssistant,
-		FunctionCall: &schema.FunctionCall{Name: name, Arguments: `{}`},
-		Extra:        map[string]any{"function_id": id},
-	}
+	return schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(id, name, `{}`))
 }
 
 func waitToolName(t *testing.T, started <-chan string) string {
@@ -595,10 +605,10 @@ func (m *earlyStartModel) Invoke(ctx context.Context, request llm.Request, optio
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return stream.Collect(ctx)
 }
 
-func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
+func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
 	m.mu.Lock()
 	m.calls++
 	call := m.calls
@@ -616,56 +626,50 @@ func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, _ ...
 	secondStarted := m.secondCallStarted
 	m.mu.Unlock()
 
-	out := make(chan runnable.Item[llm.Event])
+	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		defer close(out)
+		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
+		send := func(response llm.Response) bool {
+			messages, err := accumulator.Apply(response)
+			if err != nil {
+				_ = writer.CloseWithError(err)
+				return false
+			}
+			return writer.Send(llm.Response{Messages: messages}) == nil
+		}
 		switch call {
 		case 1:
-			select {
-			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+			if !send(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.ContentBlock{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: &schema.FunctionToolCall{ID: "early-", Name: "early-tool", Arguments: `{"value":`}})}}) {
 				return
-			case out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{{
-				Role: schema.RoleAssistant,
-				FunctionCall: &schema.FunctionCall{
-					Name:      "early-tool",
-					Arguments: `{"value":`,
-				},
-				Extra: map[string]any{"function_id": "early-1"},
-			}}}}:
 			}
 			close(partialSent)
 			select {
 			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+				_ = writer.CloseWithError(ctx.Err())
 				return
 			case <-m.allowArgumentsComplete:
 			}
-			select {
-			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+			if !send(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.ContentBlock{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: &schema.FunctionToolCall{ID: "1", Arguments: `1}`}})}}) {
 				return
-			case out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{{
-				Role:         schema.RoleAssistant,
-				FunctionCall: &schema.FunctionCall{Arguments: `1}`},
-			}}}}:
 			}
 			select {
 			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+				_ = writer.CloseWithError(ctx.Err())
+				return
 			case <-m.allowFirstStreamEnd:
 				close(firstEnded)
-				out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
+				_ = writer.Close()
 			}
 		case 2:
 			close(secondStarted)
-			out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage("done")}}}
-			out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
+			if send(llm.Response{Messages: []schema.Message{schema.AssistantMessage("done")}}) {
+				_ = writer.Close()
+			}
 		default:
-			out <- runnable.Item[llm.Event]{Err: fmt.Errorf("unexpected LLM call %d", call)}
+			_ = writer.CloseWithError(fmt.Errorf("unexpected LLM call %d", call))
 		}
 	}()
-	return out, nil
+	return reader, nil
 }
 
 func (m *earlyStartModel) Capabilities() llm.Capabilities {
@@ -674,4 +678,10 @@ func (m *earlyStartModel) Capabilities() llm.Capabilities {
 
 func (m *earlyStartModel) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{Name: "early-start", Provider: "test", ModelType: "scripted"}
+}
+func (m *earlyStartModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m *earlyStartModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
 }

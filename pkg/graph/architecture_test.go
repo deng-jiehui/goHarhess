@@ -15,7 +15,6 @@ import (
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
-	"goharness/pkg/state"
 )
 
 type streamState struct {
@@ -71,14 +70,14 @@ func TestCursorResumeUsesRuntimeStatePreHandler(t *testing.T) {
 	g := newStreamGraph(t, "resume")
 	depth := 0
 	node := runnable.Func[*streamState, *streamState](func(ctx context.Context, current *streamState, _ ...runnable.Option) (*streamState, error) {
-		depth = len(state.CursorStackFromContext(ctx))
+		depth = len(graph.CursorStackFromContext(ctx))
 		current.Output = []schema.Message{schema.AssistantMessage("resumed")}
 		return current, nil
 	})
 	addStreamNode(t, g, "work", node)
 	_ = g.AddEdge(graph.Start, "work")
 	addStreamFinish(t, g, "work")
-	ctx := state.WithCursorStack(context.Background(), state.CursorStack{{Graph: "resume", Node: "work", Step: 0, Iteration: 2}})
+	ctx := graph.WithCursorStack(context.Background(), graph.CursorStack{{Graph: "resume", Node: "work", Step: 0, Iteration: 2}})
 	output, err := mustCompile(t, g).Invoke(ctx, nil)
 	if err != nil || depth != 1 || len(output) != 1 {
 		t.Fatalf("depth=%d output=%#v err=%v", depth, output, err)

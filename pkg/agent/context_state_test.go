@@ -33,14 +33,14 @@ func TestConversationCheckpointPreservesCallerSystemMessage(t *testing.T) {
 	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("second")}, agent.WithConversationID("caller-system")); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 2 || calls[1][0].Role != schema.RoleSystem || calls[1][0].Text() != "agent policy\n\ncaller policy" {
+	if len(calls) != 2 || calls[1][0].Role != schema.RoleSystem || calls[1][0].JoinedText("") != "agent policy\n\ncaller policy" {
 		t.Fatalf("second model context=%#v", calls)
 	}
 	checkpoint, found, err := store.Load(context.Background(), "caller-system")
 	if err != nil || !found {
 		t.Fatalf("found=%t err=%v", found, err)
 	}
-	if len(checkpoint.Messages) == 0 || checkpoint.Messages[0].Role != schema.RoleSystem || checkpoint.Messages[0].Text() != "caller policy" {
+	if len(checkpoint.Messages) == 0 || checkpoint.Messages[0].Role != schema.RoleSystem || checkpoint.Messages[0].JoinedText("") != "caller policy" {
 		t.Fatalf("checkpoint messages=%#v", checkpoint.Messages)
 	}
 }
@@ -60,7 +60,7 @@ func (blockingCheckpointStore) Delete(context.Context, string) error { return ni
 
 func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 	store := state.NewMemoryStore(state.MemoryStoreConfig{})
-	assembler, err := contextengine.New(contextengine.Config{
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
 		MaxContextTokens:     1000,
 		ReservedOutputTokens: 100,
 		PromptCache: contextengine.PromptCacheConfig{
@@ -91,7 +91,7 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 		Name:            "persistent",
 		SystemMessage:   "stable policy",
 		Model:           model,
-		ContextEngine:   assembler,
+		ContextBuilder:  assembler,
 		CheckpointStore: store,
 		MaxTokens:       100,
 	})
@@ -123,7 +123,7 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 		t.Fatalf("model calls = %d", len(gotCalls))
 	}
 	second := gotCalls[1]
-	if len(second) != 4 || second[0].Role != schema.RoleSystem || second[1].Text() != "first" || second[2].Text() != "answer-1" || second[3].Text() != "second" {
+	if len(second) != 4 || second[0].Role != schema.RoleSystem || second[1].JoinedText("") != "first" || second[2].JoinedText("") != "answer-1" || second[3].JoinedText("") != "second" {
 		t.Fatalf("second model context = %#v", second)
 	}
 	if _, ok := second[0].Extra[contextengine.PromptCacheMetadataKey]; !ok {
@@ -136,7 +136,7 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 	if checkpoint.Version != 2 || len(checkpoint.Messages) != 4 {
 		t.Fatalf("checkpoint = %#v", checkpoint)
 	}
-	if checkpoint.Messages[0].Text() != "first" || checkpoint.Messages[3].Text() != "answer-2" {
+	if checkpoint.Messages[0].JoinedText("") != "first" || checkpoint.Messages[3].JoinedText("") != "answer-2" {
 		t.Fatalf("checkpoint messages = %#v", checkpoint.Messages)
 	}
 	if checkpoint.Values["tenant"] != "tenant-a" || checkpoint.Values["turn"] != 2.0 && checkpoint.Values["turn"] != 2 {

@@ -1,6 +1,6 @@
 # MCP Tools
 
-The core `pkg/tool` package exposes `BaseTool` and `ToolsNode`. `ToolsNode`
+The core `pkg/tool` package exposes `Tool` and `ToolsNode`. `ToolsNode`
 accepts the trailing assistant function-call messages, executes only that
 suffix concurrently, and returns ordered tool-result messages to append before
 the next model turn.
@@ -58,7 +58,7 @@ tools, err := client.Tools(ctx)
 if err != nil {
     return err
 }
-agentValue, err := react.NewAgent(ctx, react.Config{
+agentValue, err := agent.NewReactAgent(agent.ReactAgentConfig{
     BaseConfig: agent.BaseConfig{
         Model: llmModel,
         Tools: tools,
@@ -71,6 +71,5 @@ not need to register a second tools node manually.
 
 `ToolsNode` enforces its node-wide `MaxConcurrency` and each registered
 tool's `Spec.Concurrency` group limit across all simultaneous invocations.
-Agent middleware, retry, timeout, recursion, and authorization policies are
-owned by the Agent runtime; assemble tools through an Agent when those
-controls are required.
+It shares the public `tool.Runtime` with Agent, so Middleware, retry, timeout,
+recursion and authorization policies follow the same execution contract.

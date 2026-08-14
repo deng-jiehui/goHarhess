@@ -22,7 +22,7 @@ type HTTPOptions struct {
 type httpOptionsContextKey struct{}
 
 // WithHTTPOptions overrides the HTTP client source for tools executed with ctx.
-// The internal runtime supplies defaults automatically when no override exists.
+// Runtime supplies defaults automatically when no override exists.
 func WithHTTPOptions(ctx context.Context, options HTTPOptions) context.Context {
 	return context.WithValue(ctx, httpOptionsContextKey{}, options)
 }

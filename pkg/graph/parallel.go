@@ -148,7 +148,7 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 	}
 	entry := runtimeNode{
 		id: name, inputType: config.merger.stateType, outputType: config.merger.stateType,
-		info:     NodeInfo{ID: name, Kind: "parallel", Label: name, InputType: typeName(config.merger.stateType), OutputType: typeName(config.merger.stateType)},
+		info:     NodeInfo{ID: name, Kind: runnable.NodeKindParallel, Label: name, InputType: typeName(config.merger.stateType), OutputType: typeName(config.merger.stateType)},
 		parallel: &runtimeParallelNode{branches: owned, merger: config.merger},
 		compile: func(stack map[uintptr]bool) error {
 			for _, compile := range compilers {

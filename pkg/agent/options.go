@@ -8,12 +8,26 @@ import (
 	"goharness/pkg/control"
 	"goharness/pkg/graph"
 	"goharness/pkg/runnable"
+	"goharness/pkg/tool"
 )
 
 type resolvedRunOptionsKey struct{}
 
 func withResolvedRunOptions(ctx context.Context, opts RunOptions) context.Context {
 	return context.WithValue(ctx, resolvedRunOptionsKey{}, opts)
+}
+
+func graphNodeOptions(options RunOptions) []runnable.Option {
+	values := append([]runnable.Option(nil), options.GraphOptions...)
+	values = append(values, options.NodeOptions...)
+	return values
+}
+
+func withToolExecutionLimits(ctx context.Context, options RunOptions) context.Context {
+	return tool.WithExecutionLimits(ctx, tool.ExecutionLimits{
+		MaxConcurrency: options.MaxParallelTools,
+		Timeout:        options.ToolCallTimeout,
+	})
 }
 
 func resolvedRunOptionsFromContext(ctx context.Context) (RunOptions, bool) {
@@ -31,7 +45,6 @@ type RunOptions struct {
 	MaxLLMCalls         int
 	MaxParallelTools    int
 	ToolCallTimeout     time.Duration
-	StreamBufferSize    int
 	MaxTokens           int
 	DeltaStream         bool
 	Knowledge           string
@@ -75,7 +88,6 @@ func defaultRunOptions(limits agentLimits) RunOptions {
 		MaxLLMCalls:      limits.maxLLMCalls,
 		MaxParallelTools: limits.maxConcurrency,
 		ToolCallTimeout:  limits.timeout,
-		StreamBufferSize: limits.streamBufferSize,
 		MaxTokens:        limits.maxTokens,
 		Metadata:         map[string]any{},
 		StateValues:      map[string]any{},
@@ -97,12 +109,6 @@ func resolveRunOptions(limits agentLimits, opts ...RunOption) RunOptions {
 	}
 	if ro.ToolCallTimeout <= 0 || ro.ToolCallTimeout > limits.timeout {
 		ro.ToolCallTimeout = limits.timeout
-	}
-	if ro.StreamBufferSize <= 0 {
-		ro.StreamBufferSize = limits.streamBufferSize
-	}
-	if ro.StreamBufferSize > limits.streamBufferSize {
-		ro.StreamBufferSize = limits.streamBufferSize
 	}
 	if ro.ContextWindowTokens < 0 {
 		ro.ContextWindowTokens = 0

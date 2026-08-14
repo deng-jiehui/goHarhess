@@ -122,7 +122,7 @@ Graph 只在成功保存后返回可由 `errors.Is(err, graph.ErrInterrupted)` �
 - 在稳定前缀末尾写入 Provider-neutral Prompt Cache breakpoint。
 
 ```go
-assembler, err := contextengine.New(contextengine.Config{
+assembler, err := contextengine.NewContextBuilder(contextengine.Config{
     MaxContextTokens:      128_000,
     ReservedOutputTokens: 8_000,
     RolePolicy:           contextengine.RolePolicyRepair,
@@ -144,7 +144,7 @@ assembler, err := contextengine.New(contextengine.Config{
 value, err := agent.New(agent.BaseConfig{
     Name:            "support-agent",
     Model:           model,
-    ContextEngine:   assembler,
+    ContextBuilder:  assembler,
     CheckpointStore: store,
 })
 ```
@@ -154,7 +154,7 @@ value, err := agent.New(agent.BaseConfig{
 ```go
 messages, err := value.Invoke(
     ctx,
-    []schema.Message{schema.UserMessage("继续上次的问题")},
+    []schema.Message{schema.NewMessage(schema.RoleUser, schema.NewTextBlock("继续上次的问题"))},
     agent.WithConversationID("tenant-a:user-42:session-7"),
     agent.WithStateValue("locale", "zh-CN"),
     agent.WithContextWindowTokens(128_000),
@@ -187,21 +187,21 @@ Values 不会自动复制到 Callback 元数据，避免把可能敏感的业务
 ```go
 conversation, err := contextengine.NewConversationBuilder().
     System("You are a document assistant").
-    UserContent(schema.MultiContent(
-        schema.TextItem("总结这个文件"),
-        schema.ContentItem{File: "guide.pdf"},
-    )).
-    AssistantCall("search", `{"query":"architecture"}`, "call-1").
-    Reasoning("need retrieval").
-    Function("search", schema.TextContent("result"), "call-1").
+    UserBlocks(
+        schema.NewTextBlock("总结这个文件"),
+        schema.NewFileBlock("file:///guide.pdf", "application/pdf"),
+    ).
+    AssistantCall("call-1", "search", `{"query":"architecture"}`).
+    Reasoning("need retrieval", "").
+    ToolResult("call-1", "search", false, schema.NewTextBlock("result")).
     Assistant("summary").
     Build()
 ```
 
-`ContextBuilder` 将稳定前缀、Checkpoint 历史和本轮输入送入治理层：
+`RequestBuilder` 将稳定前缀、Checkpoint 历史和本轮输入送入治理层：
 
 ```go
-result, err := contextengine.NewContextBuilder(assembler).
+result, err := contextengine.NewRequestBuilder(assembler).
     Pinned(systemMessages...).
     History(checkpoint.Messages...).
     Input(currentMessages...).
@@ -214,20 +214,24 @@ stats := result.Stats
 
 ## Runnable Context Node
 
-Agents use `contextengine.NewDefaultContextBuilder()` as the default context
-Runnable. Applications can replace it with a plain function without creating
-an engine type:
+Agent 默认使用 `contextengine.NewContextBuilder(contextengine.Config{})` 创建的
+Runnable。自定义逻辑使用统一的 `runnable.Func` 适配后，通过唯一的
+`agent.WithContextBuilder` 入口注入：
 
 ```go
+standard, err := contextengine.NewContextBuilder(contextengine.Config{})
+custom := runnable.Func[contextengine.Request, contextengine.Result](func(
+    ctx context.Context,
+    request contextengine.Request,
+    _ ...runnable.Option,
+) (contextengine.Result, error) {
+    // Apply a sliding window, retrieval compression or prefix alignment here.
+    return standard.Invoke(ctx, request)
+})
+
 value, err := agent.NewReactAgent(agent.ReactAgentConfig{
     BaseConfig: agent.BaseConfig{Model: model},
-}, agent.WithContextBuilder(func(ctx context.Context, request contextengine.Request) (contextengine.Result, error) {
-    // Apply a sliding window, retrieval compression or prefix alignment here.
-    return contextengine.NewDefaultContextBuilder().Invoke(ctx, request)
-}))
+}, agent.WithContextBuilder(custom))
 ```
-
-For a custom node that needs invocation Options, use
-`agent.WithContextBuilderNode(runnable.Runnable[contextengine.Request, contextengine.Result])`.
 
 `Stats` 包含输入/输出 Token、稳定前缀大小、Role 修复数、丢弃 Turn 数、截断消息数和 Prompt Cache 对齐状态。

@@ -8,7 +8,6 @@ type MessageEventKind string
 const (
 	MessageEventDelta    MessageEventKind = "delta"
 	MessageEventSnapshot MessageEventKind = "snapshot"
-	MessageEventDone     MessageEventKind = "done"
 )
 
 // MessageEvent carries either provider-neutral message deltas or cumulative

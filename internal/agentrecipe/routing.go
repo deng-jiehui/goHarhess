@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"goharness/pkg/callback"
 	"goharness/pkg/graph"
@@ -57,18 +58,12 @@ func hydrateRoutingRun(ctx context.Context, state *RecipeState) error {
 	return nil
 }
 
-func commitRoutingRun(ctx context.Context, state *RecipeState, output []schema.Message) error {
-	run, err := routingStateFromContext(ctx)
-	if err != nil {
-		return err
-	}
-	state.Messages = schema.CloneMessages(output)
+func syncRoutingState(state *RecipeState, run *routingRunState) {
 	state.Response = schema.CloneMessages(run.response)
 	state.RoutingSteps = run.steps
 	state.Pending = cloneCalls(run.pending)
 	state.DispatchInput = schema.CloneMessages(run.dispatchInput)
 	state.ContinueRun = run.continueRun
-	return nil
 }
 
 func routingStateFromContext(ctx context.Context) (*routingRunState, error) {
@@ -91,173 +86,157 @@ type RoutedResult struct {
 	Err      error
 }
 
+type RoutedAgent struct {
+	Name string
+	Node runnable.Runnable[[]schema.Message, runnable.Outcome[[]schema.Message]]
+}
+
 type RoutingHooks struct {
-	MaxSteps      int
-	ReturnControl bool
-	CallModel     func(context.Context, []schema.Message) (runnable.Stream[llm.Event], error)
-	DetectCalls   func([]schema.Message) []Call
-	Dispatch      func(context.Context, []Call, []schema.Message) ([]RoutedResult, error)
-	Observation   func(RoutedResult) schema.Message
-	NameMessages  func([]schema.Message) []schema.Message
+	MaxSteps     int
+	Model        runnable.Runnable[llm.Request, llm.Response]
+	PrepareModel func(context.Context, []schema.Message) (llm.Request, error)
+	Agents       []RoutedAgent
+	DetectCalls  func([]schema.Message) []Call
+	Observation  func(RoutedResult) schema.Message
+	NameMessages func([]schema.Message) []schema.Message
 }
 
 func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	if hooks.MaxSteps < 1 {
 		return nil, errors.New("routing recipe max steps must be positive")
 	}
-	if hooks.CallModel == nil || hooks.Dispatch == nil || hooks.DetectCalls == nil {
-		return nil, errors.New("routing recipe requires model, call detection, and dispatch hooks")
+	if hooks.Model == nil || hooks.PrepareModel == nil || hooks.DetectCalls == nil {
+		return nil, errors.New("routing recipe requires a model node, model input handler, and call detector")
 	}
+	agents := make(map[string]RoutedAgent, len(hooks.Agents))
+	for index, candidate := range hooks.Agents {
+		candidate.Name = strings.TrimSpace(candidate.Name)
+		if candidate.Name == "" || candidate.Node == nil {
+			return nil, fmt.Errorf("routing agent %d is not configured", index)
+		}
+		if _, exists := agents[candidate.Name]; exists {
+			return nil, fmt.Errorf("duplicate routing agent %q", candidate.Name)
+		}
+		agents[candidate.Name] = candidate
+	}
+
 	g, err := newRecipeGraph(name)
 	if err != nil {
 		return nil, err
 	}
-	decide := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+	if err := g.AddNode("decide", hooks.Model,
+		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) (llm.Request, error) {
+			if err := hydrateRoutingRun(ctx, state); err != nil {
+				return llm.Request{}, err
+			}
+			return hooks.PrepareModel(ctx, schema.CloneMessages(state.Messages))
+		}),
+		graph.WithPostHandler(func(ctx context.Context, state *RecipeState, response llm.Response) error {
+			run, err := routingStateFromContext(ctx)
+			if err != nil {
+				return err
+			}
+			output := schema.CloneMessages(response.Messages)
+			run.steps++
+			run.dispatchInput = schema.CloneMessages(state.Messages)
+			state.Messages = appendMessages(state.Messages, output)
+			calls := hooks.DetectCalls(output)
+			if !run.returnControl && len(calls) > 1 {
+				calls = calls[:1]
+			}
+			run.pending = cloneCalls(calls)
+			if len(calls) == 0 {
+				run.response = append(run.response, output...)
+				run.dispatchInput = nil
+				run.continueRun = false
+			} else {
+				run.continueRun = true
+			}
+			syncRoutingState(state, run)
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
+	postAgent := func(ctx context.Context, state *RecipeState, outcome runnable.Outcome[[]schema.Message]) error {
 		run, err := routingStateFromContext(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if run.steps >= run.maxSteps {
+		if len(run.pending) == 0 {
+			return errors.New("routing agent completed without a pending call")
+		}
+		call := run.pending[0]
+		result := RoutedResult{Call: call, Messages: withSpeaker(outcome.Value, call.Name), Err: outcome.Err}
+		if result.Err != nil && !run.returnControl {
+			return fmt.Errorf("routed agent %q: %w", call.Name, result.Err)
+		}
+		run.pending = cloneCalls(run.pending[1:])
+		if !run.returnControl {
+			output := schema.CloneMessages(result.Messages)
+			state.Messages = appendMessages(state.Messages, output)
+			run.response = output
+			run.pending = nil
+			run.dispatchInput = nil
 			run.continueRun = false
-			return schema.CloneMessages(messages), nil
+			emitRoutingSnapshot(ctx, hooks, run.response)
+			syncRoutingState(state, run)
+			return nil
 		}
-		stream, err := hooks.CallModel(ctx, messages)
-		if err != nil {
-			return nil, err
+		if hooks.Observation == nil {
+			return errors.New("routing recipe observation hook is missing")
 		}
-		if stream == nil {
-			return nil, errors.New("routing recipe model returned a nil stream")
+		observation := hooks.Observation(result)
+		state.Messages = appendMessages(state.Messages, []schema.Message{observation})
+		run.response = append(run.response, observation)
+		if len(run.pending) == 0 {
+			run.dispatchInput = nil
 		}
-		accumulator := llm.NewDeltaAccumulator(true)
-		var output []schema.Message
-		sawDone := false
-		for {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case item, open := <-stream:
-				if !open {
-					goto streamClosed
-				}
-				if item.Err != nil {
-					return nil, item.Err
-				}
-				if item.Value.Kind == llm.EventDone {
-					sawDone = true
-					goto streamClosed
-				}
-				if item.Value.Kind != llm.EventDelta || len(item.Value.Messages) == 0 {
-					continue
-				}
-				output, err = accumulator.Apply(item.Value)
-				if err != nil {
+		run.continueRun = len(run.pending) > 0 || run.steps < run.maxSteps
+		emitRoutingSnapshot(ctx, hooks, run.response)
+		syncRoutingState(state, run)
+		return nil
+	}
+
+	for _, candidate := range hooks.Agents {
+		nodeID := routedAgentNodeID(candidate.Name)
+		if err := g.AddNode(nodeID, candidate.Node,
+			graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+				if err := hydrateRoutingRun(ctx, state); err != nil {
 					return nil, err
 				}
-				messages := appendMessages(run.response, output)
-				if hooks.NameMessages != nil {
-					messages = hooks.NameMessages(messages)
-				}
-				callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages})
-			}
+				return schema.CloneMessages(state.DispatchInput), nil
+			}),
+			graph.WithPostHandler(postAgent),
+		); err != nil {
+			return nil, err
 		}
-	streamClosed:
-		if !sawDone {
-			return nil, errors.New("routing model stream closed without done event")
-		}
-		run.steps++
-		run.dispatchInput = schema.CloneMessages(messages)
-		updated := appendMessages(messages, output)
-		calls := hooks.DetectCalls(output)
-		if !run.returnControl && len(calls) > 1 {
-			calls = calls[:1]
-		}
-		run.pending = append([]Call(nil), calls...)
-		if len(calls) > 0 {
-			return updated, nil
-		}
-		run.response = append(run.response, schema.CloneMessages(output)...)
-		run.continueRun = false
-		return updated, nil
-	})
-	if err := g.AddNode("decide", decide,
-		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
-			if err := hydrateRoutingRun(ctx, state); err != nil {
-				return nil, err
-			}
-			return schema.CloneMessages(state.Messages), nil
-		}),
-		graph.WithPostHandler(commitRoutingRun),
-	); err != nil {
-		return nil, err
 	}
-	dispatch := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+
+	unroutable := runnable.Func[[]schema.Message, runnable.Outcome[[]schema.Message]](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) (runnable.Outcome[[]schema.Message], error) {
 		run, err := routingStateFromContext(ctx)
 		if err != nil {
-			return nil, err
+			return runnable.Outcome[[]schema.Message]{}, err
 		}
-		calls := append([]Call(nil), run.pending...)
-		if len(calls) == 0 {
-			run.continueRun = false
-			return schema.CloneMessages(messages), nil
+		if len(run.pending) == 0 {
+			return runnable.Outcome[[]schema.Message]{}, errors.New("routing call is missing")
 		}
-		dispatchInput := schema.CloneMessages(run.dispatchInput)
-		results, err := hooks.Dispatch(ctx, calls, dispatchInput)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) != len(calls) {
-			return nil, fmt.Errorf("routing dispatch returned %d results for %d calls", len(results), len(calls))
-		}
-		run.dispatchInput = nil
-		for _, result := range results {
-			if result.Err != nil && !run.returnControl {
-				return nil, fmt.Errorf("routed agent %q: %w", result.Call.Name, result.Err)
-			}
-		}
-		run.pending = nil
-		if !run.returnControl {
-			var output []schema.Message
-			for _, result := range results {
-				output = append(output, schema.CloneMessages(result.Messages)...)
-			}
-			updated := appendMessages(messages, output)
-			run.response = schema.CloneMessages(output)
-			run.continueRun = false
-			messages := output
-			if hooks.NameMessages != nil {
-				messages = hooks.NameMessages(messages)
-			}
-			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: messages})
-			return updated, nil
-		}
-		observations := make([]schema.Message, 0, len(results))
-		for _, result := range results {
-			if hooks.Observation == nil {
-				return nil, errors.New("routing recipe observation hook is missing")
-			}
-			observations = append(observations, hooks.Observation(result))
-		}
-		updated := appendMessages(messages, observations)
-		run.response = append(run.response, schema.CloneMessages(observations)...)
-		run.continueRun = run.steps < run.maxSteps
-		emitted := run.response
-		if hooks.NameMessages != nil {
-			emitted = hooks.NameMessages(emitted)
-		}
-		callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
-		return updated, nil
+		name := run.pending[0].Name
+		return runnable.Outcome[[]schema.Message]{Err: fmt.Errorf("routing model selected unregistered sub-agent %q", name)}, nil
 	})
-	if err := g.AddNode("dispatch", dispatch,
+	if err := g.AddNode("unroutable", unroutable,
 		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
 			if err := hydrateRoutingRun(ctx, state); err != nil {
 				return nil, err
 			}
-			return schema.CloneMessages(state.Messages), nil
+			return schema.CloneMessages(state.DispatchInput), nil
 		}),
-		graph.WithPostHandler(commitRoutingRun),
+		graph.WithPostHandler(postAgent),
 	); err != nil {
 		return nil, err
 	}
+
 	finish := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
 		run, err := routingStateFromContext(ctx)
 		if err != nil {
@@ -278,29 +257,34 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	})); err != nil {
 		return nil, err
 	}
+
+	if err := g.AddBranch(graph.Start, "finish", "step_limit", func(ctx context.Context, state *RecipeState) (bool, error) {
+		if err := hydrateRoutingRun(ctx, state); err != nil {
+			return false, err
+		}
+		run, err := routingStateFromContext(ctx)
+		return err == nil && run.steps >= run.maxSteps, err
+	}); err != nil {
+		return nil, err
+	}
 	if err := g.AddEdge(graph.Start, "decide"); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("decide", "dispatch", "sub_agents", func(_ context.Context, state *RecipeState) (bool, error) {
-		return len(state.Pending) > 0, nil
-	}); err != nil {
+	if err := addRoutingEdges(g, "decide", hooks.Agents); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge("decide", "finish"); err != nil {
-		return nil, err
+	for _, candidate := range hooks.Agents {
+		if err := addRoutingEdges(g, routedAgentNodeID(candidate.Name), hooks.Agents); err != nil {
+			return nil, err
+		}
 	}
-	if err := g.AddBranch("dispatch", "decide", "continue", func(_ context.Context, state *RecipeState) (bool, error) {
-		return state.ContinueRun, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := g.AddEdge("dispatch", "finish"); err != nil {
+	if err := addRoutingEdges(g, "unroutable", hooks.Agents); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge("finish", graph.End); err != nil {
 		return nil, err
 	}
-	if err := g.SetMaxSteps(hooks.MaxSteps*2 + 2); err != nil {
+	if err := g.SetMaxSteps(hooks.MaxSteps*(len(hooks.Agents)+2) + 2); err != nil {
 		return nil, err
 	}
 	compiled, err := g.Compile()
@@ -309,3 +293,37 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	}
 	return &Recipe{graph: compiled}, nil
 }
+
+func addRoutingEdges(g *graph.Graph[[]schema.Message, []schema.Message], from string, agents []RoutedAgent) error {
+	for _, candidate := range agents {
+		name := candidate.Name
+		if err := g.AddBranch(from, routedAgentNodeID(name), "route:"+name, func(_ context.Context, state *RecipeState) (bool, error) {
+			return len(state.Pending) > 0 && state.Pending[0].Name == name, nil
+		}); err != nil {
+			return err
+		}
+	}
+	if err := g.AddBranch(from, "unroutable", "unregistered", func(_ context.Context, state *RecipeState) (bool, error) {
+		return len(state.Pending) > 0, nil
+	}); err != nil {
+		return err
+	}
+	if from != "decide" {
+		if err := g.AddBranch(from, "decide", "continue", func(_ context.Context, state *RecipeState) (bool, error) {
+			return state.ContinueRun, nil
+		}); err != nil {
+			return err
+		}
+	}
+	return g.AddEdge(from, "finish")
+}
+
+func emitRoutingSnapshot(ctx context.Context, hooks RoutingHooks, response []schema.Message) {
+	emitted := schema.CloneMessages(response)
+	if hooks.NameMessages != nil {
+		emitted = hooks.NameMessages(emitted)
+	}
+	callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
+}
+
+func routedAgentNodeID(name string) string { return "agent:" + name }

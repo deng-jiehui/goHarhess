@@ -104,9 +104,9 @@ func runOptionsAsRunnable(options []RunOption) []runnable.Option {
 	return converted
 }
 
-type agentStreamFunc func(context.Context, []schema.Message, ...RunOption) (runnable.Stream[schema.MessageEvent], error)
+type agentStreamFunc func(context.Context, []schema.Message, ...RunOption) (*runnable.StreamReader[[]schema.Message], error)
 
-func streamAgent(ctx context.Context, stream agentStreamFunc, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func streamAgent(ctx context.Context, stream agentStreamFunc, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	resolved, err := runOptionsFromRunnable(ctx, options)
 	if err != nil {
 		return nil, err
@@ -115,43 +115,75 @@ func streamAgent(ctx context.Context, stream agentStreamFunc, messages []schema.
 }
 
 func invokeAgent(ctx context.Context, stream agentStreamFunc, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
-	events, err := streamAgent(ctx, stream, messages, options...)
+	reader, err := streamAgent(ctx, stream, messages, options...)
 	if err != nil {
 		return nil, err
 	}
-	return reduceMessageEvents(ctx, events)
+	return reader.Collect(reader.Context())
 }
 
 func (a *BasicAgent) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	return invokeAgent(ctx, a.stream, messages, options...)
 }
 
-func (a *BasicAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (a *BasicAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	return streamAgent(ctx, a.stream, messages, options...)
+}
+
+func (a *BasicAgent) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
+}
+
+func (a *BasicAgent) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
 }
 
 func (a *ReactAgent) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	return invokeAgent(ctx, a.stream, messages, options...)
 }
 
-func (a *ReactAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (a *ReactAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	return streamAgent(ctx, a.stream, messages, options...)
+}
+
+func (a *ReactAgent) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
+}
+
+func (a *ReactAgent) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
 }
 
 func (a *RoutingAgent) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	return invokeAgent(ctx, a.stream, messages, options...)
 }
 
-func (a *RoutingAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (a *RoutingAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	return streamAgent(ctx, a.stream, messages, options...)
+}
+
+func (a *RoutingAgent) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
+}
+
+func (a *RoutingAgent) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
 }
 
 func (a *GroupChat) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	return invokeAgent(ctx, a.stream, messages, options...)
 }
 
-func (a *GroupChat) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (a *GroupChat) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	return streamAgent(ctx, a.stream, messages, options...)
+}
+
+func (a *GroupChat) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
+}
+
+func (a *GroupChat) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
 }
 
 var (

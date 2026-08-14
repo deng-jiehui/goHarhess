@@ -76,32 +76,15 @@ func (e *BudgetError) Error() string {
 	return fmt.Sprintf("context token budget exceeded: required %d, available %d (%s)", e.Required, e.Available, e.Reason)
 }
 
-type Assembler struct {
+// ContextBuilder is the standard provider-neutral context assembly Runnable.
+type ContextBuilder struct {
 	config Config
 }
 
-var _ runnable.Runnable[Request, Result] = (*Assembler)(nil)
+var _ runnable.Runnable[Request, Result] = (*ContextBuilder)(nil)
 
-// DefaultContextBuilder is the framework-provided context Runnable. It
-// normalizes role order, appends stable/history/input messages, aligns prompt
-// cache prefixes and enforces the configured token budget.
-type DefaultContextBuilder = Assembler
-
-// ContextBuilderFunc adapts a plain function into the standard context
-// Runnable node. Invocation options are available at the composition boundary
-// even when a custom function does not need them.
-type ContextBuilderFunc func(context.Context, Request) (Result, error)
-
-func (f ContextBuilderFunc) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Result, error) {
-	if f == nil {
-		return Result{}, errors.New("context builder function is nil")
-	}
-	return f(ctx, request)
-}
-
-var _ runnable.Runnable[Request, Result] = ContextBuilderFunc(nil)
-
-func New(config Config) (*Assembler, error) {
+// NewContextBuilder creates a context assembly Runnable with the supplied policy.
+func NewContextBuilder(config Config) (*ContextBuilder, error) {
 	if config.MaxContextTokens == 0 {
 		config.MaxContextTokens = DefaultMaxContextTokens
 	}
@@ -129,22 +112,10 @@ func New(config Config) (*Assembler, error) {
 	if config.PromptCache.MetadataKey == "" {
 		config.PromptCache.MetadataKey = PromptCacheMetadataKey
 	}
-	return &Assembler{config: config}, nil
+	return &ContextBuilder{config: config}, nil
 }
 
-func NewDefault() *Assembler {
-	assembler, _ := New(Config{})
-	return assembler
-}
-
-// NewDefaultContextBuilder creates the standard history-appending context
-// node. It is equivalent to NewDefault and makes the node role explicit in
-// application composition code.
-func NewDefaultContextBuilder() *DefaultContextBuilder {
-	return NewDefault()
-}
-
-func (a *Assembler) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Result, error) {
+func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Result, error) {
 	if a == nil {
 		return Result{}, errors.New("context assembler is not configured")
 	}
@@ -211,20 +182,19 @@ func (a *Assembler) Invoke(ctx context.Context, request Request, _ ...runnable.O
 		changed := false
 		for index := range normalized {
 			before := countMessage(normalized[index], a.config.Counter)
-			if normalized[index].ReasoningContent.IsZero() && normalized[index].Content.String() == "" {
+			if len(normalized[index].ContentBlocks) == 0 {
 				continue
 			}
 			excess := currentTokens - budget
-			if !normalized[index].ReasoningContent.IsZero() {
-				normalized[index].ReasoningContent = schema.TextContent("")
+			if removeReasoningBlock(&normalized[index]) {
 			} else {
 				target := before - excess
 				if target < 1 {
 					target = 1
 				}
-				fixed := before - a.config.Counter.Count(normalized[index].Content.String())
+				fixed := before - countTopLevelTextBlocks(normalized[index].ContentBlocks, a.config.Counter)
 				contentBudget := target - fixed
-				normalized[index].Content = truncateContent(normalized[index].Content, contentBudget, a.config.Counter, true)
+				normalized[index].ContentBlocks = truncateBlocks(normalized[index].ContentBlocks, contentBudget, a.config.Counter, true)
 			}
 			after := countMessage(normalized[index], a.config.Counter)
 			if after < before {
@@ -259,7 +229,17 @@ func (a *Assembler) Invoke(ctx context.Context, request Request, _ ...runnable.O
 	return Result{Messages: schema.CloneMessages(messages), Stats: stats}, nil
 }
 
-func (a *Assembler) normalizeRoles(messages []schema.Message) ([]schema.Message, int, error) {
+func (a *ContextBuilder) Stream(ctx context.Context, input Request, options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.StreamFromInvoke(ctx, input, a.Invoke, options...)
+}
+func (a *ContextBuilder) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Result, error) {
+	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
+}
+func (a *ContextBuilder) Transform(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
+}
+
+func (a *ContextBuilder) normalizeRoles(messages []schema.Message) ([]schema.Message, int, error) {
 	result := make([]schema.Message, 0, len(messages))
 	repairs := 0
 	seenUser := false
@@ -280,20 +260,34 @@ func (a *Assembler) normalizeRoles(messages []schema.Message) ([]schema.Message,
 				repairs++
 				continue
 			}
-			if message.FunctionCall != nil {
-				pendingFunctions[message.FunctionCall.Name]++
-			} else {
+			calls := message.FunctionToolCalls()
+			for _, call := range calls {
+				pendingFunctions[call.ID]++
+			}
+			if len(calls) == 0 {
 				pendingFunctions = map[string]int{}
 			}
-		case schema.RoleFunction:
-			if pendingFunctions[message.Name] == 0 {
+		case schema.RoleTool:
+			candidate := make(map[string]int, len(pendingFunctions))
+			for id, count := range pendingFunctions {
+				candidate[id] = count
+			}
+			valid := true
+			for _, result := range message.FunctionToolResults() {
+				if candidate[result.CallID] <= 0 {
+					valid = false
+					break
+				}
+				candidate[result.CallID]--
+			}
+			if !valid {
 				if a.config.RolePolicy == RolePolicyStrict {
-					return nil, repairs, fmt.Errorf("function message %d for %q has no preceding assistant call", index, message.Name)
+					return nil, repairs, fmt.Errorf("tool message %d has no preceding assistant call", index)
 				}
 				repairs++
 				continue
 			}
-			pendingFunctions[message.Name]--
+			pendingFunctions = candidate
 		default:
 			return nil, repairs, fmt.Errorf("context message %d has unsupported role %q", index, message.Role)
 		}
@@ -341,7 +335,7 @@ func flattenTurns(turns [][]schema.Message) []schema.Message {
 }
 
 func canMerge(left, right schema.Message) bool {
-	if left.Role != right.Role || left.Name != right.Name || left.FunctionCall != nil || right.FunctionCall != nil {
+	if left.Role != right.Role || len(left.FunctionToolCalls()) > 0 || len(right.FunctionToolCalls()) > 0 {
 		return false
 	}
 	return left.Role == schema.RoleUser || left.Role == schema.RoleAssistant
@@ -349,18 +343,52 @@ func canMerge(left, right schema.Message) bool {
 
 func mergeAdjacent(left, right schema.Message) schema.Message {
 	merged := cloneMessageExtra(left)
-	if !merged.Content.IsZero() && !right.Content.IsZero() {
-		merged.Content = merged.Content.Append(schema.TextContent("\n\n"))
-	}
-	merged.Content = merged.Content.Append(right.Content)
-	if !merged.ReasoningContent.IsZero() && !right.ReasoningContent.IsZero() {
-		merged.ReasoningContent = merged.ReasoningContent.Append(schema.TextContent("\n\n"))
-	}
-	merged.ReasoningContent = merged.ReasoningContent.Append(right.ReasoningContent)
+	merged.ContentBlocks = append(merged.ContentBlocks, schema.CloneMessages([]schema.Message{right})[0].ContentBlocks...)
 	for key, value := range right.Extra {
 		merged.Extra[key] = value
 	}
 	return merged
+}
+
+func removeReasoningBlock(message *schema.Message) bool {
+	for i, block := range message.ContentBlocks {
+		if block.Type == schema.ContentBlockTypeReasoning {
+			message.ContentBlocks = append(message.ContentBlocks[:i], message.ContentBlocks[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func countTopLevelTextBlocks(blocks []schema.ContentBlock, counter TokenCounter) int {
+	total := 0
+	for _, block := range blocks {
+		if block.Type == schema.ContentBlockTypeText && block.Text != nil {
+			total += counter.Count(block.Text.Text)
+		}
+	}
+	return total
+}
+
+func truncateBlocks(blocks []schema.ContentBlock, limit int, counter TokenCounter, keepEnd bool) []schema.ContentBlock {
+	cloned := schema.CloneMessages([]schema.Message{{ContentBlocks: blocks}})[0].ContentBlocks
+	budget := limit
+	indices := make([]int, len(cloned))
+	for i := range indices {
+		indices[i] = i
+	}
+	if keepEnd {
+		for i, j := 0, len(indices)-1; i < j; i, j = i+1, j-1 {
+			indices[i], indices[j] = indices[j], indices[i]
+		}
+	}
+	for _, i := range indices {
+		if cloned[i].Type == schema.ContentBlockTypeText && cloned[i].Text != nil {
+			cloned[i].Text.Text = truncateText(cloned[i].Text.Text, budget, counter, keepEnd)
+			budget -= counter.Count(cloned[i].Text.Text)
+		}
+	}
+	return cloned
 }
 
 func cloneMessageExtra(message schema.Message) schema.Message {

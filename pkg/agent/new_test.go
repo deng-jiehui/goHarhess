@@ -31,16 +31,14 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 			return nil, fmt.Errorf("model definitions = %#v", options.Functions)
 		}
 		if call == 1 {
-			message := schema.AssistantMessage("")
-			message.FunctionCall = &schema.FunctionCall{Name: "echo", Arguments: `{"text":"hello"}`}
-			message.Extra = map[string]any{"function_id": "echo-1"}
-			return []schema.Message{message}, nil
+			return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("echo-1", "echo", `{"text":"hello"}`))}, nil
 		}
 		if len(messages) < 3 {
 			return nil, fmt.Errorf("second turn messages = %#v", messages)
 		}
 		observation := messages[len(messages)-1]
-		if observation.Role != schema.RoleFunction || observation.FunctionID("") != "echo-1" || observation.Text() != "hello" {
+		results := observation.FunctionToolResults()
+		if observation.Role != schema.RoleTool || len(results) != 1 || results[0].CallID != "echo-1" || toolResultText(observation) != "hello" {
 			return nil, fmt.Errorf("tool observation = %#v", observation)
 		}
 		return []schema.Message{schema.AssistantMessage("done")}, nil
@@ -65,7 +63,7 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls.Load() != 2 || len(output) != 3 || output[len(output)-1].Text() != "done" {
+	if modelCalls.Load() != 2 || len(output) != 3 || output[len(output)-1].JoinedText("") != "done" {
 		t.Fatalf("calls=%d output=%#v", modelCalls.Load(), output)
 	}
 	mu.Lock()
@@ -89,7 +87,7 @@ func TestBasicAgentRejectsIgnoredTools(t *testing.T) {
 	value := tool.NewFunctionTool(tool.Spec{Name: "unused"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("unused"), nil
 	})
-	if _, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel(), Tools: []tool.BaseTool{value}}); err == nil {
+	if _, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel(), Tools: []tool.Tool{value}}); err == nil {
 		t.Fatal("NewBasicAgent accepted tools it cannot execute")
 	}
 }

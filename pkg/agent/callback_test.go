@@ -22,18 +22,26 @@ func (usageEventModel) Invoke(ctx context.Context, request llm.Request, options 
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, false)
+	return stream.Collect(ctx)
 }
-func (usageEventModel) Stream(context.Context, llm.Request, ...runnable.Option) (runnable.Stream[llm.Event], error) {
-	out := make(chan runnable.Item[llm.Event], 3)
-	out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: []schema.Message{schema.AssistantMessage("ok")}}}
-	out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventUsage, Usage: &llm.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5, ReasoningTokens: 1}}}
-	out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
-	close(out)
-	return out, nil
+func (usageEventModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	reader, writer := runnable.Pipe[llm.Response](ctx)
+	go func() {
+		response := llm.Response{Messages: []schema.Message{schema.AssistantMessage("ok")}, Usage: &llm.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5, ReasoningTokens: 1}}
+		callback.EmitStream(ctx, response.Clone())
+		_ = writer.Send(response)
+		_ = writer.Close()
+	}()
+	return reader, nil
 }
 func (usageEventModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
 func (usageEventModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "usage-events"} }
+func (m usageEventModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m usageEventModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
+}
 
 func TestAgentDispatchesTypedGraphLLMAndToolCallbacksFromContext(t *testing.T) {
 	var mu sync.Mutex

@@ -2,19 +2,18 @@
 
 ## One execution contract
 
-All executable components implement `runnable.Runnable[I, O]`. Optional
-streaming uses `runnable.Streamer[I, E]`; the stream event type is independent
-from the final output type.
+All executable components implement the complete `runnable.Runnable[I, O]`
+contract: `Invoke`, `Stream`, `Collect`, and `Transform`.
 
-- Models: `Runnable[llm.Request, llm.Response]` and
-  `Streamer[llm.Request, llm.Event]`.
+- Models: `Runnable[llm.Request, llm.Response]`.
 - ToolsNode: `Runnable[[]schema.Message, []schema.Message]`.
 - Agents and message graphs: `Runnable[[]schema.Message, []schema.Message]`.
-- General graphs: `graph.Graph[I, O]`.
+- General graphs compile to `Runnable[I, O]`.
 
-`graph.StreamMessages` exposes the message data plane. Graph lifecycle events
-never enter that stream; they are published to `graph.EventSink`, and
-`callback.BindGraph` translates them into callback events.
+`Stream` returns `*runnable.StreamReader[O]`; a compiled Graph exposes only its
+complete END result. Live model chunks, tool progress, and Agent snapshots use
+typed Context EventStream callbacks. Graph lifecycle events use the typed Graph
+Callback interface and never enter the business data Reader.
 
 ## Graph boundary and pure nodes
 
@@ -30,10 +29,12 @@ g := graph.NewGraph[Request, Response]("research")
 Invoke(context.Context, NI, ...runnable.Option) (NO, error)
 ```
 
-ChatModel, ToolsNode, MCP, Retriever and child Agent nodes remain ordinary
-Runnables. They never import or inspect Graph State. `AddNode` records their
-input/output `reflect.Type` once; `Compile` validates every edge and END output
-before execution.
+ChatModelNode, ToolsNode, MCP, Retriever and child Agent nodes remain ordinary
+Runnables. They never import or inspect Graph State. Wrap a provider model with
+`llm.NewChatModelNode` before mounting it so model lifecycle callbacks and the
+`chat_model` node kind are attached at the component boundary. `AddNode` records
+the component kind and input/output `reflect.Type` once; `Compile` validates
+every edge and END output before execution.
 
 ```go
 _ = g.AddNode("collect", collector)
@@ -134,7 +135,7 @@ and skips the merge.
 
 ## Durable cursors
 
-Every executing node pushes a JSON-clean `state.CursorFrame`. Interrupted
+Every executing node pushes a JSON-clean `graph.CursorFrame`. Interrupted
 checkpoints persist the complete `CursorStack`; resume consumes the matching
 top frame without rebuilding a Go call stack. Runtime objects such as contexts,
 goroutines, clients and tool batches are never stored.
@@ -181,14 +182,23 @@ is consumed by Graph rather than forwarded to pure nodes.
 
 `pkg/agent` is a fast assembly layer over the same Graph engine:
 
-- Basic: one model node.
-- ReAct: `llm -> tools -> llm`, bounded by model-call and Graph step limits.
-- Routing: `decide -> dispatch -> decide` in Supervisor mode, or one dispatch
-  in Router mode.
-- GroupChat: one fixed dispatch node with a bounded self-edge.
+- Basic: one `chat_model` node.
+- ReAct: `chat_model -> tools -> chat_model`, bounded by model-call and Graph
+  step limits.
+- Routing: `decide(chat_model) -> agent:<name> -> decide` in Supervisor mode;
+  Router mode executes one selected Agent node and finishes.
+- GroupChat: `select -> agent:<name> -> select`, bounded by round count.
+
+`agent.AgentNode` is the public child-node adapter. It returns a typed
+`runnable.Outcome` so Supervisor mode can turn a child failure into an
+observation while Router and GroupChat can propagate the same failure. Child
+execution is still a real Graph node, so snapshots, callbacks and Continuation
+resume points expose the selected Agent name instead of an opaque dispatch step.
 
 Nested Agents and Graphs create independent lifecycle scopes. Graph nodes have
 their own child spans, so APM systems retain node-level waterfall timing.
+`graph.NodeExecution` carries the compiled node kind and input/output types in
+addition to node ID and step.
 
 ## Compilation
 

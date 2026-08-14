@@ -7,14 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
-
-// Config contains factory-specific tool configuration.
-type Config map[string]any
 
 // Spec describes a tool to models, authorization policies and the scheduler.
 type Spec struct {
@@ -74,10 +70,10 @@ type CallInput struct {
 	Metadata   map[string]any
 }
 
-// Result contains either model-facing Content or structured Data.
+// Result contains either model-facing content blocks or structured Data.
 type Result struct {
-	Content schema.Content
-	Data    any
+	ContentBlocks []schema.ContentBlock
+	Data          any
 	// IsError preserves a protocol-level tool result that is intentionally
 	// visible to the next model turn. It is distinct from an execution error.
 	IsError bool
@@ -85,49 +81,72 @@ type Result struct {
 
 // TextResult creates a text tool result.
 func TextResult(text string) Result {
-	return Result{Content: schema.TextContent(text)}
+	return BlockResult(schema.NewTextBlock(text))
 }
 
-// DataResult creates a structured tool result serialized by ToContent.
+// BlockResult creates a tool result from ordered content blocks.
+func BlockResult(blocks ...schema.ContentBlock) Result {
+	return Result{ContentBlocks: cloneResultBlocks(blocks)}
+}
+
+// DataResult creates a structured tool result serialized by ToContentBlocks.
 func DataResult(data any) Result {
 	return Result{Data: data}
 }
 
 // ErrorResult creates a model-visible tool error without converting it into a
 // transport/runtime failure. This matches MCP's isError result semantics.
-func ErrorResult(content schema.Content) Result {
-	return Result{Content: content, IsError: true}
+func ErrorResult(blocks ...schema.ContentBlock) Result {
+	result := BlockResult(blocks...)
+	result.IsError = true
+	return result
 }
 
-// ToContent converts structured result data to model-facing content.
-func (r Result) ToContent() (schema.Content, error) {
-	if !r.Content.IsZero() {
-		return r.Content, nil
+// ToContentBlocks converts structured result data to model-facing blocks.
+func (r Result) ToContentBlocks() ([]schema.ContentBlock, error) {
+	if r.ContentBlocks != nil {
+		return cloneResultBlocksStrict(r.ContentBlocks)
 	}
 	if r.Data == nil {
-		return schema.TextContent(""), nil
+		return []schema.ContentBlock{schema.NewTextBlock("")}, nil
 	}
 	if text, ok := r.Data.(string); ok {
-		return schema.TextContent(text), nil
+		return []schema.ContentBlock{schema.NewTextBlock(text)}, nil
 	}
 	data, err := json.MarshalIndent(r.Data, "", "  ")
 	if err != nil {
-		return schema.TextContent(""), fmt.Errorf("marshal tool result: %w", err)
+		return nil, fmt.Errorf("marshal tool result: %w", err)
 	}
-	return schema.TextContent(string(data)), nil
+	return []schema.ContentBlock{schema.NewTextBlock(string(data))}, nil
 }
 
-// BaseTool combines model-facing metadata with the canonical execution
+func cloneResultBlocks(blocks []schema.ContentBlock) []schema.ContentBlock {
+	if blocks == nil {
+		return nil
+	}
+	message := schema.NewMessage(schema.RoleTool, blocks...)
+	return schema.CloneMessages([]schema.Message{message})[0].ContentBlocks
+}
+
+func cloneResultBlocksStrict(blocks []schema.ContentBlock) ([]schema.ContentBlock, error) {
+	if blocks == nil {
+		return nil, nil
+	}
+	message := schema.NewMessage(schema.RoleTool, blocks...)
+	cloned, err := schema.CloneMessagesStrict([]schema.Message{message})
+	if err != nil {
+		return nil, fmt.Errorf("clone tool result blocks: %w", err)
+	}
+	return cloned[0].ContentBlocks, nil
+}
+
+// Tool combines model-facing metadata with the canonical execution
 // contract. Providers, MCP adapters and application tools all implement this
 // small interface and can be placed in a ToolsNode.
-type BaseTool interface {
+type Tool interface {
 	Spec() Spec
 	runnable.Runnable[CallInput, Result]
 }
-
-// Tool is the default framework tool name. It is an alias so extensions can
-// expose BaseTool without introducing a second incompatible tool hierarchy.
-type Tool = BaseTool
 
 // Handler implements a FunctionTool invocation.
 type Handler func(ctx context.Context, input CallInput) (Result, error)
@@ -158,75 +177,17 @@ func (t *FunctionTool) Invoke(ctx context.Context, input CallInput, _ ...runnabl
 	return t.handler(ctx, input)
 }
 
+func (t *FunctionTool) Stream(ctx context.Context, input CallInput, options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.StreamFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *FunctionTool) Collect(ctx context.Context, input *runnable.StreamReader[CallInput], options ...runnable.Option) (Result, error) {
+	return runnable.CollectFromInvoke(ctx, input, t.Invoke, options...)
+}
+func (t *FunctionTool) Transform(ctx context.Context, input *runnable.StreamReader[CallInput], options ...runnable.Option) (*runnable.StreamReader[Result], error) {
+	return runnable.TransformFromInvoke(ctx, input, t.Invoke, options...)
+}
+
 var _ Tool = (*FunctionTool)(nil)
-
-// Factory constructs a tool from registry configuration.
-type Factory func(Config) (Tool, error)
-
-var registry = struct {
-	sync.RWMutex
-	factories map[string]Factory
-}{
-	factories: map[string]Factory{},
-}
-
-// Register adds a tool factory to the process registry.
-func Register(name string, factory Factory, allowOverwrite bool) error {
-	if name == "" {
-		return errors.New("tool name cannot be empty")
-	}
-	if factory == nil {
-		return errors.New("tool factory cannot be nil")
-	}
-
-	registry.Lock()
-	defer registry.Unlock()
-	if _, exists := registry.factories[name]; exists && !allowOverwrite {
-		return fmt.Errorf("tool %q is already registered", name)
-	}
-	registry.factories[name] = factory
-	return nil
-}
-
-// MustRegister is Register with panic-on-error semantics for package initialization.
-func MustRegister(name string, factory Factory, allowOverwrite bool) {
-	if err := Register(name, factory, allowOverwrite); err != nil {
-		panic(err)
-	}
-}
-
-// New constructs and validates a registered tool.
-func New(name string, cfg Config) (Tool, error) {
-	registry.RLock()
-	factory := registry.factories[name]
-	registry.RUnlock()
-	if factory == nil {
-		return nil, fmt.Errorf("tool %q is not registered", name)
-	}
-	value, err := factory(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create tool %q: %w", name, err)
-	}
-	if value == nil {
-		return nil, fmt.Errorf("tool %q factory returned nil", name)
-	}
-	if err := value.Spec().Validate(); err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
-// RegisteredNames returns all currently registered tool factory names.
-func RegisteredNames() []string {
-	registry.RLock()
-	defer registry.RUnlock()
-
-	names := make([]string, 0, len(registry.factories))
-	for name := range registry.factories {
-		names = append(names, name)
-	}
-	return names
-}
 
 // ParseArgs decodes a JSON object and returns an empty map for invalid input.
 // Use this only for tolerant stream assembly; finalized calls should validate JSON first.

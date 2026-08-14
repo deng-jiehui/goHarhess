@@ -2,6 +2,7 @@ package mcp_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,43 @@ import (
 	"goharness/pkg/schema"
 	"goharness/pkg/tool"
 )
+
+func TestMCPResultPreservesContentThenStructuredPayload(t *testing.T) {
+	serverValue := server.NewMCPServer("mixed-server", "1.0.0", server.WithToolCapabilities(true))
+	serverValue.AddTool(sdkmcp.NewTool("mixed"), func(context.Context, sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		result := sdkmcp.NewToolResultText("first")
+		result.StructuredContent = map[string]any{"page": 3, "source": "citation"}
+		return result, nil
+	})
+	sdk, err := sdkclient.NewInProcessClient(serverValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := mcpext.NewClient(mcpext.Config{SDKClient: sdk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	tools, err := client.Tools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tools[0].Invoke(context.Background(), tool.CallInput{Args: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || len(result.ContentBlocks) != 2 || result.ContentBlocks[0].Text == nil || result.ContentBlocks[0].Text.Text != "first" {
+		t.Fatalf("result = %#v", result)
+	}
+	structured := result.ContentBlocks[1]
+	if structured.Type != schema.ContentBlockTypeOpaque || structured.Opaque == nil || structured.Opaque.Kind != "mcp.structured" {
+		t.Fatalf("structured block = %#v", structured)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(structured.Opaque.Raw, &payload); err != nil || payload["page"] != float64(3) || payload["source"] != "citation" {
+		t.Fatalf("structured payload = %s, err=%v", structured.Opaque.Raw, err)
+	}
+}
 
 func TestMCPAdapterExtractsSchemaAndRunsThroughToolsNode(t *testing.T) {
 	serverValue := server.NewMCPServer(
@@ -50,10 +88,11 @@ func TestMCPAdapterExtractsSchemaAndRunsThroughToolsNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 1 || output[0].Text() != "echo:x" || output[0].FunctionID("") != "call-1" {
+	results := output[0].FunctionToolResults()
+	if len(output) != 1 || len(results) != 1 || results[0].CallID != "call-1" || len(results[0].ContentBlocks) != 1 || results[0].ContentBlocks[0].Text.Text != "echo:x" {
 		t.Fatalf("output = %#v", output)
 	}
-	if output[0].Role != schema.RoleFunction || output[0].Extra["tool_error"] != false {
+	if output[0].Role != schema.RoleTool || results[0].IsError {
 		t.Fatalf("tool message = %#v", output[0])
 	}
 
@@ -92,7 +131,8 @@ func TestMCPToolErrorRemainsModelVisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 1 || output[0].Extra["tool_error"] != true || output[0].Text() != "business failure" {
+	results := output[0].FunctionToolResults()
+	if len(output) != 1 || len(results) != 1 || !results[0].IsError || results[0].ContentBlocks[0].Text.Text != "business failure" {
 		t.Fatalf("error output = %#v", output)
 	}
 }
@@ -128,10 +168,12 @@ func TestMCPToolsRunInReactAgentAppendOnlyLoop(t *testing.T) {
 		}
 		call := messages[len(messages)-2]
 		observation := messages[len(messages)-1]
-		if call.Role != schema.RoleAssistant || call.FunctionID("") != "lookup-1" {
+		calls := call.FunctionToolCalls()
+		if call.Role != schema.RoleAssistant || len(calls) != 1 {
 			return nil, fmt.Errorf("tool call message = %#v", call)
 		}
-		if observation.Role != schema.RoleFunction || observation.FunctionID("") != "lookup-1" || observation.Text() != "value:alpha" {
+		results := observation.FunctionToolResults()
+		if observation.Role != schema.RoleTool || len(results) != 1 || results[0].CallID != "lookup-1" || results[0].ContentBlocks[0].Text.Text != "value:alpha" {
 			return nil, fmt.Errorf("tool result message = %#v", observation)
 		}
 		return []schema.Message{schema.AssistantMessage("final:value:alpha")}, nil
@@ -144,14 +186,11 @@ func TestMCPToolsRunInReactAgentAppendOnlyLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 2 || len(output) != 3 || output[2].Text() != "final:value:alpha" {
+	if calls.Load() != 2 || len(output) != 3 || output[2].JoinedText("") != "final:value:alpha" {
 		t.Fatalf("calls=%d output=%#v", calls.Load(), output)
 	}
 }
 
 func mcpCall(name, arguments, id string) schema.Message {
-	message := schema.AssistantMessage("")
-	message.FunctionCall = &schema.FunctionCall{Name: name, Arguments: arguments}
-	message.Extra = map[string]any{"function_id": id}
-	return message
+	return schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(id, name, arguments))
 }

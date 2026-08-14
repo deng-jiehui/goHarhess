@@ -34,15 +34,7 @@ func main() {
 	})
 
 	model := llm.NewScriptedModel(
-		[]schema.Message{{
-			Role:    schema.RoleAssistant,
-			Content: schema.TextContent(""),
-			FunctionCall: &schema.FunctionCall{
-				Name:      "echo",
-				Arguments: `{"text":"hello from tool"}`,
-			},
-			Extra: map[string]any{"function_id": "1"},
-		}},
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("1", "echo", `{"text":"hello from tool"}`))},
 		[]schema.Message{schema.AssistantMessage("tool call finished")},
 	)
 	approved := false

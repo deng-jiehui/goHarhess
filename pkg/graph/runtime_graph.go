@@ -227,7 +227,7 @@ func (g *Graph[I, O]) AddNode(name string, node any, options ...NodeOption) erro
 	if component != nil {
 		entry.compile = component.compileGraph
 		entry.nestedGraph = true
-		entry.info.Kind = "graph"
+		entry.info.Kind = runnable.NodeKindGraph
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -634,10 +634,13 @@ func bindRuntimeNode(name string, node any) (func(context.Context, any, []runnab
 		return nil, nil, nil, NodeInfo{}, nil, validationError("node.invoke.signature", fmt.Sprintf("nodes[%q]", name), "Invoke must have signature func(context.Context, Input, ...runnable.Option) (Output, error)")
 	}
 	inputType, outputType := typeOfMethod.In(1), typeOfMethod.Out(0)
-	info := NodeInfo{ID: name, Kind: "runnable", Label: name, InputType: typeName(inputType), OutputType: typeName(outputType)}
+	info := NodeInfo{ID: name, Kind: runnable.NodeKindRunnable, Label: name, InputType: typeName(inputType), OutputType: typeName(outputType)}
 	if named, ok := node.(runnable.Named); ok {
 		info.Label = named.Name()
 		info.Description = named.Description()
+	}
+	if described, ok := node.(runnable.NodeDescriptor); ok && described.NodeKind() != "" {
+		info.Kind = described.NodeKind()
 	}
 	invoker := func(ctx context.Context, input any, options []runnable.Option) (output any, err error) {
 		defer func() {

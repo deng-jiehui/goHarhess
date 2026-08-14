@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"goharness/pkg/callback"
 	"goharness/pkg/graph"
@@ -22,18 +24,13 @@ type Call struct {
 }
 
 type ToolResult struct {
-	Call    Call
-	Content schema.Content
-	Err     error
-}
-
-type ToolBatch interface {
-	Resolve([]Call, []schema.Message) ([]ToolResult, error)
+	Call          Call
+	ContentBlocks []schema.ContentBlock
+	Err           error
 }
 
 type RunConfig struct {
 	MaxLLMCalls int
-	DeltaStream bool
 	Input       []schema.Message
 	LLMCalls    int
 	Response    []schema.Message
@@ -53,6 +50,7 @@ type RecipeState struct {
 	ContinueRun   bool             `json:"continue_run,omitempty"`
 	Round         int              `json:"round,omitempty"`
 	LastAgent     string           `json:"last_agent,omitempty"`
+	SelectedAgent string           `json:"selected_agent,omitempty"`
 }
 
 func newRecipeGraph(name string) (*graph.Graph[[]schema.Message, []schema.Message], error) {
@@ -87,7 +85,6 @@ func newRecipeGraph(name string) (*graph.Graph[[]schema.Message, []schema.Messag
 
 type toolRunState struct {
 	maxLLMCalls int
-	deltaStream bool
 	llmCalls    int
 	response    []schema.Message
 	calls       []Call
@@ -96,9 +93,9 @@ type toolRunState struct {
 }
 
 type Hooks struct {
-	Name              string
-	CallModel         func(context.Context, []schema.Message) (runnable.Stream[llm.Event], error)
-	NewToolBatch      func(context.Context) ToolBatch
+	Model             runnable.Runnable[llm.Request, llm.Response]
+	Tools             runnable.Runnable[[]schema.Message, []schema.Message]
+	PrepareModel      func(context.Context, []schema.Message) (llm.Request, error)
 	DetectCalls       func([]schema.Message) []Call
 	RehydrateLLMCalls func([]schema.Message) int
 	Observation       func(ToolResult) schema.Message
@@ -113,7 +110,6 @@ func WithRunConfig(ctx context.Context, cfg RunConfig) context.Context {
 	}
 	return context.WithValue(ctx, runContextKey{}, &toolRunState{
 		maxLLMCalls: cfg.MaxLLMCalls,
-		deltaStream: cfg.DeltaStream,
 		llmCalls:    cfg.LLMCalls,
 		response:    schema.CloneMessages(cfg.Response),
 		input:       schema.CloneMessages(cfg.Input),
@@ -171,6 +167,7 @@ func seedRecipeState(ctx context.Context, state *RecipeState) {
 		state.Response = schema.CloneMessages(run.response)
 		state.Round = run.round
 		state.LastAgent = run.lastAgent
+		state.SelectedAgent = run.selectedAgent
 		state.ContinueRun = run.continueRun
 	}
 }
@@ -185,19 +182,6 @@ func hydrateToolRun(ctx context.Context, state *RecipeState) error {
 	run.llmCalls = state.LLMCalls
 	run.calls = cloneCalls(state.Calls)
 	run.hasCalls = state.HasCalls
-	return nil
-}
-
-func commitToolRun(ctx context.Context, state *RecipeState, output []schema.Message) error {
-	run, err := configFromContext(ctx)
-	if err != nil {
-		return err
-	}
-	state.Messages = schema.CloneMessages(output)
-	state.Response = schema.CloneMessages(run.response)
-	state.LLMCalls = run.llmCalls
-	state.Calls = cloneCalls(run.calls)
-	state.HasCalls = run.hasCalls
 	return nil
 }
 
@@ -223,86 +207,81 @@ type Recipe struct {
 	graph *graph.CompiledGraph[[]schema.Message, []schema.Message]
 }
 
+func (r *Recipe) Snapshot() graph.Snapshot {
+	if r == nil || r.graph == nil {
+		return graph.Snapshot{}
+	}
+	return r.graph.Snapshot()
+}
+
 func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
-	if hooks.CallModel == nil {
-		return nil, errors.New("agent recipe requires model hook")
+	if hooks.Model == nil {
+		return nil, errors.New("agent recipe requires a model node")
+	}
+	if hooks.PrepareModel == nil {
+		return nil, errors.New("agent recipe requires a model input handler")
+	}
+	if tools && hooks.Tools == nil {
+		return nil, errors.New("agent recipe requires a tools node")
 	}
 	g, err := newRecipeGraph(name)
 	if err != nil {
 		return nil, err
 	}
-	llmNode := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+	if err := g.AddNode("llm", hooks.Model,
+		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) (llm.Request, error) {
+			if err := hydrateToolRun(ctx, state); err != nil {
+				return llm.Request{}, err
+			}
+			cfg, err := configFromContext(ctx)
+			if err != nil {
+				return llm.Request{}, err
+			}
+			if cfg.llmCalls == 0 && len(cfg.response) > 0 && hooks.RehydrateLLMCalls != nil {
+				cfg.llmCalls = hooks.RehydrateLLMCalls(cfg.response)
+				state.LLMCalls = cfg.llmCalls
+			}
+			return hooks.PrepareModel(ctx, schema.CloneMessages(state.Messages))
+		}),
+		graph.WithPostHandler(func(ctx context.Context, state *RecipeState, response llm.Response) error {
+			cfg, err := configFromContext(ctx)
+			if err != nil {
+				return err
+			}
+			output := schema.CloneMessages(response.Messages)
+			cfg.llmCalls++
+			cfg.response = append(cfg.response, schema.CloneMessages(output)...)
+			updated := appendMessages(state.Messages, output)
+			calls := []Call{}
+			if hooks.DetectCalls != nil {
+				calls = hooks.DetectCalls(output)
+			}
+			cfg.calls = append([]Call(nil), calls...)
+			cfg.hasCalls = tools && len(calls) > 0 && cfg.llmCalls < cfg.maxLLMCalls
+			state.Messages = updated
+			state.Response = schema.CloneMessages(cfg.response)
+			state.LLMCalls = cfg.llmCalls
+			state.Calls = cloneCalls(cfg.calls)
+			state.HasCalls = cfg.hasCalls
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if err := g.AddBranch(graph.Start, "finish", "llm_limit", func(ctx context.Context, state *RecipeState) (bool, error) {
+		if err := hydrateToolRun(ctx, state); err != nil {
+			return false, err
+		}
 		cfg, err := configFromContext(ctx)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		if cfg.llmCalls == 0 && len(cfg.response) > 0 && hooks.RehydrateLLMCalls != nil {
 			cfg.llmCalls = hooks.RehydrateLLMCalls(cfg.response)
+			state.LLMCalls = cfg.llmCalls
 		}
-		if cfg.llmCalls >= cfg.maxLLMCalls {
-			cfg.hasCalls = false
-			return schema.CloneMessages(messages), nil
-		}
-		stream, err := hooks.CallModel(ctx, messages)
-		if err != nil {
-			return nil, err
-		}
-		if stream == nil {
-			return nil, errors.New("agent recipe model returned a nil stream")
-		}
-		accumulator := llm.NewDeltaAccumulator(cfg.deltaStream)
-		var output []schema.Message
-		sawDone := false
-		for item := range stream {
-			if item.Err != nil {
-				return nil, item.Err
-			}
-			if item.Value.Kind == llm.EventDone {
-				sawDone = true
-				break
-			}
-			if item.Value.Kind != llm.EventDelta || len(item.Value.Messages) == 0 {
-				continue
-			}
-			merged, err := accumulator.Apply(item.Value)
-			if err != nil {
-				return nil, err
-			}
-			output = merged
-			kind := schema.MessageEventSnapshot
-			messages := appendMessages(cfg.response, output)
-			if cfg.deltaStream {
-				kind = schema.MessageEventDelta
-				messages = schema.CloneMessages(item.Value.Messages)
-			}
-			if hooks.NameMessages != nil {
-				messages = hooks.NameMessages(messages)
-			}
-			callback.EmitStream(ctx, schema.MessageEvent{Kind: kind, Messages: messages})
-		}
-		if !sawDone {
-			return nil, errors.New("agent recipe model stream closed without done event")
-		}
-		cfg.llmCalls++
-		cfg.response = append(cfg.response, schema.CloneMessages(output)...)
-		updated := appendMessages(messages, output)
-		calls := []Call{}
-		if hooks.DetectCalls != nil {
-			calls = hooks.DetectCalls(output)
-		}
-		cfg.calls = append([]Call(nil), calls...)
-		cfg.hasCalls = tools && len(calls) > 0 && cfg.llmCalls < cfg.maxLLMCalls
-		return updated, nil
-	})
-	if err := g.AddNode("llm", llmNode,
-		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
-			if err := hydrateToolRun(ctx, state); err != nil {
-				return nil, err
-			}
-			return schema.CloneMessages(state.Messages), nil
-		}),
-		graph.WithPostHandler(commitToolRun),
-	); err != nil {
+		return cfg.llmCalls >= cfg.maxLLMCalls, nil
+	}); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge(graph.Start, "llm"); err != nil {
@@ -310,53 +289,57 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 	}
 
 	if tools {
-		toolNode := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
-			cfg, err := configFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-			calls := append([]Call(nil), cfg.calls...)
-			if len(calls) == 0 {
-				cfg.hasCalls = false
-				return schema.CloneMessages(messages), nil
-			}
-			var batch ToolBatch
-			if hooks.NewToolBatch != nil {
-				batch = hooks.NewToolBatch(ctx)
-			}
-			if batch == nil {
-				return nil, errors.New("agent recipe tool batch is unavailable")
-			}
-			results, err := batch.Resolve(calls, messages)
-			if err != nil {
-				return nil, err
-			}
-			observations := make([]schema.Message, 0, len(results))
-			for _, result := range results {
-				if hooks.Observation == nil {
-					return nil, errors.New("agent recipe observation hook is missing")
-				}
-				observations = append(observations, hooks.Observation(result))
-			}
-			updated := appendMessages(messages, observations)
-			cfg.response = append(cfg.response, schema.CloneMessages(observations)...)
-			cfg.hasCalls = false
-			cfg.calls = nil
-			emitted := cfg.response
-			if hooks.NameMessages != nil {
-				emitted = hooks.NameMessages(emitted)
-			}
-			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
-			return updated, nil
-		})
-		if err := g.AddNode("tools", toolNode,
+		if err := g.AddNode("tools", hooks.Tools,
 			graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
 				if err := hydrateToolRun(ctx, state); err != nil {
 					return nil, err
 				}
-				return schema.CloneMessages(state.Messages), nil
+				cfg, err := configFromContext(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return toolNodeInput(ctx, state.Messages, cfg.calls), nil
 			}),
-			graph.WithPostHandler(commitToolRun),
+			graph.WithPostHandler(func(ctx context.Context, state *RecipeState, results []schema.Message) error {
+				cfg, err := configFromContext(ctx)
+				if err != nil {
+					return err
+				}
+				calls := cloneCalls(cfg.calls)
+				if len(results) != len(calls) {
+					return fmt.Errorf("tools node returned %d results for %d calls", len(results), len(calls))
+				}
+				observations := make([]schema.Message, 0, len(results))
+				for index, message := range results {
+					if hooks.Observation == nil {
+						return errors.New("agent recipe observation hook is missing")
+					}
+					result := ToolResult{Call: calls[index]}
+					if typed := message.FunctionToolResults(); len(typed) == 1 {
+						result.ContentBlocks = append([]schema.ContentBlock(nil), typed[0].ContentBlocks...)
+						if typed[0].IsError {
+							result.Err = errors.New(joinTextBlocks(typed[0].ContentBlocks))
+						}
+					} else if failed, _ := message.Extra["tool_error"].(bool); failed {
+						result.Err = errors.New(message.JoinedText(""))
+					}
+					observations = append(observations, hooks.Observation(result))
+				}
+				updated := appendMessages(state.Messages, observations)
+				cfg.response = append(cfg.response, schema.CloneMessages(observations)...)
+				cfg.hasCalls = false
+				cfg.calls = nil
+				state.Messages = updated
+				state.Response = schema.CloneMessages(cfg.response)
+				state.Calls = nil
+				state.HasCalls = false
+				emitted := cfg.response
+				if hooks.NameMessages != nil {
+					emitted = hooks.NameMessages(emitted)
+				}
+				callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
+				return nil
+			}),
 		); err != nil {
 			return nil, err
 		}
@@ -410,6 +393,83 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 	return &Recipe{graph: compiled}, nil
 }
 
+func joinTextBlocks(blocks []schema.ContentBlock) string {
+	parts := make([]string, 0)
+	for _, block := range blocks {
+		if block.Type == schema.ContentBlockTypeText && block.Text != nil {
+			parts = append(parts, block.Text.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func toolNodeInput(ctx context.Context, messages []schema.Message, calls []Call) []schema.Message {
+	prepared := schema.CloneMessages(messages)
+	if len(calls) == 0 {
+		return prepared
+	}
+	separateTail := len(prepared) >= len(calls)
+	if separateTail {
+		start := len(prepared) - len(calls)
+		for index, call := range calls {
+			blocks := prepared[start+index].FunctionToolCalls()
+			if !call.Structured || len(blocks) != 1 || blocks[0].Name != call.Name {
+				separateTail = false
+				break
+			}
+		}
+	}
+	structuredTail := !separateTail && len(prepared) > 0
+	if structuredTail {
+		last := prepared[len(prepared)-1]
+		blocks := last.FunctionToolCalls()
+		structuredTail = len(blocks) == len(calls)
+		for index, call := range calls {
+			if !call.Structured || !structuredTail || blocks[index].Name != call.Name {
+				structuredTail = false
+				break
+			}
+		}
+	}
+	metadata := callback.MetadataFromContext(ctx)
+	if separateTail {
+		start := len(prepared) - len(calls)
+		for index, call := range calls {
+			prepared[start+index].Extra = callback.CloneMetadata(prepared[start+index].Extra)
+			for key, value := range metadata {
+				prepared[start+index].Extra[key] = value
+			}
+			prepared[start+index].Extra["function_id"] = call.FunctionID
+			prepared[start+index].Extra["tool_call_id"] = call.FunctionID
+		}
+		return prepared
+	}
+	if structuredTail {
+		last := prepared[len(prepared)-1]
+		prepared = prepared[:len(prepared)-1]
+		for _, call := range calls {
+			message := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(call.FunctionID, call.Name, call.Arguments))
+			message.Extra = callback.CloneMetadata(last.Extra)
+			for key, value := range metadata {
+				message.Extra[key] = value
+			}
+			message.Extra["function_id"] = call.FunctionID
+			message.Extra["tool_call_id"] = call.FunctionID
+			prepared = append(prepared, message)
+		}
+		return prepared
+	}
+	for _, call := range calls {
+		extra := callback.CloneMetadata(metadata)
+		extra["function_id"] = call.FunctionID
+		extra["tool_call_id"] = call.FunctionID
+		message := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(call.FunctionID, call.Name, call.Arguments))
+		message.Extra = extra
+		prepared = append(prepared, message)
+	}
+	return prepared
+}
+
 func (r *Recipe) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	if r == nil || r.graph == nil {
 		return nil, errors.New("agent recipe is not configured")
@@ -418,18 +478,12 @@ func (r *Recipe) Invoke(ctx context.Context, messages []schema.Message, options 
 	return r.graph.Invoke(ctx, messages, options...)
 }
 
-func (r *Recipe) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (r *Recipe) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	if r == nil || r.graph == nil {
 		return nil, errors.New("agent recipe is not configured")
 	}
 	ctx = withSession(ctx)
-	return streamMessageExecution(ctx, func(runCtx context.Context) ([]schema.Message, error) {
-		reader, err := r.graph.Stream(runCtx, messages, options...)
-		if err != nil {
-			return nil, err
-		}
-		return reader.Collect(reader.Context())
-	}), nil
+	return r.graph.Stream(ctx, messages, options...)
 }
 
 func (r *Recipe) Resume(ctx context.Context, options ...runnable.Option) ([]schema.Message, error) {
@@ -440,18 +494,12 @@ func (r *Recipe) Resume(ctx context.Context, options ...runnable.Option) ([]sche
 	return r.graph.Resume(ctx, options...)
 }
 
-func (r *Recipe) ResumeStream(ctx context.Context, options ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (r *Recipe) ResumeStream(ctx context.Context, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	if r == nil || r.graph == nil {
 		return nil, errors.New("agent recipe is not configured")
 	}
 	ctx = withSession(ctx)
-	return streamMessageExecution(ctx, func(runCtx context.Context) ([]schema.Message, error) {
-		reader, err := r.graph.ResumeStream(runCtx, options...)
-		if err != nil {
-			return nil, err
-		}
-		return reader.Collect(reader.Context())
-	}), nil
+	return r.graph.ResumeStream(ctx, options...)
 }
 
 func withSession(ctx context.Context) context.Context {

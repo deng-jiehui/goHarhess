@@ -23,7 +23,7 @@ func TestBeforeBatchInterruptsEveryToolBeforeExecution(t *testing.T) {
 	})
 	hookCalls := 0
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{
-		Tools: []tool.BaseTool{read, write},
+		Tools: []tool.Tool{read, write},
 		BeforeBatch: []tool.BeforeBatchHook{tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
 			hookCalls++
 			if len(batch.Calls) != 2 || batch.Calls[0].Spec.Name != "read" || batch.Calls[1].Spec.Name != "write" {
@@ -65,13 +65,13 @@ func TestBeforeBatchReceivesDefensiveSnapshotAndSubject(t *testing.T) {
 		batch.Subject.Roles[0] = "mutated"
 		return nil
 	})
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{value}, BeforeBatch: []tool.BeforeBatchHook{hook}})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{value}, BeforeBatch: []tool.BeforeBatchHook{hook}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := tool.WithSubject(context.Background(), tool.Subject{ID: "user-1", Roles: []tool.Role{"operator"}})
 	output, err := node.Invoke(ctx, []schema.Message{toolCallMessage("echo", `{"value":"original"}`, "call-1")})
-	if err != nil || len(output) != 1 || output[0].Text() != "ok" {
+	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
 	subject, ok := tool.SubjectFromContext(ctx)
@@ -96,7 +96,7 @@ func TestBeforeBatchIsolatesHooksFromEachOther(t *testing.T) {
 		return nil
 	})
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{
-		Tools:       []tool.BaseTool{value},
+		Tools:       []tool.Tool{value},
 		BeforeBatch: []tool.BeforeBatchHook{first, second},
 	})
 	if err != nil {
@@ -112,7 +112,7 @@ func TestBeforeBatchStopsAtFirstErrorAndRecoversPanic(t *testing.T) {
 		return tool.TextResult("unused"), nil
 	})
 	secondCalls := 0
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{value}, BeforeBatch: []tool.BeforeBatchHook{
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{value}, BeforeBatch: []tool.BeforeBatchHook{
 		tool.BeforeBatchFunc(func(context.Context, tool.Batch) error { panic("broken approval") }),
 		tool.BeforeBatchFunc(func(context.Context, tool.Batch) error { secondCalls++; return nil }),
 	}})

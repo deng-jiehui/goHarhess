@@ -27,13 +27,13 @@ type ReactAgentConfig struct {
 }
 
 type ReactAgent struct {
-	*Base
+	*base
 	prompt string
 	recipe *agentrecipe.Recipe
 }
 
 func NewReactAgent(cfg ReactAgentConfig, opts ...Option) (*ReactAgent, error) {
-	base, err := NewBase(cfg.BaseConfig, opts...)
+	base, err := newBase(cfg.BaseConfig, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func NewReactAgent(cfg ReactAgentConfig, opts ...Option) (*ReactAgent, error) {
 	if prompt == "" {
 		prompt = DefaultReactPrompt
 	}
-	a := &ReactAgent{Base: base, prompt: prompt}
+	a := &ReactAgent{base: base, prompt: prompt}
 	a.recipe, err = reactRecipe(base, a.prepareReactMessages)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func NewReactAgent(cfg ReactAgentConfig, opts ...Option) (*ReactAgent, error) {
 	return a, nil
 }
 
-func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (runnable.Stream[schema.MessageEvent], error) {
+func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
 	runOpts := resolveRunOptions(a.limits, opts...)
 	runOpts.agentKind = AgentKindReact
 	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
@@ -64,19 +64,21 @@ func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, opts
 	}
 	lifecycle.session = session
 	runOpts.session = session
+	runCtx = a.bindModelStream(runCtx)
+	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	stream, err := a.runReact(runCtx, prepared, conversationInput(session, messages), runOpts)
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err
 	}
-	return lifecycle.wrap(stream, runOpts.StreamBufferSize), nil
+	return lifecycle.wrap(stream)
 }
 
 func (a *ReactAgent) prepareReactMessages(messages []schema.Message) []schema.Message {
 	prepared := schema.CloneMessages(messages)
 	prompt := a.prompt + "\n\n" + a.toolPrompt()
 	if len(prepared) > 0 && prepared[0].Role == schema.RoleSystem {
-		prepared[0].Content = prepared[0].Content.AppendText("\n\n" + prompt)
+		prepared[0].ContentBlocks = append(prepared[0].ContentBlocks, schema.NewTextBlock("\n\n"+prompt))
 		return prepared
 	}
 	return append([]schema.Message{schema.SystemMessage(prompt)}, prepared...)
@@ -90,7 +92,7 @@ func (a *ReactAgent) toolPrompt() string {
 	var builder strings.Builder
 	builder.WriteString("Available tools:\n")
 	for _, name := range a.toolOrder {
-		definition := a.tools[name].Spec().Definition()
+		definition := a.tools[name]
 		parameters, err := json.Marshal(definition.Parameters)
 		if err != nil {
 			parameters = []byte("{}")
@@ -100,26 +102,22 @@ func (a *ReactAgent) toolPrompt() string {
 	return strings.TrimRight(builder.String(), "\n")
 }
 
-func (a *ReactAgent) runReact(ctx context.Context, messages, input []schema.Message, opts RunOptions) (runnable.Stream[schema.MessageEvent], error) {
-	if a.model == nil {
+func (a *ReactAgent) runReact(ctx context.Context, messages, input []schema.Message, opts RunOptions) (*runnable.StreamReader[[]schema.Message], error) {
+	if a.modelNode == nil {
 		return nil, ErrMissingModel
 	}
 	ctx = withResolvedRunOptions(ctx, opts)
 	ctx = withRecipeCompletion(ctx, opts.session)
 	ctx = agentrecipe.WithRunConfig(ctx, agentrecipe.RunConfig{
-		MaxLLMCalls: opts.MaxLLMCalls, DeltaStream: opts.DeltaStream, Input: input,
+		MaxLLMCalls: opts.MaxLLMCalls, Input: input,
 	})
-	var stream runnable.Stream[schema.MessageEvent]
+	var stream *runnable.StreamReader[[]schema.Message]
 	var err error
 	if opts.resume {
-		stream, err = a.recipe.ResumeStream(ctx, opts.GraphOptions...)
+		stream, err = a.recipe.ResumeStream(ctx, graphNodeOptions(opts)...)
 	} else {
-		stream, err = a.recipe.Stream(ctx, messages, opts.GraphOptions...)
+		stream, err = a.recipe.Stream(ctx, messages, graphNodeOptions(opts)...)
 	}
-	if err != nil {
-		return nil, err
-	}
-	stream, err = prefetchMessageEvents(ctx, stream)
 	if err != nil {
 		return nil, err
 	}
@@ -137,45 +135,28 @@ type ReactAction struct {
 func detectReactActions(messages []schema.Message) []ReactAction {
 	actions := make([]ReactAction, 0)
 	for _, message := range messages {
-		if message.FunctionCall != nil {
+		for _, call := range message.FunctionToolCalls() {
 			actions = append(actions, ReactAction{
-				Thought:    message.ReasoningContent.String(),
-				Name:       message.FunctionCall.Name,
-				Input:      message.FunctionCall.Arguments,
-				FunctionID: message.FunctionID(fmt.Sprint(len(actions) + 1)),
+				Thought:    message.JoinedText(""),
+				Name:       call.Name,
+				Input:      call.Arguments,
+				FunctionID: call.ID,
 				Structured: true,
 			})
-			continue
 		}
-		if action, ok := ParseReactAction(message.Text()); ok {
+		if action, ok := ParseReactAction(message.JoinedText("")); ok {
 			actions = append(actions, action)
 		}
 	}
 	return actions
 }
 
-func reactToolCalls(actions []ReactAction) []toolCallRequest {
-	calls := make([]toolCallRequest, len(actions))
-	for index, action := range actions {
-		calls[index] = toolCallRequest{
-			Name:       action.Name,
-			Arguments:  action.Input,
-			FunctionID: action.FunctionID,
-		}
-	}
-	return calls
-}
-
-func reactObservationMessage(action ReactAction, observation schema.Content) schema.Message {
+func reactObservationMessage(action ReactAction, observation string) schema.Message {
 	if action.Structured {
-		message := schema.FunctionMessage(action.Name, observation)
-		message.Extra = map[string]any{
-			"function_id":       action.FunctionID,
-			"agent_observation": true,
-		}
-		return message
+		return schema.NewMessage(schema.RoleTool,
+			schema.NewFunctionToolResultBlock(action.FunctionID, action.Name, false, schema.NewTextBlock(observation)))
 	}
-	message := schema.AssistantMessage("Observation: " + observation.String() + "\nThought: ")
+	message := schema.AssistantMessage("Observation: " + observation + "\nThought: ")
 	message.Extra = map[string]any{"agent_observation": true}
 	return message
 }

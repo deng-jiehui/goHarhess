@@ -1,29 +1,62 @@
-# 工具运行时、Middleware 与 Callback
+# Tool Runtime、Middleware 与 Callback
 
-goHarness 将可改变业务执行的扩展与只读观测能力分开：Middleware 负责授权、输入输出转换和降级；Callback 负责性能监控、日志、审计和计费，不影响业务结果。
+goHarness 将会改变业务结果的控制能力与只读观测能力分开：
 
-## 执行边界
+- `tool.Runtime` 负责 Middleware、超时、只读重试、递归深度、并发组、死锁检测、HTTP Client 和 panic 隔离。
+- `tool.BeforeBatchHook` 在整批 Tool Call 产生副作用前完成准入或挂起。
+- 各领域强类型 Callback 只观察生命周期，不改变主业务结果。
+- LLM Token、Tool 进度和 UI 数据通过 Context 中的 EventStream 发布。
 
-```text
-Agent run
-  -> agent.start
-  -> retriever.start / end / error
-  -> llm.start / chunk / end / error
-  -> Tool runtime
-       -> tool.start
-       -> Middleware 1..N
-       -> batch semaphore / concurrency group
-       -> Tool.Invoke / retry / panic guard
-       -> tool.end / error
-  -> agent.chunk
-  -> agent.end / error
+Agent 和 `tool.ToolsNode` 共用公开的 `tool.Runtime`，不存在 Agent 私有的第二套工具执行路径。
+
+## ToolsNode
+
+Messages retain the exact order of their `ContentBlocks`. `ToolsNode` reads
+assistant `FunctionToolCall` blocks and emits one `RoleTool` message containing
+ordered `FunctionToolResult` blocks; result blocks may themselves contain
+nested text or media blocks. Use the typed top-level accessors for filtered
+views, or traverse `ContentBlocks` directly when order matters. No implicit
+text flattening occurs. See the README's canonical Message and ContentBlocks
+section for complete call/result and accessor examples.
+
+`ToolsNode` 是完整的 `runnable.Runnable[[]schema.Message, []schema.Message]`。它只执行消息末尾连续的 assistant function calls，按原调用顺序返回 function-result 消息。
+
+```go
+node, err := tool.NewToolsNode(tool.ToolNodeConfig{
+    Name:           "tools",
+    Tools:          tools,
+    Middlewares:    []tool.Middleware{rbac, masking},
+    BeforeBatch:    []tool.BeforeBatchHook{approval},
+    MaxConcurrency: 4,
+    MaxDepth:       16,
+    Timeout:        30 * time.Second,
+    MaxRetries:     2,
+    RetryBackoff:   100 * time.Millisecond,
+})
 ```
 
-固定工具运行时位于 `internal/toolruntime`。外部应用不能替换其中的深度保护、worker 限制、超时、重试、并发组、死锁检查和 panic 恢复。
+`MaxConcurrency` 是持久的节点级上限，对并发的多次 `Invoke` 同样生效。每个 `tool.Spec.Concurrency` 还可以声明跨调用共享的并发组；未声明时使用保守的默认串行组。
+
+需要直接构建更底层的执行组件时，可使用公开 Runtime：
+
+```go
+runtime, err := tool.NewRuntime(middlewares, tool.RuntimeConfig{
+    MaxDepth:       16,
+    Timeout:        30 * time.Second,
+    MaxConcurrency: 8,
+    MaxRetries:     2,
+    RetryBackoff:   100 * time.Millisecond,
+})
+binding, err := runtime.Register(searchTool)
+scope := runtime.NewScope(4)
+result, err := scope.Execute(ctx, binding, input)
+```
+
+一个 `Scope` 可以跨多个调用复用；它拥有该批次或节点的并发上限。`Runtime` 拥有工具注册快照、Middleware 和并发组调度。
 
 ## Middleware
 
-Middleware 是同步业务控制层，可以拒绝调用、转换输入输出或调用 `next`：
+Middleware 在当前调用 Goroutine 中按注册顺序执行，可以拒绝调用或转换输入输出：
 
 ```go
 rbac := tool.MiddlewareFuncs{
@@ -46,13 +79,23 @@ rbac := tool.MiddlewareFuncs{
 }
 ```
 
-Middleware 不能绕过框架 semaphore、并发组和取消链。`tool.Deny` 返回的业务拒绝支持 `errors.Is(err, tool.ErrPermissionDenied)`。
+Runtime 的取消、超时、深度、并发组和死锁保护不能被 Middleware 吞掉。只有 `Spec.IsReadOnly` 为 `true` 的工具会自动重试，写操作默认只执行一次。
 
-## PreTool 整批挂起
+身份只通过 Context 传递：
 
-需要在任何副作用发生前审批整批 Tool Call 时，使用 `tool.BeforeBatchHook`。框架会先完成
-所有调用的名称解析和严格 JSON 参数解析，构造防御性快照，按注册顺序同步运行 Hook，
-全部通过后才创建 worker 或申请 semaphore：
+```go
+ctx := tool.WithSubject(ctx, tool.Subject{
+    ID:          "user-42",
+    TenantID:    "tenant-a",
+    Permissions: []tool.Permission{"tools:write"},
+})
+```
+
+不要把身份、API Key 或授权信息放入模型可见参数。
+
+## 整批挂起
+
+`BeforeBatchHook` 在完整 Tool Call 批次解析完成后、任何 worker 或 semaphore 启动前同步执行：
 
 ```go
 approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
@@ -66,179 +109,82 @@ approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) err
     }
     return nil
 })
-
-assistant, err := agent.New(agent.BaseConfig{Model: model, Tools: tools},
-    agent.WithBeforeToolBatch(approval),
-)
-
-toolsNode, err := tool.NewToolsNode(tool.ToolNodeConfig{
-    Tools:       tools,
-    BeforeBatch: []tool.BeforeBatchHook{approval},
-})
 ```
 
-`BatchCall` 包含复制后的 `Spec`、原始/解析参数、调用 ID 和 Metadata；`Batch.Subject` 来自
-运行 Context。Hook 不能改写真实调用，第一个 error 会停止后续 Hook。返回 typed interrupt
-时整批执行数为零，由外层 Graph 保存 Continuation；普通 error 直接令批次失败。Resume 会
-重新运行 Hook，应用应在 Context 或自己的审批存储中提供已批准凭证。
+返回 typed interrupt 时整批执行数为零，由外层 Graph 保存 Continuation。Resume 会重新运行 Hook，审批凭证由应用通过 Context 或自己的存储提供。
 
-这是控制平面切面，不替代 Middleware。PreTool 负责整批准入/挂起；Middleware 仍负责每次
-执行时的授权、转换、重试包装和审计。
+## 生命周期 Callback
 
-## Callback 生命周期
+生命周期 Handler 只通过 Context 注册。各领域定义自己的强类型接口：
 
-`pkg/callback` 声明以下稳定事件：
-
-| 组件 | 事件 |
+| 包 | 生命周期方法 |
 | --- | --- |
-| Agent | `agent.start`、`agent.chunk`、`agent.end`、`agent.error` |
-| LLM | `llm.start`、`llm.chunk`、`llm.end`、`llm.error` |
-| Retriever | `retriever.start`、`retriever.end`、`retriever.error` |
-| Tool | `tool.start`、`tool.end`、`tool.error` |
-| Graph | `graph.start`、`graph.node.start`、`graph.node.output`、`graph.node.end`、`graph.end`、`graph.error` |
-
-Graph 还会为每个节点发送 `graph.node.start`、`graph.node.output` 和
-`graph.node.end`。节点事件拥有独立的子 Span，父 Span 是当前 Graph Span，因而
-APM 可以直接绘制节点级耗时瀑布图。节点身份和阶段属于结构元数据，不放入指标：
-
-- `callback.MetadataGraphNodeID`：节点名称；
-- `callback.MetadataGraphStep`：步骤编号；
-- `callback.MetadataGraphNodePhase`：`callback.GraphNodePhaseStart`、
-  `callback.GraphNodePhaseOutput` 或 `callback.GraphNodePhaseEnd`。
-
-`Metrics` 只用于耗时、消息数、字节数和 token 等数值指标。`EventGraphNode` 保留为
-旧统一事件入口；新代码应使用阶段事件和对应的强类型常量。
-
-用户可以实现统一的同步 `callback.Handler`，也可以使用只声明所需钩子的 `callback.Funcs`：
+| `pkg/llm` | `OnChatModelStart/End/Error` |
+| `pkg/tool` | `OnToolStart/End/Error` |
+| `pkg/retrieval` | `OnRetrieverStart/End/Error` |
+| `extensions/mcp` | `OnMCPStart/End/Error` |
+| `pkg/graph` | `OnGraphStart/End/Error`、`OnNodeStart/Output/End` |
 
 ```go
-monitor := callback.Funcs{
-    CallbackName: "metrics-and-logs",
-    OnNodeStart: func(ctx context.Context, event callback.Event) error {
-        log.Printf("node started: %s", event.Metadata[callback.MetadataGraphNodeID])
-        return nil
+handlers := []callback.Handler{
+    graph.CallbackFuncs{
+        CallbackName: "graph-trace",
+        NodeEnd: func(ctx context.Context, result graph.NodeResult) error {
+            log.Printf("node=%s step=%d duration=%s", result.NodeID, result.Step, result.Duration)
+            return nil
+        },
     },
-    OnNodeEnd: func(ctx context.Context, event callback.Event) error {
-        log.Printf("node latency: %s", event.Duration)
-        return nil
+    llm.CallbackFuncs{
+        CallbackName: "llm-usage",
+        End: func(ctx context.Context, response llm.Response) error {
+            if response.Usage != nil {
+                log.Printf("tokens=%d", response.Usage.TotalTokens)
+            }
+            return nil
+        },
     },
-    OnLLMEnd: func(ctx context.Context, event callback.Event) error {
-        log.Printf(
-            "trace=%s model=%s latency=%s tokens=%d",
-            event.Trace.TraceID,
-            event.Name,
-            event.Duration,
-            event.Metrics.TotalTokens,
-        )
-        return nil
-    },
-    OnToolError: func(ctx context.Context, event callback.Event) error {
-        log.Printf("trace=%s tool=%s err=%s", event.Trace.TraceID, event.Name, event.ErrorText)
-        return nil
+    tool.CallbackFuncs{
+        CallbackName: "tool-audit",
+        Error: func(ctx context.Context, spec tool.Spec, input tool.CallInput, err error) error {
+            log.Printf("tool=%s err=%v", spec.Name, err)
+            return nil
+        },
     },
 }
 
-value, err := agent.New(agent.BaseConfig{
-    Name:           "document-agent",
-    Model:          model,
-    Tools:          tools,
-    Callbacks:      []callback.Handler{monitor},
-    CallbackConfig: callback.Config{FilterChunks: true},
-    CallbackErrorSinks: []callback.ErrorSink{
-        callback.ErrorSinkFunc(func(ctx context.Context, err callback.CallbackError) {
-            log.Printf("callback failure: %v", err)
-        }),
-    },
-})
+manager, err := callback.NewManager(
+    callback.Config{Timeout: 2 * time.Second},
+    handlers,
+    callback.ErrorSinkFunc(func(ctx context.Context, failure callback.CallbackError) {
+        log.Printf("callback failure: %v", failure)
+    }),
+)
+ctx = callback.WithManager(ctx, manager)
+output, err := assistant.Invoke(ctx, input)
 ```
 
-也可以使用 `agent.WithCallback` 配置 Agent，或用 `agent.WithRunCallback` 仅配置一次运行。
-每个 Handler 在当前事件分发 Goroutine 中按注册顺序执行；`Invoke` 返回时，已产生的
-生命周期回调也已经完成。需要计费、审计和关键日志无损递交时，应直接使用同步 Handler。
+Handler 同步直调、按注册顺序运行。Handler 的 error 或 panic 会被隔离并报告到 `ErrorSink`，不会替换 Agent、Graph、Model 或 Tool 的业务结果。`Config.Timeout` 是协作式 deadline，Handler 必须响应 `ctx.Done()`。
 
-## 上下文与元数据
+Graph 为每个节点创建独立子 Span。`graph.NodeExecution` 和 `graph.NodeResult` 直接携带 NodeID、Step、状态和耗时，不依赖通用 metadata 字符串。
 
-框架为一次 Agent 运行创建根 span，LLM、Retriever 和 Tool 创建子 span。每个事件都包含：
+## 实时 EventStream
 
-- `trace_id`：可与上游 HTTP/OpenTelemetry trace 对齐。
-- `run_id`：一次 Agent 运行的稳定标识。
-- `span_id` 与 `parent_span_id`：组件父子关系。
-- 事件序号、开始时间、耗时、状态和错误文本。
-- 消息数、字节数、chunk 数、工具数以及 token 使用量。
-- 模型 Provider、模型类型、能力声明、工具并发策略等结构化元数据。
-- 用户通过 context 或 `agent.WithMetadata` 注入的元数据。
+实时数据不进入生命周期 Callback：
 
 ```go
-ctx := callback.WithTraceID(context.Background(), upstreamTraceID)
-ctx = callback.WithMetadata(ctx, map[string]any{
-    "tenant":     "tenant-a",
-    "request_id": requestID,
-})
-
-messages, err := value.Invoke(
-    ctx,
-    input,
-    agent.WithMetadata("scenario", "customer-support"),
+ctx = callback.WithStreamCallbacks(ctx,
+    callback.StreamCallbackOf[llm.Response]("ui", func(
+        ctx context.Context,
+        partial llm.Response,
+    ) error {
+        return renderPartial(ctx, partial)
+    }),
 )
 ```
 
-原始 Context 的值和取消信号会传递到所有 Handler。若 Handler 需要在 HTTP 请求取消后
-继续持久化，应从原始业务 Context 派生独立的持久化 Context，并重新设置自己的 deadline：
+组件使用 `callback.EmitStream(ctx, value)` 同步发布强类型数据。Stream observer 的失败同样隔离并交给 Manager 的 `ErrorSink`；框架不提供异步队列、Flush 或无界 Goroutine 管理器。
 
-```go
-func persist(ctx context.Context, event callback.Event) error {
-    persistCtx, cancel := context.WithTimeout(
-        context.WithoutCancel(ctx), 5*time.Second,
-    )
-    defer cancel()
-    return writeAudit(persistCtx, event)
-}
-```
-
-不要对框架传入的带 Callback deadline 的 Context 直接调用 `WithoutCancel`，否则会同时
-剥离框架设置的 deadline。框架默认只提供计数和结构化元数据，不把 Prompt、API Key 或
-完整工具结果放入事件。
-
-## 同步执行与错误隔离
-
-Callback 调度具备以下约束：
-
-- `SyncDispatcher.Dispatch` 在当前 Goroutine 内执行，不创建队列、worker、背压或 Flush
-  生命周期；已接受的生命周期事件不会丢弃。
-- `Event.Sequence` 使用原子递增，在 Graph Fan-Out 的并发节点下保持唯一。Handler 实现
-  必须自行保证线程安全，因为同一个 Handler 可能被多个分支并发调用。
-- 每个 Handler 收到独立的 Event 深拷贝，Metadata、`Metrics.Custom` 以及嵌套 map/slice
-  不会被前一个 Handler 的修改污染。
-- `Config.Timeout` 是协作式超时。Handler 必须主动感知 `ctx.Done()`；忽略 Context 的
-  阻塞 I/O 仍可能卡住 Agent，框架不能强行终止同步调用。父 Context 自身取消或超时
-  保持原始错误语义，不会被包装为 Handler `TimeoutError`。
-- Handler 返回错误或 panic 时，`Dispatch` 返回聚合的 `callback.CallbackError`；Agent、
-  LLM、Tool 和 Graph 调用点不会用它替换业务结果，也不阻断后续 Handler。独立的同步
-  `ErrorSink.OnError` 负责把失败旁路到日志、告警或死信队列，ErrorSink 自身 panic 也会被隔离。
-- Graph 内部状态锁只保护状态变迁，调用 Handler 前会释放；节点事件严格透传发布时的
-  运行 Context，保留节点级 value、trace 和取消信号。
-- 高频 `agent.chunk` 和 `llm.chunk` 可通过 `callback.Config{FilterChunks: true}` 过滤。
-  流本身仍走独立 StreamReader，`agent.end`/`llm.end` 保留累计消息、字节和最终 token
-  指标。需要异步 Metrics 时，由应用自行包装 Handler 并负责 Goroutine、缓冲、重试和关闭：
-
-```go
-type asyncHandler struct{ next callback.Handler }
-
-func (h asyncHandler) Handle(ctx context.Context, event callback.Event) error {
-    snapshot := event.Clone()
-    go func() {
-        defer func() { _ = recover() }()
-        persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-        defer cancel()
-        _ = h.next.Handle(persistCtx, snapshot)
-    }()
-    return nil
-}
-```
-
-该包装不提供无损保证；计费和审计仍应使用同步 Handler。
-
-## Agent 组装
+## Agent 装配
 
 ```go
 reactAgent, err := agent.NewReactAgent(
@@ -246,9 +192,7 @@ reactAgent, err := agent.NewReactAgent(
     agent.WithName("document-agent"),
     agent.WithTools(tools...),
     agent.WithMiddlewares(rbac, masking, approval),
-    agent.WithCallbacks(monitor),
-    agent.WithCallbackErrorSink(alerts),
-    agent.WithCallbackConfig(callback.Config{FilterChunks: true}),
+    agent.WithBeforeToolBatch(preToolApproval),
     agent.WithMaxDepth(5),
     agent.WithTimeout(10*time.Second),
     agent.WithMaxConcurrency(4),
@@ -258,6 +202,4 @@ reactAgent, err := agent.NewReactAgent(
 )
 ```
 
-身份和取消仍从运行 Context 传播到 Middleware、并发等待和工具 Handler。Callback 是同步只读
-观测接口；需要拒绝请求或修改结果时应使用 Middleware。`agent.WithMaxConcurrency(4)`
-只限制工具批次并发，与 Callback Handler 执行模型无关。
+Callback Manager 不属于 Agent 配置；它只从运行 Context 解析。`WithMaxConcurrency` 限制工具批次并发，与 Callback 执行模型无关。

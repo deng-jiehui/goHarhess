@@ -26,14 +26,14 @@ func TestToolsNodeDispatchesLifecycleCallbacksWithoutChangingResult(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
-	if err != nil || len(output) != 1 || output[0].Text() != "ok" {
+	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
 	close(events)
@@ -46,21 +46,158 @@ func TestToolsNodeDispatchesLifecycleCallbacksWithoutChangingResult(t *testing.T
 	}
 }
 
+func TestToolsNodeHonorsPerInvocationConcurrency(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	makeTool := func(name string) tool.Tool {
+		return tool.NewFunctionTool(tool.Spec{Name: name}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+			started <- name
+			select {
+			case <-ctx.Done():
+				return tool.Result{}, ctx.Err()
+			case <-release:
+				return tool.TextResult(name), nil
+			}
+		})
+	}
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{makeTool("first"), makeTool("second")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []schema.Message{
+		toolCallMessage("first", `{}`, "call-1"),
+		toolCallMessage("second", `{}`, "call-2"),
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, invokeErr := node.Invoke(context.Background(), messages, tool.WithMaxConcurrency(1))
+		done <- invokeErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first tool did not start")
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("tool %q started before the per-invocation slot was released", name)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestToolsNodeBuildsCallInputFromRuntimeContext(t *testing.T) {
+	var received tool.CallInput
+	read := tool.NewFunctionTool(tool.Spec{Name: "read", FileAccess: true}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		received = input
+		return tool.TextResult("ok"), nil
+	})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{read}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
+	messages := []schema.Message{
+		schema.NewMessage(schema.RoleUser, schema.NewFileBlock("guide.pdf", "application/pdf")),
+		toolCallMessage("read", `{}`, "call-1"),
+	}
+	if _, err := node.Invoke(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+	if received.Metadata["tenant"] != "acme" {
+		t.Fatalf("metadata = %#v", received.Metadata)
+	}
+	if len(received.Files) != 1 || received.Files[0] != "guide.pdf" {
+		t.Fatalf("files = %#v", received.Files)
+	}
+}
+
+func TestToolsNodeCallExtraReachesMetadataWithoutLegacyCorrelationOverride(t *testing.T) {
+	var received tool.CallInput
+	echo := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		received = input
+		return tool.TextResult("ok"), nil
+	})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{echo}})
+	if err != nil { t.Fatal(err) }
+	call := schema.NewFunctionToolCallBlock("call-1", "echo", `{}`)
+	call.FunctionToolCall.Extra = map[string]any{"trace": "abc"}
+	message := schema.NewMessage(schema.RoleAssistant, call)
+	message.Extra = map[string]any{"function_id": "wrong-id", "name": "wrong-name", "legacy": true}
+	output, err := node.Invoke(context.Background(), []schema.Message{message})
+	if err != nil { t.Fatal(err) }
+	if received.Metadata["trace"] != "abc" { t.Fatalf("metadata = %#v", received.Metadata) }
+	results := output[0].FunctionToolResults()
+	if len(results) != 1 || results[0].CallID != "call-1" || results[0].Name != "echo" { t.Fatalf("results = %#v", results) }
+}
+
 func TestToolsNodeCallbackFailureDoesNotChangeBusinessResult(t *testing.T) {
 	observer := tool.CallbackFuncs{CallbackName: "broken", Start: func(context.Context, tool.Spec, tool.CallInput) error { return errors.New("audit failed") }}
 	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
-	if err != nil || len(output) != 1 || output[0].Text() != "ok" {
+	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" {
 		t.Fatalf("output=%#v err=%v", output, err)
+	}
+}
+
+func TestToolsNodeUsesPublicRuntimeMiddleware(t *testing.T) {
+	var middlewareCalls int
+	middleware := tool.MiddlewareFunc(func(ctx context.Context, spec tool.Spec, input tool.CallInput, next tool.Next) (tool.Result, error) {
+		middlewareCalls++
+		input.Args["observed"] = true
+		return next(ctx, input)
+	})
+	value := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		if input.Args["observed"] != true {
+			return tool.Result{}, errors.New("middleware did not run")
+		}
+		return tool.TextResult("ok"), nil
+	})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{
+		Tools:       []tool.Tool{value},
+		Middlewares: []tool.Middleware{middleware},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := node.Invoke(context.Background(), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
+	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" || middlewareCalls != 1 {
+		t.Fatalf("output=%#v middlewareCalls=%d err=%v", output, middlewareCalls, err)
+	}
+}
+
+func TestToolsNodeConfiguresReadOnlyRuntimeRetries(t *testing.T) {
+	var calls int
+	value := tool.NewFunctionTool(tool.Spec{Name: "read", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		calls++
+		if calls == 1 {
+			return tool.Result{}, errors.New("temporary failure")
+		}
+		return tool.TextResult("ok"), nil
+	})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{
+		Tools:        []tool.Tool{value},
+		MaxRetries:   1,
+		RetryBackoff: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := node.Invoke(context.Background(), []schema.Message{toolCallMessage("read", `{}`, "call-1")})
+	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" || calls != 2 {
+		t.Fatalf("output=%#v calls=%d err=%v", output, calls, err)
 	}
 }
 
@@ -80,7 +217,7 @@ func TestToolsNodeExecutesOnlyTrailingCallsAndPreservesOrder(t *testing.T) {
 		mu.Unlock()
 		return tool.TextResult("two:" + input.Args["value"].(string)), nil
 	})
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{first, second}, MaxConcurrency: 2})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{first, second}, MaxConcurrency: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,22 +231,55 @@ func TestToolsNodeExecutesOnlyTrailingCallsAndPreservesOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 2 || output[0].Text() != "one:a" || output[1].Text() != "two:b" {
+	if len(output) != 2 || toolResultText(output[0]) != "one:a" || toolResultText(output[1]) != "two:b" {
 		t.Fatalf("output = %#v", output)
 	}
-	if output[0].FunctionID("") != "id-1" || output[1].FunctionID("") != "id-2" {
-		t.Fatalf("function IDs = %q, %q", output[0].FunctionID(""), output[1].FunctionID(""))
+	firstResults, secondResults := output[0].FunctionToolResults(), output[1].FunctionToolResults()
+	if firstResults[0].CallID != "id-1" || secondResults[0].CallID != "id-2" {
+		t.Fatalf("function IDs = %q, %q", firstResults[0].CallID, secondResults[0].CallID)
 	}
 	if len(started) != 2 {
 		t.Fatalf("started = %#v", started)
 	}
 
-	noCall, err := node.Invoke(context.Background(), append(messages[:2], schema.FunctionMessage("first", schema.TextContent("already done"))))
+	noCall, err := node.Invoke(context.Background(), append(messages[:2], schema.NewMessage(schema.RoleTool,
+		schema.NewFunctionToolResultBlock("id-1", "first", false, schema.NewTextBlock("already done")),
+	)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(noCall) != 0 {
 		t.Fatalf("historical call was re-executed: %#v", noCall)
+	}
+}
+
+func TestToolsNodeExecutesMultipleBlocksFromOneMessage(t *testing.T) {
+	firstTool := tool.NewFunctionTool(tool.Spec{Name: "first"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		return tool.TextResult("one"), nil
+	})
+	secondTool := tool.NewFunctionTool(tool.Spec{Name: "second"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		return tool.TextResult("two"), nil
+	})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{firstTool, secondTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []schema.Message{schema.NewMessage(schema.RoleAssistant,
+		schema.NewTextBlock("run both"),
+		schema.NewFunctionToolCallBlock("call-1", "first", `{}`),
+		schema.NewFunctionToolCallBlock("call-2", "second", `{}`),
+	)}
+	output, err := node.Invoke(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 2 {
+		t.Fatalf("output=%d", len(output))
+	}
+	first := output[0].FunctionToolResults()
+	second := output[1].FunctionToolResults()
+	if len(first) != 1 || len(second) != 1 || first[0].CallID != "call-1" || second[0].CallID != "call-2" {
+		t.Fatalf("results=%#v %#v", first, second)
 	}
 }
 
@@ -125,7 +295,7 @@ func TestToolsNodeSerializesZeroPolicyAcrossInvocations(t *testing.T) {
 			return tool.TextResult("ok"), nil
 		}
 	})
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{value}, MaxConcurrency: 2})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{value}, MaxConcurrency: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +337,7 @@ func TestToolsNodeRejectsConflictingGroupLimits(t *testing.T) {
 	second := tool.NewFunctionTool(tool.Spec{Name: "second", Concurrency: tool.ConcurrencyPolicy{Group: "shared", MaxParallel: 2}}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("second"), nil
 	})
-	_, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{first, second}})
+	_, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{first, second}})
 	if err == nil || !strings.Contains(err.Error(), "already has max parallel") {
 		t.Fatalf("group limit error=%v", err)
 	}
@@ -176,7 +346,7 @@ func TestToolsNodeRejectsConflictingGroupLimits(t *testing.T) {
 func TestToolsNodeSharesMaxConcurrencyAcrossInvocations(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
-	makeTool := func(name string) tool.BaseTool {
+	makeTool := func(name string) tool.Tool {
 		return tool.NewFunctionTool(tool.Spec{Name: name, Concurrency: tool.ConcurrencyPolicy{Group: name, MaxParallel: 1}}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
 			started <- name
 			select {
@@ -187,7 +357,7 @@ func TestToolsNodeSharesMaxConcurrencyAcrossInvocations(t *testing.T) {
 			}
 		})
 	}
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{makeTool("first"), makeTool("second")}, MaxConcurrency: 1})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{makeTool("first"), makeTool("second")}, MaxConcurrency: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +401,7 @@ func TestToolsNodeSharesMaxConcurrencyAcrossInvocations(t *testing.T) {
 }
 
 func TestToolsNodeConvertsErrorsToAppendOnlyToolMessages(t *testing.T) {
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{
 		tool.NewFunctionTool(tool.Spec{Name: "ok"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 			return tool.TextResult("ok"), nil
 		}),
@@ -246,7 +416,7 @@ func TestToolsNodeConvertsErrorsToAppendOnlyToolMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 2 || output[0].Extra["tool_error"] != true || output[1].Extra["tool_error"] != true {
+	if len(output) != 2 || !toolResultIsError(output[0]) || !toolResultIsError(output[1]) {
 		t.Fatalf("error outputs = %#v", output)
 	}
 }
@@ -274,7 +444,7 @@ func TestToolsNodeDeepClonesMessagesForConcurrentCalls(t *testing.T) {
 		}
 		return tool.TextResult("second"), nil
 	})
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.BaseTool{first, second}, MaxConcurrency: 2})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{first, second}, MaxConcurrency: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +459,7 @@ func TestToolsNodeDeepClonesMessagesForConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 2 || output[0].Extra["tool_error"] != false || output[1].Extra["tool_error"] != false {
+	if len(output) != 2 || toolResultIsError(output[0]) || toolResultIsError(output[1]) {
 		t.Fatalf("tool output = %#v", output)
 	}
 	if messages[0].Extra["nested"].(map[string]any)["owner"] != "original" {
@@ -298,10 +468,20 @@ func TestToolsNodeDeepClonesMessagesForConcurrentCalls(t *testing.T) {
 }
 
 func toolCallMessage(name, args, id string) schema.Message {
-	message := schema.AssistantMessage("")
-	message.FunctionCall = &schema.FunctionCall{Name: name, Arguments: args}
-	message.Extra = map[string]any{"function_id": id}
-	return message
+	return schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(id, name, args))
+}
+
+func toolResultText(message schema.Message) string {
+	results := message.FunctionToolResults()
+	if len(results) != 1 || len(results[0].ContentBlocks) != 1 || results[0].ContentBlocks[0].Text == nil {
+		return ""
+	}
+	return results[0].ContentBlocks[0].Text.Text
+}
+
+func toolResultIsError(message schema.Message) bool {
+	results := message.FunctionToolResults()
+	return len(results) == 1 && results[0].IsError
 }
 
 var _ runnable.Runnable[[]schema.Message, []schema.Message] = (*tool.ToolsNode)(nil)

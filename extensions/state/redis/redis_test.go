@@ -2,6 +2,7 @@ package redisstore_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -23,14 +24,19 @@ func TestRedisStoreRoundTripCASAndTTL(t *testing.T) {
 	}
 	created, err := store.Save(context.Background(), state.Checkpoint{
 		ConversationID: "tenant/a conversation",
-		Messages:       []schema.Message{schema.UserMessage("hello")},
-		Values:         map[string]any{"tenant": "a"},
+		Messages: []schema.Message{func() schema.Message {
+			m := schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock("call-1", "lookup", false, schema.NewTextBlock("value"), schema.NewOpaqueBlock("provider.citation", json.RawMessage(`{"page":3}`))))
+			m.ResponseMeta = &schema.ResponseMeta{ID: "resp-1", Usage: &schema.TokenUsage{CacheReadTokens: 32}}
+			return m
+		}()},
+		Values: map[string]any{"tenant": "a"},
 	})
 	if err != nil || created.Version != 1 {
 		t.Fatalf("created = %#v, err=%v", created, err)
 	}
 	loaded, found, err := store.Load(context.Background(), created.ConversationID)
-	if err != nil || !found || loaded.Version != 1 || loaded.Messages[0].Text() != "hello" {
+	results := loaded.Messages[0].FunctionToolResults()
+	if err != nil || !found || loaded.Version != 1 || len(results) != 1 || results[0].CallID != "call-1" || string(results[0].ContentBlocks[1].Opaque.Raw) != `{"page":3}` || loaded.Messages[0].ResponseMeta.Usage.CacheReadTokens != 32 {
 		t.Fatalf("loaded = %#v, found=%t, err=%v", loaded, found, err)
 	}
 	updated := loaded.Clone()

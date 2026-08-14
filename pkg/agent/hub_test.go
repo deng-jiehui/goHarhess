@@ -26,14 +26,10 @@ func (incompleteGroupAgent) Description() string { return "malformed group membe
 func (incompleteGroupAgent) Invoke(context.Context, []schema.Message, ...runnable.Option) ([]schema.Message, error) {
 	return []schema.Message{schema.AssistantMessage("partial")}, nil
 }
-func (incompleteGroupAgent) Stream(context.Context, []schema.Message, ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
-	stream := make(chan runnable.Item[schema.MessageEvent], 1)
-	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{
-		Kind:     schema.MessageEventSnapshot,
-		Messages: []schema.Message{schema.AssistantMessage("partial")},
-	}}
-	close(stream)
-	return stream, nil
+func (incompleteGroupAgent) Stream(ctx context.Context, _ []schema.Message, _ ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	reader, writer := runnable.Pipe[[]schema.Message](ctx)
+	go func() { _ = writer.CloseWithError(fmt.Errorf("incomplete group stream")) }()
+	return reader, nil
 }
 
 func (a *recordingAgent) Name() string {
@@ -53,16 +49,14 @@ func (a *recordingAgent) Invoke(ctx context.Context, messages []schema.Message, 
 	return []schema.Message{schema.AssistantMessage(fmt.Sprintf("%s-%d", a.name, callNumber))}, nil
 }
 
-func (a *recordingAgent) Stream(ctx context.Context, messages []schema.Message, opts ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
+func (a *recordingAgent) Stream(ctx context.Context, messages []schema.Message, opts ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
 	output, err := a.Invoke(ctx, messages, opts...)
 	if err != nil {
 		return nil, err
 	}
-	out := make(chan runnable.Item[schema.MessageEvent], 2)
-	out <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: output}}
-	out <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventDone}}
-	close(out)
-	return out, nil
+	reader, writer := runnable.Pipe[[]schema.Message](ctx)
+	go func() { _ = writer.Send(output); _ = writer.Close() }()
+	return reader, nil
 }
 
 func (a *recordingAgent) Calls() [][]schema.Message {
@@ -74,6 +68,19 @@ func (a *recordingAgent) Calls() [][]schema.Message {
 		calls[i] = schema.CloneMessages(a.calls[i])
 	}
 	return calls
+}
+
+func (a *recordingAgent) Collect(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, in, a.Invoke, opts...)
+}
+func (a *recordingAgent) Transform(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, in, a.Invoke, opts...)
+}
+func (a incompleteGroupAgent) Collect(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, in, a.Invoke, opts...)
+}
+func (a incompleteGroupAgent) Transform(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, in, a.Invoke, opts...)
 }
 
 func TestGroupChatCollaboratesAcrossRounds(t *testing.T) {
@@ -98,7 +105,7 @@ func TestGroupChatCollaboratesAcrossRounds(t *testing.T) {
 	wantNames := []string{"alpha", "beta", "alpha"}
 	wantTexts := []string{"alpha-1", "beta-1", "alpha-2"}
 	for i := range last {
-		if last[i].Name != wantNames[i] || last[i].Text() != wantTexts[i] {
+		if last[i].Extra["agent_name"] != wantNames[i] || last[i].JoinedText("") != wantTexts[i] {
 			t.Fatalf("message %d = %#v, want name=%q text=%q", i, last[i], wantNames[i], wantTexts[i])
 		}
 	}
@@ -107,7 +114,7 @@ func TestGroupChatCollaboratesAcrossRounds(t *testing.T) {
 	if len(betaCalls) != 1 || len(betaCalls[0]) != 2 {
 		t.Fatalf("beta calls = %#v", betaCalls)
 	}
-	if betaCalls[0][1].Name != "alpha" || betaCalls[0][1].Text() != "alpha-1" {
+	if betaCalls[0][1].Extra["agent_name"] != "alpha" || betaCalls[0][1].JoinedText("") != "alpha-1" {
 		t.Fatalf("beta did not receive alpha output: %#v", betaCalls[0])
 	}
 
@@ -115,7 +122,7 @@ func TestGroupChatCollaboratesAcrossRounds(t *testing.T) {
 	if len(alphaCalls) != 2 || len(alphaCalls[1]) != 3 {
 		t.Fatalf("alpha calls = %#v", alphaCalls)
 	}
-	if alphaCalls[1][2].Name != "beta" || alphaCalls[1][2].Text() != "beta-1" {
+	if alphaCalls[1][2].Extra["agent_name"] != "beta" || alphaCalls[1][2].JoinedText("") != "beta-1" {
 		t.Fatalf("alpha did not receive beta output: %#v", alphaCalls[1])
 	}
 }
@@ -147,7 +154,7 @@ func TestGroupChatUsesCustomSelector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(last) != 2 || last[0].Name != "beta" || last[1].Name != "beta" {
+	if len(last) != 2 || last[0].Extra["agent_name"] != "beta" || last[1].Extra["agent_name"] != "beta" {
 		t.Fatalf("messages = %#v", last)
 	}
 	if len(alpha.Calls()) != 0 || len(beta.Calls()) != 2 {
@@ -166,7 +173,7 @@ func TestGroupChatRejectsMemberStreamWithoutDone(t *testing.T) {
 	}
 
 	_, err = group.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")})
-	if err == nil || !strings.Contains(err.Error(), "without done event") {
+	if err == nil || !strings.Contains(err.Error(), "incomplete group stream") {
 		t.Fatalf("group error=%v", err)
 	}
 }

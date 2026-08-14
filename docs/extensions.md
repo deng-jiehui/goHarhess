@@ -53,5 +53,5 @@ own store without pulling in a Redis dependency.
 
 The `extensions/mcp` package uses `github.com/mark3labs/mcp-go` to connect to
 MCP servers over stdio, SSE or streamable HTTP. It translates `tools/list`
-schemas into core `tool.BaseTool` values and exposes a dynamic `ToolsNode` for
+schemas into core `tool.Tool` values and exposes a dynamic `ToolsNode` for
 Graph/Runnable composition. See [MCP Tools](mcp-tools.md).

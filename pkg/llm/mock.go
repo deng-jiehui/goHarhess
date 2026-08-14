@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -32,18 +33,37 @@ func (m *ScriptedModel) Invoke(ctx context.Context, request Request, _ ...runnab
 	return Response{Messages: messages}, nil
 }
 
-var _ Model = (*ScriptedModel)(nil)
+var _ ChatModel = (*ScriptedModel)(nil)
 
-func (m *ScriptedModel) Stream(ctx context.Context, request Request, _ ...runnable.Option) (runnable.Stream[Event], error) {
+func (m *ScriptedModel) Stream(ctx context.Context, request Request, _ ...runnable.Option) (*runnable.StreamReader[Response], error) {
 	response, err := m.Invoke(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	out := make(chan runnable.Item[Event], 2)
-	out <- runnable.Item[Event]{Value: Event{Kind: EventDelta, Messages: response.Messages}}
-	out <- runnable.Item[Event]{Value: Event{Kind: EventDone}}
-	close(out)
-	return out, nil
+	reader, writer := runnable.Pipe[Response](ctx)
+	go func() {
+		callback.EmitStream(ctx, response.Clone())
+		if err := writer.Send(response.Clone()); err != nil {
+			return
+		}
+		_ = writer.Close()
+	}()
+	return reader, nil
+}
+
+func (m *ScriptedModel) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Response, error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	return m.Invoke(ctx, value, options...)
+}
+func (m *ScriptedModel) Transform(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m.Stream(ctx, value, options...)
 }
 
 func (m *ScriptedModel) Capabilities() Capabilities {
@@ -68,7 +88,7 @@ func (m *ScriptedModel) nextResponse(ctx context.Context, messages []schema.Mess
 	}
 
 	if len(messages) == 0 {
-		return []schema.Message{schema.AssistantMessage("")}, nil
+		return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock(""))}, nil
 	}
-	return []schema.Message{schema.AssistantMessage(messages[len(messages)-1].Text())}, nil
+	return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock(messages[len(messages)-1].JoinedText("")))}, nil
 }

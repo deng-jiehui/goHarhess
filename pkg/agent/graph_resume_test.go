@@ -100,7 +100,7 @@ func TestAgentGraphResumeUsesExecutionStoreIndependentlyFromConversation(t *test
 		Name:          "recoverable-basic",
 		SystemMessage: "replacement policy",
 		Model: llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-			if len(messages) != 2 || messages[0].Text() != "replacement policy\n\ncaller policy" || messages[1].Text() != "continue" {
+			if len(messages) != 2 || messages[0].JoinedText("") != "replacement policy\n\ncaller policy" || messages[1].JoinedText("") != "continue" {
 				t.Fatalf("restored messages=%#v", messages)
 			}
 			return []schema.Message{schema.AssistantMessage("resumed")}, nil
@@ -117,11 +117,11 @@ func TestAgentGraphResumeUsesExecutionStoreIndependentlyFromConversation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 1 || output[0].Text() != "resumed" {
+	if len(output) != 1 || output[0].JoinedText("") != "resumed" {
 		t.Fatalf("resume output=%#v", output)
 	}
 	checkpoint, found, err := conversationStore.Load(context.Background(), "conversation-1")
-	if err != nil || !found || len(checkpoint.Messages) != 3 || checkpoint.Messages[0].Text() != "caller policy" || checkpoint.Messages[1].Text() != "continue" || checkpoint.Messages[2].Text() != "resumed" {
+	if err != nil || !found || len(checkpoint.Messages) != 3 || checkpoint.Messages[0].JoinedText("") != "caller policy" || checkpoint.Messages[1].JoinedText("") != "continue" || checkpoint.Messages[2].JoinedText("") != "resumed" {
 		t.Fatalf("conversation checkpoint=%#v found=%t err=%v", checkpoint, found, err)
 	}
 }
@@ -146,7 +146,7 @@ func TestAgentPreToolResumeRunsApprovalAgainBeforeTool(t *testing.T) {
 			[]schema.Message{functionCallMessage("echo", "call-1")},
 			[]schema.Message{schema.AssistantMessage("final")},
 		),
-		Tools: []tool.BaseTool{echo},
+		Tools: []tool.Tool{echo},
 	}, agent.WithBeforeToolBatch(hook))
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestAgentPreToolResumeRunsApprovalAgainBeforeTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if toolCalls.Load() != 1 || len(output) != 3 || output[len(output)-1].Text() != "final" {
+	if toolCalls.Load() != 1 || len(output) != 3 || output[len(output)-1].JoinedText("") != "final" {
 		t.Fatalf("resume output=%#v tool calls=%d", output, toolCalls.Load())
 	}
 }
@@ -178,7 +178,7 @@ func TestAgentPreToolResumeUsesCurrentReactPrompt(t *testing.T) {
 		return tool.TextResult("ok"), nil
 	})
 	first, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{Name: "prompt-stable", Model: llm.NewScriptedModel([]schema.Message{functionCallMessage("echo", "call-1")}), Tools: []tool.BaseTool{echo}},
+		BaseConfig: agent.BaseConfig{Name: "prompt-stable", Model: llm.NewScriptedModel([]schema.Message{functionCallMessage("echo", "call-1")}), Tools: []tool.Tool{echo}},
 		Prompt:     "old react prompt",
 	}, agent.WithBeforeToolBatch(hook))
 	if err != nil {
@@ -192,9 +192,9 @@ func TestAgentPreToolResumeUsesCurrentReactPrompt(t *testing.T) {
 	second, err := agent.NewReactAgent(agent.ReactAgentConfig{
 		BaseConfig: agent.BaseConfig{
 			Name:  "prompt-stable",
-			Tools: []tool.BaseTool{echo},
+			Tools: []tool.Tool{echo},
 			Model: llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-				if len(messages) == 0 || !strings.Contains(messages[0].Text(), "new react prompt") || strings.Contains(messages[0].Text(), "old react prompt") {
+				if len(messages) == 0 || !strings.Contains(messages[0].JoinedText(""), "new react prompt") || strings.Contains(messages[0].JoinedText(""), "old react prompt") {
 					t.Fatalf("resume model messages=%#v", messages)
 				}
 				return []schema.Message{schema.AssistantMessage("final")}, nil
@@ -268,7 +268,7 @@ func TestAgentRoutingResumeDoesNotRepeatCompletedChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if childCalls.Load() != 1 || len(output) == 0 || output[len(output)-1].Text() != "final" {
+	if childCalls.Load() != 1 || len(output) == 0 || output[len(output)-1].JoinedText("") != "final" {
 		t.Fatalf("resume output=%#v child calls=%d", output, childCalls.Load())
 	}
 }
@@ -305,7 +305,7 @@ func TestAgentGroupResumeKeepsCompletedRound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alpha.Calls()) != 1 || len(beta.Calls()) != 1 || len(output) != 2 || output[0].Name != "alpha" || output[1].Name != "beta" {
+	if len(alpha.Calls()) != 1 || len(beta.Calls()) != 1 || len(output) != 2 || output[0].Extra["agent_name"] != "alpha" || output[1].Extra["agent_name"] != "beta" {
 		t.Fatalf("resume output=%#v alpha=%d beta=%d", output, len(alpha.Calls()), len(beta.Calls()))
 	}
 }
@@ -358,7 +358,7 @@ func TestAgentRoutingChildCannotOverwriteRootCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if continuation.GraphName != "root-router" || continuation.ResumeNode != "dispatch" {
+	if continuation.GraphName != "root-router" || continuation.ResumeNode != "agent:blocking-worker" {
 		t.Fatalf("continuation=%#v", continuation)
 	}
 }

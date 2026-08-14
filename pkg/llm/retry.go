@@ -3,14 +3,15 @@ package llm
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
+	"goharness/pkg/callback"
 	"goharness/pkg/runnable"
 )
 
-// RetryConfig controls the optional model retry decorator. MaxAttempts is the
-// total number of provider attempts, so 1 disables retries.
 type RetryConfig struct {
 	MaxAttempts  int
 	InitialDelay time.Duration
@@ -18,15 +19,13 @@ type RetryConfig struct {
 	Retryable    func(error) bool
 }
 
-// RetryingModel decorates a Model with bounded retries. Stream retries are
-// allowed only before the first successful event is delivered.
 type RetryingModel struct {
-	model     Model
+	model     ChatModel
 	config    RetryConfig
 	retryable func(error) bool
 }
 
-func NewRetryingModel(model Model, config RetryConfig) (*RetryingModel, error) {
+func NewRetryingModel(model ChatModel, config RetryConfig) (*RetryingModel, error) {
 	if model == nil {
 		return nil, errors.New("retrying model requires a model")
 	}
@@ -46,10 +45,7 @@ func NewRetryingModel(model Model, config RetryConfig) (*RetryingModel, error) {
 	return &RetryingModel{model: model, config: config, retryable: retryable}, nil
 }
 
-func (m *RetryingModel) Capabilities() Capabilities {
-	return m.model.Capabilities()
-}
-
+func (m *RetryingModel) Capabilities() Capabilities { return m.model.Capabilities() }
 func (m *RetryingModel) ModelInfo() ModelInfo {
 	info := DescribeModel(m.model)
 	if info.Attributes == nil {
@@ -60,9 +56,6 @@ func (m *RetryingModel) ModelInfo() ModelInfo {
 }
 
 func (m *RetryingModel) Invoke(ctx context.Context, request Request, options ...runnable.Option) (Response, error) {
-	if ctx == nil {
-		return Response{}, errors.New("retrying model context cannot be nil")
-	}
 	var last error
 	for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -83,83 +76,78 @@ func (m *RetryingModel) Invoke(ctx context.Context, request Request, options ...
 	return Response{}, last
 }
 
-func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...runnable.Option) (runnable.Stream[Event], error) {
+func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...runnable.Option) (*runnable.StreamReader[Response], error) {
 	if ctx == nil {
 		return nil, errors.New("retrying model context cannot be nil")
 	}
-	stream, attempt, err := m.openStream(ctx, request, options...)
-	if err != nil {
-		return nil, err
-	}
-	out := make(chan runnable.Item[Event], 16)
+	reader, writer := runnable.Pipe[Response](context.WithoutCancel(ctx))
+	executionCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		defer close(out)
-		started := false
-		for {
-			item, ok := <-stream
-			if !ok {
-				return
-			}
-			if item.Err != nil && !started && attempt+1 < m.config.MaxAttempts && m.retryable(item.Err) {
-				var next runnable.Stream[Event]
-				var openErr error
-				for nextAttempt := attempt + 1; nextAttempt < m.config.MaxAttempts; nextAttempt++ {
-					if err := waitRetry(ctx, retryDelay(m.config, nextAttempt-1)); err != nil {
-						out <- runnable.Item[Event]{Err: err}
+		select {
+		case <-reader.Context().Done():
+			cancel()
+		case <-executionCtx.Done():
+		}
+	}()
+	go func() {
+		defer cancel()
+		defer writer.Close()
+		for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
+			var started atomic.Bool
+			attemptCtx := callback.WithStreamCallbacks(executionCtx, callback.StreamCallbackOf[Response]("retry-start", func(context.Context, Response) error {
+				started.Store(true)
+				return nil
+			}))
+			upstream, err := m.model.Stream(attemptCtx, request, options...)
+			if err == nil && upstream != nil {
+				value, recvErr := upstream.Recv()
+				if recvErr == nil {
+					started.Store(true)
+					if sendErr := writer.Send(value.Clone()); sendErr != nil {
+						_ = upstream.Close()
 						return
 					}
-					next, openErr = m.model.Stream(ctx, request, options...)
-					if openErr == nil && next != nil {
-						stream = next
-						attempt = nextAttempt
-						break
+					if _, extraErr := upstream.Recv(); extraErr != nil && !errors.Is(extraErr, io.EOF) {
+						_ = writer.CloseWithError(extraErr)
 					}
-					if openErr == nil {
-						openErr = errors.New("model returned a nil stream")
-					}
-					attempt = nextAttempt
-					if !m.retryable(openErr) || nextAttempt+1 >= m.config.MaxAttempts {
-						break
-					}
-				}
-				if next == nil {
-					out <- runnable.Item[Event]{Err: openErr}
+					_ = upstream.Close()
 					return
 				}
-				continue
+				_ = upstream.Close()
+				if errors.Is(recvErr, io.EOF) {
+					err = ErrStreamTruncated
+				} else {
+					err = recvErr
+				}
+			} else if err == nil {
+				err = errors.New("model returned a nil stream")
 			}
-			if item.Err != nil {
-				out <- item
+			if started.Load() || attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
+				_ = writer.CloseWithError(err)
 				return
 			}
-			started = true
-			select {
-			case <-ctx.Done():
+			if err := waitRetry(executionCtx, retryDelay(m.config, attempt)); err != nil {
+				_ = writer.CloseWithError(err)
 				return
-			case out <- runnable.Item[Event]{Value: item.Value.Clone()}:
 			}
 		}
 	}()
-	return out, nil
+	return reader, nil
 }
 
-func (m *RetryingModel) openStream(ctx context.Context, request Request, options ...runnable.Option) (runnable.Stream[Event], int, error) {
-	for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
-		stream, err := m.model.Stream(ctx, request, options...)
-		if err == nil && stream != nil {
-			return stream, attempt, nil
-		}
-		if err == nil {
-			err = errors.New("model returned a nil stream")
-		}
-		if attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
-			return nil, attempt, err
-		}
-		if waitErr := waitRetry(ctx, retryDelay(m.config, attempt)); waitErr != nil {
-			return nil, attempt, waitErr
-		}
+func (m *RetryingModel) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Response, error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return Response{}, err
 	}
-	return nil, m.config.MaxAttempts - 1, errors.New("model retry attempts exhausted")
+	return m.Invoke(ctx, value, options...)
+}
+func (m *RetryingModel) Transform(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m.Stream(ctx, value, options...)
 }
 
 func retryDelay(config RetryConfig, attempt int) time.Duration {
@@ -200,4 +188,4 @@ func defaultRetryable(err error) bool {
 	return errors.As(err, &networkErr)
 }
 
-var _ Model = (*RetryingModel)(nil)
+var _ ChatModel = (*RetryingModel)(nil)

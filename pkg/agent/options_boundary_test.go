@@ -54,6 +54,15 @@ func (t *boundaryTool) Invoke(ctx context.Context, _ tool.CallInput, options ...
 	}
 	return tool.TextResult("ok"), nil
 }
+func (t *boundaryTool) Collect(ctx context.Context, in *runnable.StreamReader[tool.CallInput], opts ...runnable.Option) (tool.Result, error) {
+	return runnable.CollectFromInvoke(ctx, in, t.Invoke, opts...)
+}
+func (t *boundaryTool) Transform(ctx context.Context, in *runnable.StreamReader[tool.CallInput], opts ...runnable.Option) (*runnable.StreamReader[tool.Result], error) {
+	return runnable.TransformFromInvoke(ctx, in, t.Invoke, opts...)
+}
+func (t *boundaryTool) Stream(ctx context.Context, input tool.CallInput, opts ...runnable.Option) (*runnable.StreamReader[tool.Result], error) {
+	return runnable.StreamFromInvoke(ctx, input, t.Invoke, opts...)
+}
 
 func (m *boundaryModel) Invoke(ctx context.Context, _ llm.Request, options ...runnable.Option) (llm.Response, error) {
 	m.mu.Lock()
@@ -71,20 +80,24 @@ func (m *boundaryModel) Invoke(ctx context.Context, _ llm.Request, options ...ru
 	return llm.Response{Messages: []schema.Message{schema.AssistantMessage("ok")}}, nil
 }
 
-func (m *boundaryModel) Stream(ctx context.Context, request llm.Request, options ...runnable.Option) (runnable.Stream[llm.Event], error) {
+func (m *boundaryModel) Stream(ctx context.Context, request llm.Request, options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
 	response, err := m.Invoke(ctx, request, options...)
 	if err != nil {
 		return nil, err
 	}
-	out := make(chan runnable.Item[llm.Event], 2)
-	out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDelta, Messages: response.Messages}}
-	out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
-	close(out)
-	return out, nil
+	reader, writer := runnable.Pipe[llm.Response](ctx)
+	go func() { _ = writer.Send(response); _ = writer.Close() }()
+	return reader, nil
 }
 
 func (*boundaryModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
 func (*boundaryModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "boundary"} }
+func (m *boundaryModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m *boundaryModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
+}
 
 func TestLifecycleContextDoesNotBecomeModelOption(t *testing.T) {
 	model := &boundaryModel{}
@@ -99,7 +112,7 @@ func TestLifecycleContextDoesNotBecomeModelOption(t *testing.T) {
 		contextSeen = runnable.ScopeOf(options[0]) == runnable.OptionScopeGlobal
 		return contextengine.Result{Messages: schema.CloneMessages(request.Input)}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model, ContextEngine: engine})
+	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model, ContextBuilder: engine})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +143,7 @@ func TestAgentToolBoundaryReceivesOnlyNodeOptions(t *testing.T) {
 			[]schema.Message{functionCallMessage("boundary-tool", "call-1")},
 			[]schema.Message{schema.AssistantMessage("done")},
 		),
-		Tools: []tool.BaseTool{valueTool},
+		Tools: []tool.Tool{valueTool},
 	})
 	if err != nil {
 		t.Fatal(err)

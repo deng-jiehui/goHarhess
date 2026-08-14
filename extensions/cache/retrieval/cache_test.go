@@ -278,6 +278,18 @@ func (s *recordingVectorStore) Invoke(ctx context.Context, request retrieval.Vec
 	return retrieval.VectorResponse{Hits: hits}, nil
 }
 
+func (s *recordingVectorStore) Stream(ctx context.Context, input retrieval.VectorRequest, options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.StreamFromInvoke(ctx, input, s.Invoke, options...)
+}
+
+func (s *recordingVectorStore) Collect(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (retrieval.VectorResponse, error) {
+	return runnable.CollectFromInvoke(ctx, input, s.Invoke, options...)
+}
+
+func (s *recordingVectorStore) Transform(ctx context.Context, input *runnable.StreamReader[retrieval.VectorRequest], options ...runnable.Option) (*runnable.StreamReader[retrieval.VectorResponse], error) {
+	return runnable.TransformFromInvoke(ctx, input, s.Invoke, options...)
+}
+
 func (s *recordingVectorStore) OptionsSeen() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

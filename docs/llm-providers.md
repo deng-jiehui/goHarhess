@@ -1,9 +1,8 @@
 # LLM Providers
 
-The framework executes models through `llm.Model`, which combines
-`runnable.Runnable[llm.Request, llm.Response]`,
-`runnable.Streamer[llm.Request, llm.Event]`, capabilities, and safe model
-metadata. Providers expose only `Invoke` and `Stream`; wire methods are private.
+The framework executes models through `llm.ChatModel`, which combines the complete
+`runnable.Runnable[llm.Request, llm.Response]` contract, capabilities, and safe
+model metadata. Provider wire methods remain private.
 
 ## OpenAI-compatible providers
 
@@ -32,18 +31,24 @@ zero-timeout LLM client remains suitable for long SSE streams.
 
 ## Normalized streams
 
-Providers translate private wire events into `llm.Event` values. SSE framing,
-decompression, and provider chunk decoding are private package details; callers
-only receive `runnable.Stream[llm.Event]`.
+Providers reduce private wire events into one complete `llm.Response` returned
+through `*runnable.StreamReader[llm.Response]`. SSE framing, decompression, and
+provider chunk decoding are private package details. Live partial Responses are
+published through typed Context EventStream callbacks and never enter the
+Reader's final-result data plane.
 Reasoning fields named `reasoning_content`, `reasoning`, `thinking`, or
-`thought` are normalized to `schema.Message.ReasoningContent`. Tool-call
-argument fragments remain deltas and can be merged with `DeltaAccumulator`.
-When a caller does not request delta output, the OpenAI-compatible adapter
-emits cumulative message snapshots.
+`thought` are normalized to `schema.NewReasoningBlock` entries in the ordered
+`Message.ContentBlocks` slice. Tool-call argument fragments are merged into
+`NewFunctionToolCallBlock` entries before the final Response is committed.
+Adapters preserve block order and use `RoleTool` plus
+`NewFunctionToolResultBlock` for results. Unsupported provider payloads remain
+`NewOpaqueBlock` values or produce an explicit error; they are never silently
+flattened or discarded. See the README's canonical Message and ContentBlocks
+section for constructor and accessor details.
 
 ## Capabilities
 
-Every `llm.Model` declares streaming, tool-call, vision, JSON-schema, and
+Every `llm.ChatModel` declares streaming, tool-call, vision, JSON-schema, and
 reasoning support through `Capabilities()`.
 
 ## Optional retry

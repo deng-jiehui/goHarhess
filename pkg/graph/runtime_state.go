@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-
-	statepkg "goharness/pkg/state"
 )
 
 var (
@@ -160,7 +158,7 @@ func readStateCodecMetadata(codec StateCodec) (id string, version int, stateType
 	return id, version, stateType, nil
 }
 
-type runtimeStateCheckpointProvider func(context.Context) (statepkg.GraphStateCheckpoint, error)
+type runtimeStateCheckpointProvider func(context.Context) (GraphStateCheckpoint, error)
 type runtimeStateCheckpointProviderKey struct{}
 type runtimeStateContextKey struct{}
 
@@ -194,17 +192,17 @@ func withoutRuntimeStateCheckpointProvider(ctx context.Context) context.Context 
 }
 
 // StateCheckpointFromContext lazily snapshots the current runtime Graph State.
-func StateCheckpointFromContext(ctx context.Context) (statepkg.GraphStateCheckpoint, bool, error) {
+func StateCheckpointFromContext(ctx context.Context) (GraphStateCheckpoint, bool, error) {
 	if ctx == nil {
-		return statepkg.GraphStateCheckpoint{}, false, nil
+		return GraphStateCheckpoint{}, false, nil
 	}
 	provider, ok := ctx.Value(runtimeStateCheckpointProviderKey{}).(runtimeStateCheckpointProvider)
 	if !ok || provider == nil {
-		return statepkg.GraphStateCheckpoint{}, false, nil
+		return GraphStateCheckpoint{}, false, nil
 	}
 	checkpoint, err := provider(ctx)
 	if err != nil {
-		return statepkg.GraphStateCheckpoint{}, true, err
+		return GraphStateCheckpoint{}, true, err
 	}
 	return checkpoint.Clone(), true, nil
 }
@@ -297,40 +295,40 @@ func hasCompleteJSONContract(valueType reflect.Type) bool {
 	return marshal && unmarshal
 }
 
-func (g *Graph[I, O]) snapshotRuntimeState(ctx context.Context, state any) (statepkg.GraphStateCheckpoint, error) {
+func (g *Graph[I, O]) snapshotRuntimeState(ctx context.Context, state any) (GraphStateCheckpoint, error) {
 	codec := g.runtimeCodec()
 	if codec == nil {
-		return statepkg.GraphStateCheckpoint{}, errors.New("runtime Graph has no State Codec")
+		return GraphStateCheckpoint{}, errors.New("runtime Graph has no State Codec")
 	}
 	data, err := callStateCodecEncode(ctx, codec, state)
 	if err != nil {
-		return statepkg.GraphStateCheckpoint{}, err
+		return GraphStateCheckpoint{}, err
 	}
 	if g.codec == nil {
 		copyState, err := callStateCodecDecode(ctx, codec, data)
 		if err != nil {
-			return statepkg.GraphStateCheckpoint{}, err
+			return GraphStateCheckpoint{}, err
 		}
 		if err := compareDynamicTypes(reflect.ValueOf(state), reflect.ValueOf(copyState), g.stateType.String(), map[visitPair]bool{}); err != nil {
-			return statepkg.GraphStateCheckpoint{}, fmt.Errorf("default State Codec lost dynamic type: %w; configure a custom State Codec", err)
+			return GraphStateCheckpoint{}, fmt.Errorf("default State Codec lost dynamic type: %w; configure a custom State Codec", err)
 		}
 		roundTrip, err := callStateCodecEncode(ctx, codec, copyState)
 		if err != nil {
-			return statepkg.GraphStateCheckpoint{}, err
+			return GraphStateCheckpoint{}, err
 		}
 		if !bytes.Equal(data, roundTrip) {
-			return statepkg.GraphStateCheckpoint{}, errors.New("default State Codec produced an unstable JSON round trip; configure a custom State Codec")
+			return GraphStateCheckpoint{}, errors.New("default State Codec produced an unstable JSON round trip; configure a custom State Codec")
 		}
 	}
 	id, version := g.runtimeCodecMetadata()
-	checkpoint := statepkg.GraphStateCheckpoint{CodecID: id, Version: version, Data: append([]byte(nil), data...)}
+	checkpoint := GraphStateCheckpoint{CodecID: id, Version: version, Data: append([]byte(nil), data...)}
 	if err := checkpoint.Validate(); err != nil {
-		return statepkg.GraphStateCheckpoint{}, err
+		return GraphStateCheckpoint{}, err
 	}
 	return checkpoint, nil
 }
 
-func (g *Graph[I, O]) restoreRuntimeState(ctx context.Context, checkpoint statepkg.GraphStateCheckpoint) (any, error) {
+func (g *Graph[I, O]) restoreRuntimeState(ctx context.Context, checkpoint GraphStateCheckpoint) (any, error) {
 	codec := g.runtimeCodec()
 	if codec == nil {
 		return nil, errors.New("Graph State checkpoint requires a State factory")

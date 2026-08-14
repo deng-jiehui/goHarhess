@@ -22,60 +22,6 @@ var (
 
 const CurrentCheckpointSchemaVersion = 1
 
-// GraphStateCheckpoint is the portable representation of a typed graph
-// State. Data is owned by the checkpoint and is always copied at API
-// boundaries, so callers cannot mutate a persisted continuation in place.
-type GraphStateCheckpoint struct {
-	CodecID string `json:"codec_id"`
-	Version int    `json:"version"`
-	Data    []byte `json:"data"`
-}
-
-func (c GraphStateCheckpoint) Clone() GraphStateCheckpoint {
-	c.Data = append([]byte(nil), c.Data...)
-	return c
-}
-
-func (c GraphStateCheckpoint) Validate() error {
-	if strings.TrimSpace(c.CodecID) == "" {
-		return errors.New("graph state checkpoint codec ID cannot be empty")
-	}
-	if c.Version <= 0 {
-		return fmt.Errorf("graph state checkpoint version must be positive, got %d", c.Version)
-	}
-	return nil
-}
-
-// CursorFrame is a clean, portable Graph execution frame. It contains no
-// functions, contexts, clients or credentials.
-type CursorFrame struct {
-	Graph     string `json:"graph"`
-	Node      string `json:"node"`
-	Step      int    `json:"step"`
-	Iteration int    `json:"iteration,omitempty"`
-}
-
-type CursorStack []CursorFrame
-
-func (s CursorStack) Clone() CursorStack {
-	return append(CursorStack(nil), s...)
-}
-
-func (s CursorStack) Validate() error {
-	for index, frame := range s {
-		if strings.TrimSpace(frame.Graph) == "" {
-			return fmt.Errorf("cursor frame %d graph cannot be empty", index)
-		}
-		if strings.TrimSpace(frame.Node) == "" {
-			return fmt.Errorf("cursor frame %d node cannot be empty", index)
-		}
-		if frame.Step < 0 || frame.Iteration < 0 {
-			return fmt.Errorf("cursor frame %d counters cannot be negative", index)
-		}
-	}
-	return nil
-}
-
 // Checkpoint is the durable state of one conversation. Version zero means the
 // conversation has not been persisted; each successful Save increments it.
 type Checkpoint struct {

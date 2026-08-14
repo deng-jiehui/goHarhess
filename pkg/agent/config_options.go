@@ -19,7 +19,6 @@ const (
 	DefaultRetryBackoff      = 100 * time.Millisecond
 	DefaultMaxTokens         = 4096
 	DefaultMaxLLMCalls       = 20
-	DefaultStreamBufferSize  = 16
 	DefaultCheckpointTimeout = 5 * time.Second
 
 	hardMaxDepth             = 32
@@ -29,7 +28,6 @@ const (
 	hardMaxRetryBackoff      = 30 * time.Second
 	hardMaxTokens            = 1_000_000
 	hardMaxLLMCalls          = 100
-	hardMaxStreamBuffer      = 256
 	hardMaxCheckpointTimeout = time.Minute
 )
 
@@ -48,15 +46,15 @@ func WithSystemMessage(value string) Option {
 	return func(config *BaseConfig) { config.SystemMessage = value }
 }
 
-func WithModel(value llm.Model) Option {
+func WithModel(value llm.ChatModel) Option {
 	return func(config *BaseConfig) { config.Model = value }
 }
 
-func WithTools(values ...tool.BaseTool) Option {
-	return func(config *BaseConfig) { config.Tools = append([]tool.BaseTool(nil), values...) }
+func WithTools(values ...tool.Tool) Option {
+	return func(config *BaseConfig) { config.Tools = append([]tool.Tool(nil), values...) }
 }
 
-func WithTool(value tool.BaseTool) Option {
+func WithTool(value tool.Tool) Option {
 	return func(config *BaseConfig) { config.Tools = append(config.Tools, value) }
 }
 
@@ -76,26 +74,8 @@ func WithMiddleware(value tool.Middleware) Option {
 	return func(config *BaseConfig) { config.Middlewares = append(config.Middlewares, value) }
 }
 
-// WithContextEngine replaces the default context assembler.
-func WithContextEngine(value runnable.Runnable[contextengine.Request, contextengine.Result]) Option {
-	return func(config *BaseConfig) {
-		config.ContextEngine = value
-		if config.ContextBuilder == nil {
-			config.ContextBuilder = value
-		}
-	}
-}
-
-// WithContextBuilder replaces the default context assembly Runnable with a
-// plain function/Lambda. The function receives the complete provider-neutral
-// request and returns the messages to send to the model.
-func WithContextBuilder(value contextengine.ContextBuilderFunc) Option {
-	return func(config *BaseConfig) { config.ContextBuilder = value }
-}
-
-// WithContextBuilderNode replaces the context node with any typed Runnable.
-// Use this when the custom builder needs invocation options or richer state.
-func WithContextBuilderNode(value runnable.Runnable[contextengine.Request, contextengine.Result]) Option {
+// WithContextBuilder replaces the default context assembly Runnable.
+func WithContextBuilder(value runnable.Runnable[contextengine.Request, contextengine.Result]) Option {
 	return func(config *BaseConfig) { config.ContextBuilder = value }
 }
 
@@ -146,25 +126,19 @@ func WithMaxTokens(value int) Option {
 	return func(config *BaseConfig) { config.MaxTokens = value }
 }
 
-// WithStreamBufferSize sets bounded asynchronous buffering for model and Agent streams.
-func WithStreamBufferSize(value int) Option {
-	return func(config *BaseConfig) { config.StreamBufferSize = value }
-}
-
 // WithMaxLLMCalls sets the maximum model calls in one Agent run.
 func WithMaxLLMCalls(value int) Option {
 	return func(config *BaseConfig) { config.MaxLLMCalls = value }
 }
 
 type agentLimits struct {
-	maxDepth         int
-	timeout          time.Duration
-	maxConcurrency   int
-	maxRetries       int
-	retryBackoff     time.Duration
-	maxTokens        int
-	maxLLMCalls      int
-	streamBufferSize int
+	maxDepth       int
+	timeout        time.Duration
+	maxConcurrency int
+	maxRetries     int
+	retryBackoff   time.Duration
+	maxTokens      int
+	maxLLMCalls    int
 }
 
 func resolveBaseConfig(config BaseConfig, opts ...Option) (BaseConfig, error) {
@@ -199,9 +173,6 @@ func applyConfigDefaults(config *BaseConfig) {
 	if config.MaxLLMCalls == 0 {
 		config.MaxLLMCalls = DefaultMaxLLMCalls
 	}
-	if config.StreamBufferSize == 0 {
-		config.StreamBufferSize = DefaultStreamBufferSize
-	}
 	if config.CheckpointTimeout == 0 {
 		config.CheckpointTimeout = DefaultCheckpointTimeout
 	}
@@ -219,7 +190,6 @@ func validateBaseConfig(config BaseConfig) error {
 		{name: "max retries", value: config.MaxRetries, min: 0, max: hardMaxRetries},
 		{name: "max tokens", value: config.MaxTokens, min: 1, max: hardMaxTokens},
 		{name: "max LLM calls", value: config.MaxLLMCalls, min: 1, max: hardMaxLLMCalls},
-		{name: "stream buffer size", value: config.StreamBufferSize, min: 1, max: hardMaxStreamBuffer},
 	}
 	for _, check := range checks {
 		if check.value < check.min || check.value > check.max {
@@ -240,13 +210,12 @@ func validateBaseConfig(config BaseConfig) error {
 
 func limitsFromConfig(config BaseConfig) agentLimits {
 	return agentLimits{
-		maxDepth:         config.MaxDepth,
-		timeout:          config.Timeout,
-		maxConcurrency:   config.MaxConcurrency,
-		maxRetries:       config.MaxRetries,
-		retryBackoff:     config.RetryBackoff,
-		maxTokens:        config.MaxTokens,
-		maxLLMCalls:      config.MaxLLMCalls,
-		streamBufferSize: config.StreamBufferSize,
+		maxDepth:       config.MaxDepth,
+		timeout:        config.Timeout,
+		maxConcurrency: config.MaxConcurrency,
+		maxRetries:     config.MaxRetries,
+		retryBackoff:   config.RetryBackoff,
+		maxTokens:      config.MaxTokens,
+		maxLLMCalls:    config.MaxLLMCalls,
 	}
 }

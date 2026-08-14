@@ -21,7 +21,7 @@ func TestChatModelCallbackReceivesIsolatedRequest(t *testing.T) {
 	}}
 	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{first, second})
 	ctx := callback.WithManager(context.Background(), manager)
-	request := llm.Request{Messages: []schema.Message{{Role: schema.RoleUser, Content: schema.TextContent("hello"), Extra: map[string]any{"owner": "original"}}}}
+	request := llm.Request{Messages: []schema.Message{{Role: schema.RoleUser, ContentBlocks: []schema.ContentBlock{schema.NewTextBlock("hello")}, Extra: map[string]any{"owner": "original"}}}}
 	llm.BeginCallback(ctx, "model", nil, request)
 	if !secondSawOriginal || request.Messages[0].Extra["owner"] != "original" {
 		t.Fatal("ChatModel callback mutation leaked")

@@ -59,7 +59,7 @@ func init() {
 }
 
 func openAICompatibleFactory(defaultBaseURL string, reasoning bool) Factory {
-	return func(cfg Config) (Model, error) {
+	return func(cfg Config) (ChatModel, error) {
 		baseURL := strings.TrimSpace(cfg.ModelServer)
 		if baseURL == "" {
 			baseURL = rawString(cfg.Raw, "base_url")
@@ -153,7 +153,10 @@ func (m *OpenAICompatibleModel) request(ctx context.Context, input Request, stre
 		return nil, errors.New("OpenAI-compatible model does not support tool calls")
 	}
 
-	payload := m.requestPayload(input.Messages, input.Options, streaming)
+	payload, err := m.requestPayload(input.Messages, input.Options, streaming)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI-compatible request: %w", err)
@@ -198,32 +201,50 @@ func (m *OpenAICompatibleModel) Invoke(ctx context.Context, input Request, _ ...
 	return Response{Messages: messages, Usage: usage, FinishReason: finishReason}, nil
 }
 
-var _ Model = (*OpenAICompatibleModel)(nil)
+var _ ChatModel = (*OpenAICompatibleModel)(nil)
 
-func (m *OpenAICompatibleModel) Stream(ctx context.Context, input Request, _ ...runnable.Option) (runnable.Stream[Event], error) {
-	response, err := m.request(ctx, input, true)
+func (m *OpenAICompatibleModel) Stream(ctx context.Context, input Request, _ ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	response, err := m.request(streamCtx, input, true)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return responseReaderFromWire(ctx, m.streamEvents(streamCtx, response.Body), cancel)
+}
+
+func (m *OpenAICompatibleModel) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Response, error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	return m.Invoke(ctx, value, options...)
+}
+
+func (m *OpenAICompatibleModel) Transform(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	value, err := input.Collect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	events := m.streamEvents(ctx, response.Body)
-	if !input.Options.DeltaStream {
-		events = snapshotWireEvents(ctx, events)
-	}
-	return standardizeWireEvents(ctx, events), nil
+	return m.Stream(ctx, value, options...)
 }
 
-func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, opts ChatOptions, streaming bool) map[string]any {
+func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, opts ChatOptions, streaming bool) (map[string]any, error) {
 	payload := map[string]any{}
 	for key, value := range MergeGenerateConfig(m.generateConfig, opts.ExtraGenerateConfig) {
 		payload[key] = value
 	}
 	payload["model"] = m.model
-	payload["messages"] = encodeOpenAIMessages(messages, m.includeReasoningContent)
+	encodedMessages, err := encodeOpenAIMessages(messages, m.includeReasoningContent)
+	if err != nil {
+		return nil, fmt.Errorf("encode OpenAI-compatible messages: %w", err)
+	}
+	payload["messages"] = encodedMessages
 	payload["stream"] = streaming
 	if len(opts.Functions) > 0 && payload["tools"] == nil && payload["functions"] == nil {
 		payload["tools"] = encodeOpenAITools(opts.Functions)
 	}
-	return payload
+	return payload, nil
 }
 
 func (m *OpenAICompatibleModel) streamEvents(ctx context.Context, body io.ReadCloser) <-chan wireEvent {
@@ -250,7 +271,12 @@ func (m *OpenAICompatibleModel) streamEvents(ctx context.Context, body io.ReadCl
 				sendWireEvent(ctx, out, wireEvent{err: err})
 				return
 			}
-			if len(messages) > 0 || usage != nil {
+			if len(messages) > 0 || usage != nil || finishReason != "" {
+				var envelope openAIResponse
+				if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+					sendWireEvent(ctx, out, wireEvent{err: fmt.Errorf("decode OpenAI-compatible stream metadata: %w", err)})
+					return
+				}
 				kind := wireEventDelta
 				if len(messages) == 0 {
 					kind = wireEventUsage
@@ -260,6 +286,8 @@ func (m *OpenAICompatibleModel) streamEvents(ctx context.Context, body io.ReadCl
 					messages:     messages,
 					usage:        usage,
 					finishReason: finishReason,
+					responseID:   envelope.ID,
+					model:        envelope.Model,
 				}) {
 					return
 				}
@@ -291,6 +319,8 @@ func chatCompletionsEndpoint(baseURL string) (string, error) {
 }
 
 type openAIResponse struct {
+	ID      string         `json:"id"`
+	Model   string         `json:"model"`
 	Choices []openAIChoice `json:"choices"`
 	Usage   *openAIUsage   `json:"usage,omitempty"`
 }
@@ -336,6 +366,10 @@ type openAIUsage struct {
 	CompletionTokenDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
+	PromptTokenDetails struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 func decodeOpenAIResponse(data []byte, delta bool) ([]schema.Message, *Usage, string, error) {
@@ -362,12 +396,17 @@ func decodeOpenAIResponse(data []byte, delta bool) ([]schema.Message, *Usage, st
 			finishReason = *choice.FinishReason
 		}
 	}
-	return messages, decodeUsage(response.Usage), finishReason, nil
+	usage := decodeUsage(response.Usage)
+	if !delta {
+		messages = attachResponseMeta(messages, response.ID, response.Model, finishReason, usage)
+	}
+	return messages, usage, finishReason, nil
 }
 
 func openAIMessageToSchema(value openAIMessage, indexed bool) ([]schema.Message, error) {
 	role := parseRole(value.Role)
-	content := flexibleText(value.Content)
+	contentBlocks, contentText, contentArray := decodeOpenAIContentBlocks(value.Content)
+	content := contentText
 	reasoning := flexibleText(value.ReasoningContent)
 	if reasoning == "" {
 		reasoning = flexibleText(value.Reasoning)
@@ -378,21 +417,45 @@ func openAIMessageToSchema(value openAIMessage, indexed bool) ([]schema.Message,
 	if reasoning == "" {
 		reasoning = flexibleText(value.Thought)
 	}
-	if role == "" && (content != "" || reasoning != "" || len(value.ToolCalls) > 0 || value.FunctionCall != nil) {
+	if role == "" && (len(contentBlocks) > 0 || content != "" || reasoning != "" || len(value.ToolCalls) > 0 || value.FunctionCall != nil) {
 		role = schema.RoleAssistant
 	}
-	base := schema.Message{Role: role, Content: schema.TextContent(content), ReasoningContent: schema.TextContent(reasoning)}
-	if value.Name != "" {
-		base.Name = value.Name
+	blocks := make([]schema.ContentBlock, 0, len(contentBlocks)+2+len(value.ToolCalls))
+	blocks = append(blocks, contentBlocks...)
+	if indexed {
+		if !contentArray {
+			blocks = make([]schema.ContentBlock, 2)
+			if reasoning != "" {
+				blocks[0] = schema.NewReasoningBlock(reasoning, "")
+			}
+			if content != "" {
+				blocks[1] = schema.NewTextBlock(content)
+			}
+		} else if reasoning != "" {
+			blocks = append([]schema.ContentBlock{schema.NewReasoningBlock(reasoning, "")}, blocks...)
+		}
+	} else {
+		if reasoning != "" {
+			blocks = append(blocks, schema.NewReasoningBlock(reasoning, ""))
+		}
+		if content != "" && len(contentBlocks) == 0 {
+			blocks = append(blocks, schema.NewTextBlock(content))
+		}
+	}
+	base := schema.NewMessage(role, blocks...)
+	if indexed && contentArray {
+		if value.FunctionCall != nil || len(value.ToolCalls) > 0 {
+			return nil, errors.New("stream delta content array cannot be combined with function_call or tool_calls")
+		}
+		base.Extra = map[string]any{openAIAppendBlocksExtraKey: len(blocks)}
 	}
 
 	if value.FunctionCall != nil {
-		call := &schema.FunctionCall{Name: value.FunctionCall.Name, Arguments: value.FunctionCall.Arguments}
-		base.FunctionCall = call
+		base.ContentBlocks = append(base.ContentBlocks, schema.NewFunctionToolCallBlock("", value.FunctionCall.Name, value.FunctionCall.Arguments))
 		return []schema.Message{base}, nil
 	}
 	if len(value.ToolCalls) == 0 {
-		if base.Role == "" && base.Content.IsZero() && base.ReasoningContent.IsZero() {
+		if base.Role == "" && len(base.ContentBlocks) == 0 && content == "" && reasoning == "" {
 			return nil, nil
 		}
 		return []schema.Message{base}, nil
@@ -416,30 +479,66 @@ func openAIMessageToSchema(value openAIMessage, indexed bool) ([]schema.Message,
 			highest = max(highest, toolCall.Index)
 		}
 	}
-	messages := make([]schema.Message, highest+1)
-	messages[0] = base
+	toolOffset := len(blocks)
+	if indexed && !contentArray {
+		toolOffset = 2
+	}
+	for len(base.ContentBlocks) < toolOffset+highest+1 {
+		base.ContentBlocks = append(base.ContentBlocks, schema.ContentBlock{})
+	}
 	for order, toolCall := range value.ToolCalls {
 		index := order
 		if indexed {
 			index = toolCall.Index
 		}
-		target := messages[index]
-		if target.Role == "" {
-			target.Role = schema.RoleAssistant
-		}
-		target.FunctionCall = &schema.FunctionCall{
-			Name:      toolCall.Function.Name,
-			Arguments: toolCall.Function.Arguments,
-		}
-		if toolCall.ID != "" {
-			if target.Extra == nil {
-				target.Extra = map[string]any{}
-			}
-			target.Extra["function_id"] = toolCall.ID
-		}
-		messages[index] = target
+		blockIndex := toolOffset + index
+		base.ContentBlocks[blockIndex] = schema.NewFunctionToolCallBlock(toolCall.ID, toolCall.Function.Name, toolCall.Function.Arguments)
 	}
-	return messages, nil
+	return []schema.Message{base}, nil
+}
+
+func decodeOpenAIContentBlocks(raw json.RawMessage) ([]schema.ContentBlock, string, bool) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil, "", false
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		if text == "" {
+			return nil, "", false
+		}
+		return []schema.ContentBlock{schema.NewTextBlock(text)}, text, false
+	}
+	var parts []json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil {
+		return nil, "", false
+	}
+	blocks := make([]schema.ContentBlock, 0, len(parts))
+	var joined strings.Builder
+	for _, part := range parts {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(part, &fields) != nil {
+			blocks = append(blocks, schema.NewOpaqueBlock("openai.unknown", part))
+			continue
+		}
+		var typ string
+		_ = json.Unmarshal(fields["type"], &typ)
+		switch typ {
+		case "text", "input_text", "output_text":
+			var s string
+			_ = json.Unmarshal(fields["text"], &s)
+			blocks = append(blocks, schema.NewTextBlock(s))
+			joined.WriteString(s)
+		case "image_url":
+			var image struct {
+				URL string `json:"url"`
+			}
+			_ = json.Unmarshal(fields["image_url"], &image)
+			blocks = append(blocks, schema.NewImageBlock(image.URL, ""))
+		default:
+			blocks = append(blocks, schema.NewOpaqueBlock("openai."+typ, part))
+		}
+	}
+	return blocks, joined.String(), true
 }
 
 func parseRole(value string) schema.Role {
@@ -450,8 +549,10 @@ func parseRole(value string) schema.Role {
 		return schema.RoleUser
 	case "assistant":
 		return schema.RoleAssistant
-	case "tool", "function":
-		return schema.RoleFunction
+	case "tool":
+		return schema.RoleTool
+	case "function":
+		return schema.RoleTool
 	default:
 		return ""
 	}
@@ -491,46 +592,105 @@ func decodeUsage(value *openAIUsage) *Usage {
 		return nil
 	}
 	return &Usage{
-		PromptTokens:     value.PromptTokens,
-		CompletionTokens: value.CompletionTokens,
+		InputTokens:      value.PromptTokens,
+		OutputTokens:     value.CompletionTokens,
 		TotalTokens:      value.TotalTokens,
 		ReasoningTokens:  value.CompletionTokenDetails.ReasoningTokens,
+		CacheReadTokens:  value.PromptTokenDetails.CachedTokens,
+		CacheWriteTokens: value.PromptTokenDetails.CacheWriteTokens,
 	}
 }
 
-func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) []map[string]any {
+func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]map[string]any, error) {
 	encoded := make([]map[string]any, 0, len(messages))
-	for _, message := range messages {
+	for messageIndex, message := range messages {
 		role := string(message.Role)
-		if message.Role == schema.RoleFunction {
+		if message.Role == schema.RoleTool {
 			role = "tool"
 		}
 		item := map[string]any{
-			"role":    role,
-			"content": message.Content,
+			"role": role,
 		}
-		if message.Name != "" {
-			item["name"] = message.Name
+		var text, reasoning strings.Builder
+		seenCall := false
+		toolCalls := make([]map[string]any, 0)
+		var result *schema.FunctionToolResult
+		for blockIndex, block := range message.ContentBlocks {
+			switch block.Type {
+			case schema.ContentBlockTypeText:
+				if seenCall {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported interleaved text after tool call", messageIndex, blockIndex)
+				}
+				if block.Text != nil {
+					text.WriteString(block.Text.Text)
+				}
+			case schema.ContentBlockTypeReasoning:
+				if !includeReasoning {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: reasoning cannot be omitted", messageIndex, blockIndex)
+				}
+				if seenCall {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: reasoning order is not representable", messageIndex, blockIndex)
+				}
+				if block.Reasoning != nil {
+					reasoning.WriteString(block.Reasoning.Text)
+				}
+			case schema.ContentBlockTypeFunctionToolCall:
+				if block.FunctionToolCall != nil {
+					seenCall = true
+					call := block.FunctionToolCall
+					toolCalls = append(toolCalls, map[string]any{"id": call.ID, "type": "function", "function": map[string]any{"name": call.Name, "arguments": call.Arguments}})
+				}
+			case schema.ContentBlockTypeFunctionToolResult:
+				if result != nil || block.FunctionToolResult == nil {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported block type %q", messageIndex, blockIndex, block.Type)
+				}
+				result = block.FunctionToolResult
+			default:
+				return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported block type %q", messageIndex, blockIndex, block.Type)
+			}
 		}
-		if message.Role == schema.RoleFunction {
-			item["tool_call_id"] = message.FunctionID("")
+		item["content"] = text.String()
+		if reasoning.Len() > 0 {
+			item["reasoning_content"] = reasoning.String()
 		}
-		if includeReasoning && !message.ReasoningContent.IsZero() {
-			item["reasoning_content"] = message.ReasoningContent
+		if len(toolCalls) > 0 {
+			item["tool_calls"] = toolCalls
 		}
-		if message.FunctionCall != nil {
-			item["tool_calls"] = []map[string]any{{
-				"id":   message.FunctionID("call-1"),
-				"type": "function",
-				"function": map[string]any{
-					"name":      message.FunctionCall.Name,
-					"arguments": message.FunctionCall.Arguments,
-				},
-			}}
+		if result != nil && message.Role != schema.RoleTool {
+			return nil, fmt.Errorf("messages[%d]: function_tool_result block requires tool role", messageIndex)
+		}
+		if message.Role == schema.RoleTool {
+			if result == nil {
+				return nil, fmt.Errorf("messages[%d]: tool message requires one function_tool_result block", messageIndex)
+			}
+			item["tool_call_id"] = result.CallID
+			var nested strings.Builder
+			for blockIndex, block := range result.ContentBlocks {
+				if block.Type != schema.ContentBlockTypeText || block.Text == nil || blockIndex > 0 {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported function tool result block type %q", messageIndex, blockIndex, block.Type)
+				}
+				nested.WriteString(block.Text.Text)
+			}
+			item["content"] = text.String() + nested.String()
 		}
 		encoded = append(encoded, item)
 	}
-	return encoded
+	return encoded, nil
+}
+
+func attachResponseMeta(messages []schema.Message, responseID, model, finishReason string, usage *Usage) []schema.Message {
+	cloned := schema.CloneMessages(messages)
+	if len(cloned) == 1 {
+		blocks := make([]schema.ContentBlock, 0, len(cloned[0].ContentBlocks))
+		for _, block := range cloned[0].ContentBlocks {
+			if block.Type != "" {
+				blocks = append(blocks, block)
+			}
+		}
+		cloned[0].ContentBlocks = blocks
+		cloned[0].ResponseMeta = &schema.ResponseMeta{ID: responseID, Model: model, FinishReason: finishReason, Usage: cloneUsage(usage)}
+	}
+	return cloned
 }
 
 func encodeOpenAITools(functions []schema.FunctionDefinition) []map[string]any {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"goharness/pkg/callback"
 	"goharness/pkg/graph"
-	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
@@ -20,11 +20,12 @@ type GroupRunConfig struct {
 }
 
 type groupRunState struct {
-	round       int
-	lastAgent   string
-	response    []schema.Message
-	continueRun bool
-	input       []schema.Message
+	round         int
+	lastAgent     string
+	selectedAgent string
+	response      []schema.Message
+	continueRun   bool
+	input         []schema.Message
 }
 
 type groupRunContextKey struct{}
@@ -46,22 +47,18 @@ func hydrateGroupRun(ctx context.Context, state *RecipeState) error {
 	run.input = schema.CloneMessages(state.Input)
 	run.round = state.Round
 	run.lastAgent = state.LastAgent
+	run.selectedAgent = state.SelectedAgent
 	run.response = schema.CloneMessages(state.Response)
 	run.continueRun = state.ContinueRun
 	return nil
 }
 
-func commitGroupRun(ctx context.Context, state *RecipeState, output []schema.Message) error {
-	run, err := groupStateFromContext(ctx)
-	if err != nil {
-		return err
-	}
-	state.Messages = schema.CloneMessages(output)
+func syncGroupState(state *RecipeState, run *groupRunState) {
 	state.Response = schema.CloneMessages(run.response)
 	state.Round = run.round
 	state.LastAgent = run.lastAgent
+	state.SelectedAgent = run.selectedAgent
 	state.ContinueRun = run.continueRun
-	return nil
 }
 
 func groupStateFromContext(ctx context.Context) (*groupRunState, error) {
@@ -78,89 +75,110 @@ func groupStateFromContext(ctx context.Context) (*groupRunState, error) {
 	return state, nil
 }
 
+type GroupMember struct {
+	Name string
+	Node runnable.Runnable[[]schema.Message, runnable.Outcome[[]schema.Message]]
+}
+
 type GroupHooks struct {
 	MaxRounds int
-	Dispatch  func(context.Context, []schema.Message, int, string) (string, runnable.Stream[schema.MessageEvent], error)
+	Members   []GroupMember
+	Select    func(context.Context, []schema.Message, int, string) (string, error)
 }
 
 func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	if hooks.MaxRounds < 1 {
 		return nil, errors.New("group recipe max rounds must be positive")
 	}
-	if hooks.Dispatch == nil {
-		return nil, errors.New("group recipe dispatch hook is required")
+	if hooks.Select == nil {
+		return nil, errors.New("group recipe selector is required")
 	}
+	seen := make(map[string]struct{}, len(hooks.Members))
+	for index, member := range hooks.Members {
+		member.Name = strings.TrimSpace(member.Name)
+		if member.Name == "" || member.Node == nil {
+			return nil, fmt.Errorf("group member %d is not configured", index)
+		}
+		if _, exists := seen[member.Name]; exists {
+			return nil, fmt.Errorf("duplicate group member %q", member.Name)
+		}
+		seen[member.Name] = struct{}{}
+	}
+
 	g, err := newRecipeGraph(name)
 	if err != nil {
 		return nil, err
 	}
-	dispatch := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
+	selectNode := runnable.Func[[]schema.Message, string](func(ctx context.Context, messages []schema.Message, _ ...runnable.Option) (string, error) {
 		run, err := groupStateFromContext(ctx)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		if run.round >= hooks.MaxRounds {
-			run.continueRun = false
-			return schema.CloneMessages(messages), nil
+			return "", nil
 		}
-		selected, stream, err := hooks.Dispatch(ctx, messages, run.round, run.lastAgent)
-		if err != nil {
-			return nil, err
-		}
-		if stream == nil {
-			return nil, fmt.Errorf("group member %q returned a nil stream", selected)
-		}
-		var roundOutput []schema.Message
-		accumulator := llm.NewDeltaAccumulator(true)
-		sawDone := false
-		for item := range stream {
-			if item.Err != nil {
-				return nil, fmt.Errorf("group member %q: %w", selected, item.Err)
-			}
-			event := item.Value
-			if event.Kind == schema.MessageEventDone {
-				sawDone = true
-				break
-			}
-			if len(event.Messages) == 0 {
-				continue
-			}
-			if event.Kind == schema.MessageEventDelta {
-				roundOutput, err = accumulator.Apply(llm.Event{Kind: llm.EventDelta, Messages: event.Messages})
-				if err != nil {
-					return nil, err
-				}
-			} else {
-				roundOutput = schema.CloneMessages(event.Messages)
-			}
-			roundOutput = withSpeaker(roundOutput, selected)
-			callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: appendMessages(run.response, roundOutput)})
-		}
-		if !sawDone {
-			return nil, fmt.Errorf("group member %q stream closed without done event", selected)
-		}
-		if len(roundOutput) == 0 {
-			run.continueRun = false
-			return schema.CloneMessages(messages), nil
-		}
-		run.response = append(run.response, schema.CloneMessages(roundOutput)...)
-		updated := appendMessages(messages, roundOutput)
-		run.round++
-		run.lastAgent = selected
-		run.continueRun = run.round < hooks.MaxRounds
-		return updated, nil
+		return hooks.Select(ctx, schema.CloneMessages(messages), run.round, run.lastAgent)
 	})
-	if err := g.AddNode("dispatch", dispatch,
+	if err := g.AddNode("select", selectNode,
 		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
 			if err := hydrateGroupRun(ctx, state); err != nil {
 				return nil, err
 			}
 			return schema.CloneMessages(state.Messages), nil
 		}),
-		graph.WithPostHandler(commitGroupRun),
+		graph.WithPostHandler(func(ctx context.Context, state *RecipeState, selected string) error {
+			run, err := groupStateFromContext(ctx)
+			if err != nil {
+				return err
+			}
+			run.selectedAgent = selected
+			run.continueRun = selected != ""
+			syncGroupState(state, run)
+			return nil
+		}),
 	); err != nil {
 		return nil, err
 	}
+
+	for _, member := range hooks.Members {
+		memberName := member.Name
+		if err := g.AddNode(groupMemberNodeID(memberName), member.Node,
+			graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
+				if err := hydrateGroupRun(ctx, state); err != nil {
+					return nil, err
+				}
+				return schema.CloneMessages(state.Messages), nil
+			}),
+			graph.WithPostHandler(func(ctx context.Context, state *RecipeState, outcome runnable.Outcome[[]schema.Message]) error {
+				run, err := groupStateFromContext(ctx)
+				if err != nil {
+					return err
+				}
+				if outcome.Err != nil {
+					return outcome.Err
+				}
+				roundOutput := withSpeaker(outcome.Value, memberName)
+				callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: appendMessages(run.response, roundOutput)})
+				if len(roundOutput) == 0 {
+					run.selectedAgent = ""
+					run.continueRun = false
+					syncGroupState(state, run)
+					return nil
+				}
+				run.response = append(run.response, schema.CloneMessages(roundOutput)...)
+				state.Messages = appendMessages(state.Messages, roundOutput)
+				run.round++
+				run.lastAgent = memberName
+				run.selectedAgent = ""
+				run.continueRun = run.round < hooks.MaxRounds
+				syncGroupState(state, run)
+				return nil
+			}),
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	finish := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
 		run, err := groupStateFromContext(ctx)
 		if err != nil {
@@ -177,21 +195,45 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge(graph.Start, "dispatch"); err != nil {
-		return nil, err
-	}
-	if err := g.AddBranch("dispatch", "dispatch", "next_round", func(_ context.Context, state *RecipeState) (bool, error) {
-		return state.ContinueRun, nil
+
+	if err := g.AddBranch(graph.Start, "finish", "round_limit", func(ctx context.Context, state *RecipeState) (bool, error) {
+		if err := hydrateGroupRun(ctx, state); err != nil {
+			return false, err
+		}
+		run, err := groupStateFromContext(ctx)
+		return err == nil && run.round >= hooks.MaxRounds, err
 	}); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge("dispatch", "finish"); err != nil {
+	if err := g.AddEdge(graph.Start, "select"); err != nil {
 		return nil, err
+	}
+	for _, member := range hooks.Members {
+		memberName := member.Name
+		if err := g.AddBranch("select", groupMemberNodeID(memberName), "select:"+memberName, func(_ context.Context, state *RecipeState) (bool, error) {
+			return state.SelectedAgent == memberName, nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := g.AddEdge("select", "finish"); err != nil {
+		return nil, err
+	}
+	for _, member := range hooks.Members {
+		from := groupMemberNodeID(member.Name)
+		if err := g.AddBranch(from, "select", "next_round", func(_ context.Context, state *RecipeState) (bool, error) {
+			return state.ContinueRun, nil
+		}); err != nil {
+			return nil, err
+		}
+		if err := g.AddEdge(from, "finish"); err != nil {
+			return nil, err
+		}
 	}
 	if err := g.AddEdge("finish", graph.End); err != nil {
 		return nil, err
 	}
-	if err := g.SetMaxSteps(hooks.MaxRounds + 2); err != nil {
+	if err := g.SetMaxSteps(hooks.MaxRounds*2 + 2); err != nil {
 		return nil, err
 	}
 	compiled, err := g.Compile()
@@ -201,11 +243,16 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 	return &Recipe{graph: compiled}, nil
 }
 
+func groupMemberNodeID(name string) string { return "agent:" + name }
+
 func withSpeaker(messages []schema.Message, speaker string) []schema.Message {
 	result := schema.CloneMessages(messages)
 	for i := range result {
-		if result[i].Name == "" {
-			result[i].Name = speaker
+		if result[i].Extra == nil {
+			result[i].Extra = map[string]any{}
+		}
+		if _, exists := result[i].Extra["agent_name"]; !exists {
+			result[i].Extra["agent_name"] = speaker
 		}
 	}
 	return result

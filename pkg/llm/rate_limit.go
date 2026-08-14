@@ -3,33 +3,28 @@ package llm
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
 	"goharness/pkg/runnable"
 )
 
-// RateLimitConfig controls the optional model request limiter. A zero
-// MaxConcurrent means unlimited concurrency; MinInterval spaces request
-// starts globally for this decorator.
 type RateLimitConfig struct {
 	MaxConcurrent int
 	MinInterval   time.Duration
 }
 
-// RateLimitedModel decorates a Model with bounded request admission. A stream
-// holds its admission slot until the upstream stream terminates.
 type RateLimitedModel struct {
-	model         Model
+	model         ChatModel
 	maxConcurrent int
 	minInterval   time.Duration
 	semaphore     chan struct{}
-
-	mu          sync.Mutex
-	nextAllowed time.Time
+	mu            sync.Mutex
+	nextAllowed   time.Time
 }
 
-func NewRateLimitedModel(model Model, config RateLimitConfig) (*RateLimitedModel, error) {
+func NewRateLimitedModel(model ChatModel, config RateLimitConfig) (*RateLimitedModel, error) {
 	if model == nil {
 		return nil, errors.New("rate-limited model requires a model")
 	}
@@ -43,16 +38,10 @@ func NewRateLimitedModel(model Model, config RateLimitConfig) (*RateLimitedModel
 	if config.MaxConcurrent > 0 {
 		semaphore = make(chan struct{}, config.MaxConcurrent)
 	}
-	return &RateLimitedModel{
-		model:         model,
-		maxConcurrent: config.MaxConcurrent,
-		minInterval:   config.MinInterval,
-		semaphore:     semaphore,
-	}, nil
+	return &RateLimitedModel{model: model, maxConcurrent: config.MaxConcurrent, minInterval: config.MinInterval, semaphore: semaphore}, nil
 }
 
 func (m *RateLimitedModel) Capabilities() Capabilities { return m.model.Capabilities() }
-
 func (m *RateLimitedModel) ModelInfo() ModelInfo {
 	info := DescribeModel(m.model)
 	if info.Attributes == nil {
@@ -72,45 +61,63 @@ func (m *RateLimitedModel) Invoke(ctx context.Context, request Request, options 
 	return m.model.Invoke(ctx, request, options...)
 }
 
-func (m *RateLimitedModel) Stream(ctx context.Context, request Request, options ...runnable.Option) (runnable.Stream[Event], error) {
+func (m *RateLimitedModel) Stream(ctx context.Context, request Request, options ...runnable.Option) (*runnable.StreamReader[Response], error) {
 	release, err := m.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	stream, err := m.model.Stream(ctx, request, options...)
+	upstream, err := m.model.Stream(ctx, request, options...)
 	if err != nil {
 		release()
 		return nil, err
 	}
-	if stream == nil {
+	if upstream == nil {
 		release()
 		return nil, errors.New("rate-limited model returned a nil stream")
 	}
-	out := make(chan runnable.Item[Event], 16)
+	reader, writer := runnable.Pipe[Response](context.WithoutCancel(ctx))
+	done := make(chan struct{})
 	go func() {
-		defer close(out)
+		defer close(done)
 		defer release()
+		defer upstream.Close()
+		defer writer.Close()
+		sawResponse := false
 		for {
-			select {
-			case <-ctx.Done():
+			value, recvErr := upstream.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				if !sawResponse {
+					_ = writer.CloseWithError(ErrStreamTruncated)
+				}
 				return
-			case item, ok := <-stream:
-				if !ok {
-					return
-				}
-				if item.Err != nil {
-					out <- item
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case out <- runnable.Item[Event]{Value: item.Value.Clone()}:
-				}
 			}
+			if recvErr != nil {
+				_ = writer.CloseWithError(recvErr)
+				return
+			}
+			if err := writer.Send(value.Clone()); err != nil {
+				return
+			}
+			sawResponse = true
 		}
 	}()
-	return out, nil
+	closeUpstreamWhenReaderStops(reader, upstream, done)
+	return reader, nil
+}
+
+func (m *RateLimitedModel) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Response, error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	return m.Invoke(ctx, value, options...)
+}
+func (m *RateLimitedModel) Transform(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	value, err := input.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m.Stream(ctx, value, options...)
 }
 
 func (m *RateLimitedModel) acquire(ctx context.Context) (func(), error) {
@@ -127,15 +134,13 @@ func (m *RateLimitedModel) acquire(ctx context.Context) (func(), error) {
 		case m.semaphore <- struct{}{}:
 		}
 	}
-	released := false
+	var once sync.Once
 	release := func() {
-		if released {
-			return
-		}
-		released = true
-		if m.semaphore != nil {
-			<-m.semaphore
-		}
+		once.Do(func() {
+			if m.semaphore != nil {
+				<-m.semaphore
+			}
+		})
 	}
 	if m.minInterval <= 0 {
 		return release, nil
@@ -161,4 +166,4 @@ func (m *RateLimitedModel) acquire(ctx context.Context) (func(), error) {
 	return release, nil
 }
 
-var _ Model = (*RateLimitedModel)(nil)
+var _ ChatModel = (*RateLimitedModel)(nil)

@@ -52,7 +52,7 @@ type PermissionDeniedError struct {
 }
 
 // Deny creates a business-policy denial for Middleware code.
-// The internal runtime adds the tool and extension names.
+// Runtime adds the tool and extension names.
 func Deny(reason error) error {
 	return &PermissionDeniedError{Err: reason}
 }

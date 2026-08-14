@@ -7,27 +7,18 @@ import (
 	"goharness/pkg/schema"
 )
 
-func TestDeltaAccumulatorMergesMessageFields(t *testing.T) {
+func TestDeltaAccumulatorMergesFunctionBlocksByPosition(t *testing.T) {
 	accumulator := llm.NewDeltaAccumulator(true)
-	first := llm.Event{Messages: []schema.Message{{
-		Role:             schema.RoleAssistant,
-		Content:          schema.TextContent("Hel"),
-		ReasoningContent: schema.TextContent("think "),
-		FunctionCall: &schema.FunctionCall{
-			Name:      "ec",
-			Arguments: `{"text":"hel`,
-		},
-	}}}
-	second := llm.Event{Messages: []schema.Message{{
-		Role:             schema.RoleAssistant,
-		Content:          schema.TextContent("lo"),
-		ReasoningContent: schema.TextContent("again"),
-		FunctionCall: &schema.FunctionCall{
-			Name:      "ho",
-			Arguments: `lo"}`,
-		},
-		Extra: map[string]any{"function_id": "call-1"},
-	}}}
+	first := llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant,
+		schema.NewTextBlock("Hel"),
+		schema.NewFunctionToolCallBlock("call-1", "wea", `{"city":`),
+		schema.NewFunctionToolCallBlock("call-2", "a", `{"city":`),
+	)}}
+	second := llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant,
+		schema.NewTextBlock("lo"),
+		schema.NewFunctionToolCallBlock("", "ther", `"Shanghai"}`),
+		schema.NewFunctionToolCallBlock("", "ir", `"Shanghai"}`),
+	)}}
 
 	if _, err := accumulator.Apply(first); err != nil {
 		t.Fatal(err)
@@ -39,45 +30,48 @@ func TestDeltaAccumulatorMergesMessageFields(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages = %#v", messages)
 	}
-	message := messages[0]
-	if message.Text() != "Hello" {
-		t.Fatalf("content = %q, want Hello", message.Text())
+	if messages[0].JoinedText("") != "Hello" {
+		t.Fatalf("text=%q", messages[0].JoinedText(""))
 	}
-	if message.ReasoningContent.String() != "think again" {
-		t.Fatalf("reasoning = %q, want think again", message.ReasoningContent.String())
-	}
-	if message.FunctionCall == nil || message.FunctionCall.Name != "echo" || message.FunctionCall.Arguments != `{"text":"hello"}` {
-		t.Fatalf("function call = %#v", message.FunctionCall)
-	}
-	if message.FunctionID("") != "call-1" {
-		t.Fatalf("function ID = %q, want call-1", message.FunctionID(""))
+	calls := messages[0].FunctionToolCalls()
+	if len(calls) != 2 || calls[0].Name != "weather" || calls[1].Name != "air" {
+		t.Fatalf("calls=%#v", calls)
 	}
 }
 
 func TestDeltaAccumulatorAcceptsCumulativeChunks(t *testing.T) {
 	accumulator := llm.NewDeltaAccumulator(true)
-	if _, err := accumulator.Apply(llm.Event{Messages: []schema.Message{schema.AssistantMessage("Hel")}}); err != nil {
+	if _, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("Hel"))}}); err != nil {
 		t.Fatal(err)
 	}
-	messages, err := accumulator.Apply(llm.Event{Messages: []schema.Message{schema.AssistantMessage("Hello")}})
+	messages, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("Hello"))}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if messages[0].Text() != "Hello" {
-		t.Fatalf("content = %q, want Hello", messages[0].Text())
+	if messages[0].JoinedText("") != "Hello" {
+		t.Fatalf("content = %q, want Hello", messages[0].JoinedText(""))
 	}
 }
 
 func TestDeltaAccumulatorPassesThroughSnapshotsWhenDisabled(t *testing.T) {
 	accumulator := llm.NewDeltaAccumulator(false)
-	if _, err := accumulator.Apply(llm.Event{Messages: []schema.Message{schema.AssistantMessage("Hel")}}); err != nil {
+	if _, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("Hel"))}}); err != nil {
 		t.Fatal(err)
 	}
-	messages, err := accumulator.Apply(llm.Event{Messages: []schema.Message{schema.AssistantMessage("lo")}})
+	messages, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("lo"))}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if messages[0].Text() != "lo" {
-		t.Fatalf("content = %q, want lo", messages[0].Text())
+	if messages[0].JoinedText("") != "lo" {
+		t.Fatalf("content = %q, want lo", messages[0].JoinedText(""))
+	}
+}
+
+func TestDeltaAccumulatorRejectsBlockTypeChange(t *testing.T) {
+	accumulator := llm.NewDeltaAccumulator(true)
+	_, _ = accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("partial"))}})
+	_, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewReasoningBlock("changed", ""))}})
+	if err == nil {
+		t.Fatal("block type change was accepted")
 	}
 }

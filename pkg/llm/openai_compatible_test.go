@@ -29,12 +29,12 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 			t.Fatalf("payload = %#v", payload)
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"id\":\"resp-stream\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"step\"}}]}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\n"))
-		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"search","arguments":"hel"}}]}}]}` + "\n\n"))
-		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"lo"}}]}}]}` + "\n\n"))
+		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"search","arguments":"{\"text\":\"hel"}}]}}]}` + "\n\n"))
+		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"function":{"arguments":"lo\"}"}}]}}]}` + "\n\n"))
 		_, _ = writer.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7,\"completion_tokens_details\":{\"reasoning_tokens\":2}}}\n\n"))
 		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
 	}))
@@ -57,39 +57,31 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	accumulator := llm.NewDeltaAccumulator(true)
-	var usage *llm.Usage
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		if item.Value.Usage != nil {
-			usage = item.Value.Usage
-		}
-		if item.Value.Kind == llm.EventDelta && len(item.Value.Messages) > 0 {
-			if _, err := accumulator.Apply(item.Value); err != nil {
-				t.Fatal(err)
-			}
-		}
+	response, err := stream.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	messages := accumulator.Messages()
+	messages := response.Messages
 	if len(messages) != 1 {
 		t.Fatalf("messages = %#v, want one normalized assistant message", messages)
 	}
-	if messages[0].Text() != "answer" {
-		t.Fatalf("content = %q", messages[0].Text())
+	if messages[0].JoinedText("") != "answer" {
+		t.Fatalf("content = %q", messages[0].JoinedText(""))
 	}
-	if messages[0].ReasoningContent.String() != "think step" {
-		t.Fatalf("reasoning = %q", messages[0].ReasoningContent.String())
+	reasoning := messages[0].ReasoningBlocks()
+	if len(reasoning) != 1 || reasoning[0].Text != "think step" {
+		t.Fatalf("reasoning = %#v", reasoning)
 	}
-	if messages[0].FunctionCall == nil || messages[0].FunctionCall.Name != "search" || messages[0].FunctionCall.Arguments != "hello" {
-		t.Fatalf("function call = %#v", messages[0].FunctionCall)
+	calls := messages[0].FunctionToolCalls()
+	if len(calls) != 1 || calls[0].ID != "call-1" || calls[0].Name != "search" || calls[0].Arguments != `{"text":"hello"}` {
+		t.Fatalf("function calls = %#v", calls)
 	}
-	if messages[0].FunctionID("") != "call-1" {
-		t.Fatalf("function id = %q", messages[0].FunctionID(""))
+	if response.Usage == nil || response.Usage.TotalTokens != 7 || response.Usage.ReasoningTokens != 2 {
+		t.Fatalf("usage = %#v", response.Usage)
 	}
-	if usage == nil || usage.TotalTokens != 7 || usage.ReasoningTokens != 2 {
-		t.Fatalf("usage = %#v", usage)
+	meta := messages[0].ResponseMeta
+	if meta == nil || meta.ID != "resp-stream" || meta.Model != "deepseek-chat" || meta.FinishReason != "tool_calls" || meta.Usage == nil || meta.Usage.TotalTokens != 7 {
+		t.Fatalf("response meta = %#v", meta)
 	}
 }
 
@@ -120,7 +112,8 @@ func TestOpenAICompatibleNonStreamingAndCapabilities(t *testing.T) {
 	if len(response.Messages) != 1 {
 		t.Fatalf("response = %#v", response)
 	}
-	if response.Messages[0].Text() != "ok" || response.Messages[0].ReasoningContent.String() != "private thought" {
+	reasoning := response.Messages[0].ReasoningBlocks()
+	if response.Messages[0].JoinedText("") != "ok" || len(reasoning) != 1 || reasoning[0].Text != "private thought" {
 		t.Fatalf("message = %#v", response.Messages[0])
 	}
 	if response.Usage == nil || response.Usage.TotalTokens != 3 {
@@ -181,26 +174,20 @@ func TestOpenAICompatibleStreamingPreservesSparseToolCallIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accumulator := llm.NewDeltaAccumulator(true)
-	for item := range stream {
-		if item.Err != nil {
-			t.Fatal(item.Err)
-		}
-		if item.Value.Kind == llm.EventDelta {
-			if _, err := accumulator.Apply(item.Value); err != nil {
-				t.Fatal(err)
-			}
-		}
+	response, err := stream.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	messages := accumulator.Messages()
-	if len(messages) != 2 {
+	messages := response.Messages
+	if len(messages) != 1 {
 		t.Fatalf("messages=%#v", messages)
 	}
-	if messages[0].FunctionCall == nil || messages[0].FunctionCall.Name != "first" || messages[0].FunctionCall.Arguments != `{"value":"one"}` || messages[0].FunctionID("") != "call-0" {
-		t.Fatalf("first call=%#v", messages[0])
+	calls := messages[0].FunctionToolCalls()
+	if len(calls) != 2 || calls[0].ID != "call-0" || calls[0].Name != "first" || calls[0].Arguments != `{"value":"one"}` {
+		t.Fatalf("first call=%#v", calls)
 	}
-	if messages[1].FunctionCall == nil || messages[1].FunctionCall.Name != "second" || messages[1].FunctionCall.Arguments != `{"value":"two"}` || messages[1].FunctionID("") != "call-1" {
-		t.Fatalf("second call=%#v", messages[1])
+	if calls[1].ID != "call-1" || calls[1].Name != "second" || calls[1].Arguments != `{"value":"two"}` {
+		t.Fatalf("second call=%#v", calls)
 	}
 }
 
@@ -221,12 +208,7 @@ func TestOpenAICompatibleStreamingRejectsEOFBeforeDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var streamErr error
-	for item := range stream {
-		if item.Err != nil {
-			streamErr = item.Err
-		}
-	}
+	_, streamErr := stream.Collect(context.Background())
 	if streamErr == nil || !strings.Contains(streamErr.Error(), "before [DONE]") {
 		t.Fatalf("stream error=%v", streamErr)
 	}
@@ -273,12 +255,7 @@ func TestOpenAICompatibleRejectsInvalidToolCallIndexes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var streamErr error
-			for item := range stream {
-				if item.Err != nil {
-					streamErr = item.Err
-				}
-			}
+			_, streamErr := stream.Collect(context.Background())
 			if streamErr == nil || !strings.Contains(streamErr.Error(), "tool call index") {
 				t.Fatalf("stream error=%v", streamErr)
 			}

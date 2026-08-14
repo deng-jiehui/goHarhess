@@ -20,20 +20,16 @@ import (
 const (
 	DefaultCacheTTL       = 5 * time.Minute
 	DefaultCacheNamespace = "llm"
-	cacheKeyVersion       = "v2"
+	cacheKeyVersion       = "v3"
 )
 
 type CacheEntry struct {
-	Events    []corellm.Event `json:"events"`
-	CreatedAt time.Time       `json:"created_at"`
+	Response  corellm.Response `json:"response"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
 func (e CacheEntry) Clone() CacheEntry {
-	events := make([]corellm.Event, len(e.Events))
-	for index := range e.Events {
-		events[index] = e.Events[index].Clone()
-	}
-	return CacheEntry{Events: events, CreatedAt: e.CreatedAt}
+	return CacheEntry{Response: e.Response.Clone(), CreatedAt: e.CreatedAt}
 }
 
 type CacheStore interface {
@@ -74,10 +70,11 @@ type cacheCounters struct {
 	skippedWrites atomic.Uint64
 }
 
-// CachedModel decorates the canonical Model protocol. Provider wire formats
-// remain private to the provider; the cache stores normalized model events.
+// CachedModel stores one complete provider-neutral Response per request. Live
+// model chunks remain on the caller's Context EventStream and never enter the
+// cache data plane.
 type CachedModel struct {
-	next               corellm.Model
+	next               corellm.ChatModel
 	store              CacheStore
 	modelID            string
 	namespace          string
@@ -91,9 +88,9 @@ type CachedModel struct {
 	stats   cacheCounters
 }
 
-var _ corellm.Model = (*CachedModel)(nil)
+var _ corellm.ChatModel = (*CachedModel)(nil)
 
-func NewCachedModel(next corellm.Model, cfg CacheConfig) (*CachedModel, error) {
+func NewCachedModel(next corellm.ChatModel, cfg CacheConfig) (*CachedModel, error) {
 	if next == nil {
 		return nil, errors.New("cached model requires an underlying model")
 	}
@@ -116,27 +113,21 @@ func NewCachedModel(next corellm.Model, cfg CacheConfig) (*CachedModel, error) {
 		return nil, fmt.Errorf("cache TTL cannot be negative: %s", ttl)
 	}
 	return &CachedModel{
-		next:               next,
-		store:              cfg.Store,
-		modelID:            modelID,
-		namespace:          namespace,
-		ttl:                ttl,
-		cacheFunctionCalls: cfg.CacheFunctionCalls,
-		strictStoreErrors:  cfg.StrictStoreErrors,
-		sensitiveDetector:  cfg.SensitiveDetector,
-		flights:            map[string]*cacheFlight{},
+		next: next, store: cfg.Store, modelID: modelID, namespace: namespace, ttl: ttl,
+		cacheFunctionCalls: cfg.CacheFunctionCalls, strictStoreErrors: cfg.StrictStoreErrors,
+		sensitiveDetector: cfg.SensitiveDetector, flights: map[string]*cacheFlight{},
 	}, nil
 }
 
 func (m *CachedModel) Invoke(ctx context.Context, request corellm.Request, options ...runnable.Option) (corellm.Response, error) {
-	stream, err := m.Stream(ctx, request, options...)
+	reader, err := m.Stream(ctx, request, options...)
 	if err != nil {
 		return corellm.Response{}, err
 	}
-	return corellm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return corellm.CollectResponse(ctx, reader)
 }
 
-func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, options ...runnable.Option) (runnable.Stream[corellm.Event], error) {
+func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, options ...runnable.Option) (*runnable.StreamReader[corellm.Response], error) {
 	if ctx == nil {
 		return nil, errors.New("cached model context cannot be nil")
 	}
@@ -165,48 +156,49 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 	}
 	if found {
 		m.stats.hits.Add(1)
-		return replayEvents(ctx, entry.Events), nil
+		return responseReader(ctx, entry.Response), nil
 	}
 	m.stats.misses.Add(1)
 
 	m.mu.Lock()
-	if flight := m.flights[key]; flight != nil {
-		if flight.active() {
-			m.stats.shared.Add(1)
-			m.mu.Unlock()
-			return flight.subscribe(ctx), nil
-		}
-		delete(m.flights, key)
+	if flight := m.flights[key]; flight != nil && flight.active() {
+		m.stats.shared.Add(1)
+		reader := flight.subscribe(ctx)
+		m.mu.Unlock()
+		return reader, nil
 	}
 	flight := newCacheFlight(ctx)
 	m.flights[key] = flight
-	m.mu.Unlock()
 	leader := flight.subscribe(ctx)
+	m.mu.Unlock()
 
 	upstream, err := m.next.Stream(flight.ctx, request, options...)
 	if err != nil {
-		flight.append(runnable.Item[corellm.Event]{Err: err})
+		flight.complete(corellm.Response{}, err)
 		m.removeFlight(key, flight)
-		flight.finish()
-		flight.releaseSubscriber()
+		_ = leader.Close()
 		return nil, err
 	}
 	if upstream == nil {
 		err = errors.New("underlying model returned a nil stream")
-		flight.append(runnable.Item[corellm.Event]{Err: err})
+		flight.complete(corellm.Response{}, err)
 		m.removeFlight(key, flight)
-		flight.finish()
-		flight.releaseSubscriber()
+		_ = leader.Close()
 		return nil, err
 	}
-
-	go m.consumeFlight(flight.ctx, key, flight, upstream)
+	go m.consumeFlight(key, flight, upstream)
 	return leader, nil
 }
 
-func (m *CachedModel) Capabilities() corellm.Capabilities {
-	return m.next.Capabilities()
+func (m *CachedModel) Collect(ctx context.Context, input *runnable.StreamReader[corellm.Request], options ...runnable.Option) (corellm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, input, m.Invoke, options...)
 }
+
+func (m *CachedModel) Transform(ctx context.Context, input *runnable.StreamReader[corellm.Request], options ...runnable.Option) (*runnable.StreamReader[corellm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, input, m.Invoke, options...)
+}
+
+func (m *CachedModel) Capabilities() corellm.Capabilities { return m.next.Capabilities() }
 
 func (m *CachedModel) ModelInfo() corellm.ModelInfo {
 	info := corellm.DescribeModel(m.next)
@@ -223,12 +215,8 @@ func (m *CachedModel) ModelInfo() corellm.ModelInfo {
 
 func (m *CachedModel) Stats() CacheStats {
 	return CacheStats{
-		Hits:          m.stats.hits.Load(),
-		Misses:        m.stats.misses.Load(),
-		Writes:        m.stats.writes.Load(),
-		Shared:        m.stats.shared.Load(),
-		Bypasses:      m.stats.bypasses.Load(),
-		StoreErrors:   m.stats.storeErrors.Load(),
+		Hits: m.stats.hits.Load(), Misses: m.stats.misses.Load(), Writes: m.stats.writes.Load(),
+		Shared: m.stats.shared.Load(), Bypasses: m.stats.bypasses.Load(), StoreErrors: m.stats.storeErrors.Load(),
 		SkippedWrites: m.stats.skippedWrites.Load(),
 	}
 }
@@ -244,11 +232,9 @@ const (
 func WithCacheTenant(ctx context.Context, tenant string) context.Context {
 	return context.WithValue(ctx, cacheTenantKey, strings.TrimSpace(tenant))
 }
-
 func WithCacheBypass(ctx context.Context) context.Context {
 	return context.WithValue(ctx, cacheBypassKey, true)
 }
-
 func WithSensitiveRequest(ctx context.Context) context.Context {
 	return context.WithValue(ctx, cacheSensitiveKey, true)
 }
@@ -285,61 +271,22 @@ func (m *CachedModel) cacheKey(ctx context.Context, request corellm.Request) (st
 	return fmt.Sprintf("%s:%s:%s:%s", m.namespace, cacheKeyVersion, hex.EncodeToString(tenantHash[:8]), hex.EncodeToString(requestHash[:])), nil
 }
 
-func (m *CachedModel) consumeFlight(ctx context.Context, key string, flight *cacheFlight, upstream runnable.Stream[corellm.Event]) {
-	entry := CacheEntry{CreatedAt: time.Now().UTC()}
-	cacheable := true
-	hasPayload := false
-	done := corellm.Event{Kind: corellm.EventDone}
-
-	for {
-		var item runnable.Item[corellm.Event]
-		var open bool
-		select {
-		case <-ctx.Done():
-			m.removeFlight(key, flight)
-			flight.finish()
-			return
-		case item, open = <-upstream:
-		}
-		if !open {
-			break
-		}
-		item = cloneEventItem(item)
-		if item.Err != nil {
-			flight.append(item)
-			m.removeFlight(key, flight)
-			flight.finish()
-			return
-		}
-		if item.Value.Kind == corellm.EventDone {
-			done = item.Value.Clone()
-			continue
-		}
-		hasPayload = true
-		entry.Events = append(entry.Events, item.Value.Clone())
-		flight.append(item)
-		if containsFunctionCall(item.Value.Messages) && !m.cacheFunctionCalls {
-			cacheable = false
-		}
-	}
-	if err := ctx.Err(); err != nil {
+func (m *CachedModel) consumeFlight(key string, flight *cacheFlight, upstream *runnable.StreamReader[corellm.Response]) {
+	defer upstream.Close()
+	response, err := corellm.CollectResponse(flight.ctx, upstream)
+	if err != nil {
+		flight.complete(corellm.Response{}, err)
 		m.removeFlight(key, flight)
-		flight.finish()
 		return
 	}
-
-	if !hasPayload {
-		cacheable = false
-	}
-	entry.Events = append(entry.Events, done.Clone())
+	cacheable := m.cacheFunctionCalls || !containsFunctionCall(response.Messages)
 	if cacheable {
-		if err := m.store.Set(context.WithoutCancel(ctx), key, entry, m.ttl); err != nil {
+		entry := CacheEntry{Response: response.Clone(), CreatedAt: time.Now().UTC()}
+		if err := m.store.Set(context.WithoutCancel(flight.ctx), key, entry, m.ttl); err != nil {
 			m.stats.storeErrors.Add(1)
 			if m.strictStoreErrors {
-				item := runnable.Item[corellm.Event]{Err: fmt.Errorf("write LLM cache: %w", err)}
-				flight.append(item)
+				flight.complete(corellm.Response{}, fmt.Errorf("write LLM cache: %w", err))
 				m.removeFlight(key, flight)
-				flight.finish()
 				return
 			}
 		} else {
@@ -348,11 +295,8 @@ func (m *CachedModel) consumeFlight(ctx context.Context, key string, flight *cac
 	} else {
 		m.stats.skippedWrites.Add(1)
 	}
-
-	doneItem := runnable.Item[corellm.Event]{Value: done}
-	flight.append(doneItem)
+	flight.complete(response, nil)
 	m.removeFlight(key, flight)
-	flight.finish()
 }
 
 func (m *CachedModel) removeFlight(key string, flight *cacheFlight) {
@@ -364,61 +308,56 @@ func (m *CachedModel) removeFlight(key string, flight *cacheFlight) {
 }
 
 type cacheFlight struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+
 	mu          sync.Mutex
-	history     []runnable.Item[corellm.Event]
-	changed     chan struct{}
+	response    corellm.Response
+	err         error
 	finished    bool
 	subscribers int
 }
 
 func newCacheFlight(ctx context.Context) *cacheFlight {
-	control, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	return &cacheFlight{ctx: control, cancel: cancel, changed: make(chan struct{})}
+	flightCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return &cacheFlight{ctx: flightCtx, cancel: cancel, done: make(chan struct{})}
 }
 
-func (f *cacheFlight) subscribe(ctx context.Context) runnable.Stream[corellm.Event] {
-	out := make(chan runnable.Item[corellm.Event])
+func (f *cacheFlight) subscribe(ctx context.Context) *runnable.StreamReader[corellm.Response] {
+	reader, writer := runnable.Pipe[corellm.Response](context.WithoutCancel(ctx))
 	f.mu.Lock()
 	f.subscribers++
 	f.mu.Unlock()
 	go func() {
-		defer close(out)
 		defer f.releaseSubscriber()
-		index := 0
-		for {
-			f.mu.Lock()
-			pending := cloneEventItems(f.history[index:])
-			index = len(f.history)
-			finished := f.finished
-			changed := f.changed
-			f.mu.Unlock()
-			for _, item := range pending {
-				if !emitEventItem(ctx, out, item) {
-					return
-				}
-			}
-			if finished {
+		select {
+		case <-ctx.Done():
+			_ = writer.CloseWithError(ctx.Err())
+		case <-reader.Context().Done():
+		case <-f.done:
+			response, err := f.result()
+			if err != nil {
+				_ = writer.CloseWithError(err)
 				return
 			}
-			select {
-			case <-ctx.Done():
+			if err := writer.Send(response); err != nil {
 				return
-			case <-changed:
 			}
+			_ = writer.Close()
 		}
 	}()
-	return out
+	return reader
 }
 
 func (f *cacheFlight) releaseSubscriber() {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.subscribers > 0 {
 		f.subscribers--
 	}
-	if f.subscribers == 0 && !f.finished {
+	shouldCancel := f.subscribers == 0 && !f.finished
+	f.mu.Unlock()
+	if shouldCancel {
 		f.cancel()
 	}
 }
@@ -429,62 +368,35 @@ func (f *cacheFlight) active() bool {
 	return !f.finished && f.ctx.Err() == nil
 }
 
-func (f *cacheFlight) append(item runnable.Item[corellm.Event]) {
+func (f *cacheFlight) complete(response corellm.Response, err error) {
 	f.mu.Lock()
 	if f.finished {
 		f.mu.Unlock()
 		return
 	}
-	f.history = append(f.history, cloneEventItem(item))
-	close(f.changed)
-	f.changed = make(chan struct{})
-	f.mu.Unlock()
-}
-
-func (f *cacheFlight) finish() {
-	f.mu.Lock()
-	if f.finished {
-		f.mu.Unlock()
-		return
-	}
+	f.response = response.Clone()
+	f.err = err
 	f.finished = true
-	close(f.changed)
+	close(f.done)
 	f.mu.Unlock()
 	f.cancel()
 }
 
-func replayEvents(ctx context.Context, events []corellm.Event) runnable.Stream[corellm.Event] {
-	out := make(chan runnable.Item[corellm.Event])
+func (f *cacheFlight) result() (corellm.Response, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.response.Clone(), f.err
+}
+
+func responseReader(ctx context.Context, response corellm.Response) *runnable.StreamReader[corellm.Response] {
+	reader, writer := runnable.Pipe[corellm.Response](context.WithoutCancel(ctx))
 	go func() {
-		defer close(out)
-		for _, event := range events {
-			if !emitEventItem(ctx, out, runnable.Item[corellm.Event]{Value: event}) {
-				return
-			}
+		if err := writer.Send(response.Clone()); err != nil {
+			return
 		}
+		_ = writer.Close()
 	}()
-	return out
-}
-
-func emitEventItem(ctx context.Context, out chan<- runnable.Item[corellm.Event], item runnable.Item[corellm.Event]) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case out <- cloneEventItem(item):
-		return true
-	}
-}
-
-func cloneEventItem(item runnable.Item[corellm.Event]) runnable.Item[corellm.Event] {
-	return runnable.Item[corellm.Event]{Value: item.Value.Clone(), Err: item.Err}
-}
-
-func cloneEventItems(items []runnable.Item[corellm.Event]) []runnable.Item[corellm.Event] {
-	cloned := make([]runnable.Item[corellm.Event], len(items))
-	for index := range items {
-		cloned[index] = cloneEventItem(items[index])
-	}
-	return cloned
+	return reader
 }
 
 func cloneRequest(request corellm.Request) corellm.Request {
@@ -497,15 +409,14 @@ func cloneChatOptions(opts corellm.ChatOptions) corellm.ChatOptions {
 	functions := make([]schema.FunctionDefinition, len(opts.Functions))
 	copy(functions, opts.Functions)
 	return corellm.ChatOptions{
-		Functions:           functions,
-		DeltaStream:         opts.DeltaStream,
+		Functions: functions, DeltaStream: opts.DeltaStream,
 		ExtraGenerateConfig: corellm.MergeGenerateConfig(opts.ExtraGenerateConfig, nil),
 	}
 }
 
 func containsFunctionCall(messages []schema.Message) bool {
 	for _, message := range messages {
-		if message.FunctionCall != nil {
+		if len(message.FunctionToolCalls()) > 0 {
 			return true
 		}
 	}

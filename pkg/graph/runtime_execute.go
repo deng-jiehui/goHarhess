@@ -9,7 +9,6 @@ import (
 
 	"goharness/pkg/control"
 	"goharness/pkg/runnable"
-	statepkg "goharness/pkg/state"
 )
 
 func (g *Graph[I, O]) invokeRuntime(ctx context.Context, input I, options ...runnable.Option) (O, error) {
@@ -130,7 +129,7 @@ func (g *Graph[I, O]) invokeRuntimeWithPlan(ctx context.Context, input I, plan r
 		InputType:  typeName(g.inputType),
 		OutputType: typeName(g.outputType),
 		ResumeMode: resumeMode,
-	})
+	}, g.Snapshot().Nodes)
 
 	var runtimeState any
 	if g.stateFactory != nil {
@@ -147,7 +146,7 @@ func (g *Graph[I, O]) invokeRuntimeWithPlan(ctx context.Context, input I, plan r
 			return zero, graphFailure(ctx, err)
 		}
 		ctx = withRuntimeState(ctx, runtimeState)
-		ctx = withRuntimeStateCheckpointProvider(ctx, func(snapshotCtx context.Context) (statepkg.GraphStateCheckpoint, error) {
+		ctx = withRuntimeStateCheckpointProvider(ctx, func(snapshotCtx context.Context) (GraphStateCheckpoint, error) {
 			return g.snapshotRuntimeState(snapshotCtx, runtimeState)
 		})
 	}
@@ -164,7 +163,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 	visits := map[string]int{}
 	startStep := 0
 	pendingNode := ""
-	cursor := statepkg.CursorStackFromContext(ctx)
+	cursor := CursorStackFromContext(ctx)
 	if len(cursor) >= DefaultMaxDepth {
 		return zero, graphFailure(ctx, &ExecutionError{Code: "graph.max_depth", NodeID: g.Name(), Step: len(cursor), Err: fmt.Errorf("maximum graph depth of %d exceeded", DefaultMaxDepth)})
 	}
@@ -237,8 +236,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current erasedValue, r
 			return zero, graphFailure(ctx, err)
 		}
 		visits[next]++
-		frame := statepkg.CursorFrame{Graph: g.Name(), Node: next, Step: step, Iteration: visits[next] - 1}
-		nodeCtx := statepkg.WithCursorStack(ctx, append(cursor.Clone(), frame))
+		frame := CursorFrame{Graph: g.Name(), Node: next, Step: step, Iteration: visits[next] - 1}
+		nodeCtx := WithCursorStack(ctx, append(cursor.Clone(), frame))
 		nodeStart := Event{Type: EventNodeStart, NodeID: next, Step: step}
 		nodeCtx = bindEventContext(nodeCtx, nodeStart)
 		if err := publishControl(nodeCtx, nodeStart); err != nil {
@@ -368,7 +367,7 @@ func (g *Graph[I, O]) persistInterruption(
 	resumeNode string,
 	step int,
 	visits map[string]int,
-	cursor statepkg.CursorStack,
+	cursor CursorStack,
 	runtimeState any,
 ) error {
 	if isNilCheckpointStore(checkpoint.Store) || strings.TrimSpace(checkpoint.Key) == "" {

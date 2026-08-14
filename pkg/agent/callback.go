@@ -5,21 +5,21 @@ import (
 	"errors"
 
 	"goharness/pkg/callback"
-	"goharness/pkg/contextengine"
-	"goharness/pkg/control"
 	"goharness/pkg/llm"
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
-// runLifecycle owns only Agent message-stream integrity and conversation
-// commit. Agent execution lifecycle is the lifecycle of its compiled Graph.
+// runLifecycle owns conversation commit. Agent execution lifecycle is the
+// lifecycle of its compiled Graph.
 type runLifecycle struct {
 	ctx     context.Context
 	session *conversationSession
 }
 
-func (b *Base) beginRun(ctx context.Context, _ []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
+type modelStreamOwnerKey struct{}
+
+func (b *base) beginRun(ctx context.Context, _ []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
 	if ctx == nil {
 		return nil, nil, errors.New("agent run context cannot be nil")
 	}
@@ -30,167 +30,51 @@ func (b *Base) beginRun(ctx context.Context, _ []schema.Message, opts RunOptions
 
 func (*runLifecycle) fail(error) {}
 
-func (l *runLifecycle) wrap(stream runnable.Stream[schema.MessageEvent], bufferSize int) runnable.Stream[schema.MessageEvent] {
-	if stream == nil {
-		err := errors.New("agent returned a nil stream")
-		out := make(chan runnable.Item[schema.MessageEvent], 1)
-		out <- runnable.Item[schema.MessageEvent]{Err: err}
-		close(out)
-		return out
+func (l *runLifecycle) wrap(upstream *runnable.StreamReader[[]schema.Message]) (*runnable.StreamReader[[]schema.Message], error) {
+	if upstream == nil {
+		return nil, errors.New("agent returned a nil stream reader")
 	}
-	if bufferSize < 1 {
-		bufferSize = 1
-	}
-	out := make(chan runnable.Item[schema.MessageEvent], bufferSize)
+	reader, writer := runnable.Pipe[[]schema.Message](context.WithoutCancel(l.ctx))
+	done := make(chan struct{})
 	go func() {
-		defer close(out)
-		var finalMessages []schema.Message
-		sawDone := false
-		for item := range stream {
-			if item.Err != nil {
-				if isPersistedInterruption(item.Err) || interruptCauseRequested(l.ctx) {
-					out <- item
-				} else {
-					emitMessageItem(l.ctx, out, item)
-				}
-				return
-			}
-			if item.Value.Kind == schema.MessageEventDone {
-				sawDone = true
-				continue
-			}
-			if item.Value.Kind == schema.MessageEventSnapshot {
-				finalMessages = schema.CloneMessages(item.Value.Messages)
-			}
-			callback.EmitStream(l.ctx, item.Value.Clone())
-			if !emitMessageItem(l.ctx, out, item) {
-				if _, interrupted := control.AsInterrupt(context.Cause(l.ctx)); interrupted {
-					continue
-				}
-				return
-			}
-		}
-		if err := l.ctx.Err(); err != nil {
+		defer close(done)
+		defer upstream.Close()
+		output, err := upstream.Collect(upstream.Context())
+		if err != nil {
+			_ = writer.CloseWithError(err)
 			return
 		}
-		if !sawDone {
-			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: errors.New("agent stream closed without done event")})
+		output = schema.CloneMessages(output)
+		if err := l.session.commit(l.ctx, output); err != nil {
+			_ = writer.CloseWithError(err)
 			return
 		}
-		if err := l.session.commit(l.ctx, finalMessages); err != nil {
-			emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Err: err})
+		callback.EmitStream(l.ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: output})
+		if err := writer.Send(output); err != nil {
 			return
 		}
-		emitMessageItem(l.ctx, out, runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventDone}})
+		_ = writer.Close()
 	}()
-	return out
-}
-
-func (b *Base) beginLLMCall(
-	ctx context.Context,
-	request llm.Request,
-	opts RunOptions,
-	contextStats contextengine.Stats,
-) (context.Context, callback.Invocation) {
-	info := llm.DescribeModel(b.model)
-	name := info.Name
-	if name == "" {
-		name = info.ModelType
-	}
-	capabilities := b.model.Capabilities()
-	metadata := map[string]any{
-		"llm.provider":                 info.Provider,
-		"llm.model_type":               info.ModelType,
-		"llm.endpoint":                 info.Endpoint,
-		"llm.streaming":                true,
-		"llm.delta_stream":             opts.DeltaStream,
-		"llm.function_count":           len(request.Options.Functions),
-		"llm.capabilities.streaming":   capabilities.Streaming,
-		"llm.capabilities.tool_calls":  capabilities.ToolCalls,
-		"llm.capabilities.vision":      capabilities.Vision,
-		"llm.capabilities.json_schema": capabilities.JSONSchema,
-		"llm.capabilities.reasoning":   capabilities.Reasoning,
-		"context.budget_tokens":        contextStats.BudgetTokens,
-		"context.input_tokens":         contextStats.InputTokens,
-		"context.output_tokens":        contextStats.OutputTokens,
-		"context.stable_prefix_tokens": contextStats.StablePrefixTokens,
-		"context.dropped_turns":        contextStats.DroppedTurns,
-		"context.dropped_messages":     contextStats.DroppedMessages,
-		"context.truncated_messages":   contextStats.TruncatedMessages,
-		"context.role_repairs":         contextStats.RoleRepairs,
-		"context.prompt_cache_aligned": contextStats.PromptCacheAligned,
-	}
-	if len(info.Attributes) > 0 {
-		metadata["llm.attributes"] = info.Attributes
-	}
-	return llm.BeginCallback(ctx, name, metadata, request)
-}
-
-func observeLLMStream(
-	ctx context.Context,
-	stream runnable.Stream[llm.Event],
-	invocation callback.Invocation,
-	deltas bool,
-) runnable.Stream[llm.Event] {
-	out := make(chan runnable.Item[llm.Event])
 	go func() {
-		defer close(out)
-		accumulator := llm.NewDeltaAccumulator(deltas)
-		response := llm.Response{}
-		for {
-			select {
-			case <-ctx.Done():
-				llm.ErrorCallback(ctx, invocation, ctx.Err())
-				return
-			case item, ok := <-stream:
-				if !ok {
-					err := errors.New("llm stream closed without done event")
-					llm.ErrorCallback(ctx, invocation, err)
-					emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
-					return
-				}
-				if item.Err != nil {
-					llm.ErrorCallback(ctx, invocation, item.Err)
-					emitLLMEvent(ctx, out, item)
-					return
-				}
-				event := item.Value
-				if event.Usage != nil {
-					response.Usage = event.Clone().Usage
-				}
-				if event.FinishReason != "" {
-					response.FinishReason = event.FinishReason
-				}
-				if event.Kind == llm.EventDelta && len(event.Messages) > 0 {
-					messages, err := accumulator.Apply(event)
-					if err != nil {
-						llm.ErrorCallback(ctx, invocation, err)
-						emitLLMEvent(ctx, out, runnable.Item[llm.Event]{Err: err})
-						return
-					}
-					response.Messages = messages
-					callback.EmitStream(ctx, response.Clone())
-				}
-				if event.Kind == llm.EventDone {
-					llm.EndCallback(ctx, invocation, response)
-					emitLLMEvent(ctx, out, item)
-					return
-				}
-				if !emitLLMEvent(ctx, out, item) {
-					llm.ErrorCallback(ctx, invocation, ctx.Err())
-					return
-				}
-			}
+		select {
+		case <-reader.Context().Done():
+			_ = upstream.Close()
+		case <-done:
 		}
 	}()
-	return out
+	return reader, nil
 }
 
-func emitLLMEvent(ctx context.Context, out chan<- runnable.Item[llm.Event], event runnable.Item[llm.Event]) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case out <- event:
-		return true
-	}
+func (b *base) bindModelStream(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, modelStreamOwnerKey{}, b)
+	return callback.WithStreamCallbacks(ctx, callback.StreamCallbackOf[llm.Response]("agent-llm", func(dataCtx context.Context, response llm.Response) error {
+		if owner, _ := dataCtx.Value(modelStreamOwnerKey{}).(*base); owner != b {
+			return nil
+		}
+		callback.EmitStream(dataCtx, schema.MessageEvent{
+			Kind:     schema.MessageEventSnapshot,
+			Messages: b.withAgentName(response.Messages),
+		})
+		return nil
+	}))
 }

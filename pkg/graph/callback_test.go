@@ -37,3 +37,31 @@ func TestGraphCallbackClosesFailedNodeBeforeGraphError(t *testing.T) {
 		t.Fatalf("order=%#v", order)
 	}
 }
+
+func TestGraphCallbackCarriesCompiledNodeMetadata(t *testing.T) {
+	var execution graph.NodeExecution
+	observer := graph.CallbackFuncs{CallbackName: "trace", NodeStart: func(_ context.Context, value graph.NodeExecution) error {
+		execution = value
+		return nil
+	}}
+	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := graph.NewGraph[string, string]("metadata")
+	if err := g.AddNode("lookup", describedNode{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(graph.Start, "lookup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge("lookup", graph.End); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mustCompile(t, g).Invoke(callback.WithManager(context.Background(), manager), "input"); err != nil {
+		t.Fatal(err)
+	}
+	if execution.Kind != runnable.NodeKindRetriever || execution.InputType != "string" || execution.OutputType != "string" {
+		t.Fatalf("execution = %#v", execution)
+	}
+}

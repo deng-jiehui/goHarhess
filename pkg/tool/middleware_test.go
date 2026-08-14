@@ -32,9 +32,9 @@ func TestMiddlewareFuncCallsNext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, err := result.ToContent()
-	if err != nil || content.String() != "ok" {
-		t.Fatalf("result = %#v, err = %v", result, err)
+	blocks, err := result.ToContentBlocks()
+	if err != nil || len(blocks) != 1 || blocks[0].Text == nil || blocks[0].Text.Text != "ok" {
+		t.Fatalf("result = %#v, blocks = %#v, err = %v", result, blocks, err)
 	}
 }
 

@@ -2,56 +2,67 @@ package agent
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 
 	"goharness/pkg/runnable"
 	"goharness/pkg/schema"
 )
 
-func TestRunLifecycleRejectsStreamWithoutDone(t *testing.T) {
-	stream := make(chan runnable.Item[schema.MessageEvent], 1)
-	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{
-		Kind:     schema.MessageEventSnapshot,
-		Messages: []schema.Message{schema.AssistantMessage("partial")},
-	}}
-	close(stream)
-
-	lifecycle := &runLifecycle{ctx: context.Background()}
-	wrapped := lifecycle.wrap(stream, 1)
-	var sawError bool
-	var sawDone bool
-	for item := range wrapped {
-		if item.Err != nil {
-			sawError = strings.Contains(item.Err.Error(), "done event")
+func lifecycleStream(t *testing.T, values []schema.Message, terminal error) *runnable.StreamReader[[]schema.Message] {
+	t.Helper()
+	reader, writer := runnable.Pipe[[]schema.Message](context.Background())
+	go func() {
+		for _, value := range values {
+			_ = writer.Send([]schema.Message{value})
 		}
-		if item.Value.Kind == schema.MessageEventDone {
-			sawDone = true
+		if terminal != nil {
+			_ = writer.CloseWithError(terminal)
+		} else {
+			_ = writer.Close()
 		}
-	}
-	if !sawError {
-		t.Fatal("incomplete stream did not produce an error")
-	}
-	if sawDone {
-		t.Fatal("incomplete stream produced a successful Done event")
-	}
+	}()
+	return reader
 }
 
-func TestReduceMessageEventsAcceptsEmptyFinalSnapshot(t *testing.T) {
-	stream := make(chan runnable.Item[schema.MessageEvent], 3)
-	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{
-		Kind:     schema.MessageEventSnapshot,
-		Messages: []schema.Message{schema.AssistantMessage("stale")},
-	}}
-	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventSnapshot}}
-	stream <- runnable.Item[schema.MessageEvent]{Value: schema.MessageEvent{Kind: schema.MessageEventDone}}
-	close(stream)
-
-	output, err := reduceMessageEvents(context.Background(), stream)
+func TestRunLifecycleReturnsOnlyFinalMessages(t *testing.T) {
+	lifecycle := &runLifecycle{ctx: context.Background()}
+	wrapped, err := lifecycle.wrap(lifecycleStream(t, []schema.Message{schema.AssistantMessage("final")}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 0 {
-		t.Fatalf("output = %#v, want empty final snapshot", output)
+	output, err := wrapped.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 1 || output[0].JoinedText("") != "final" {
+		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunLifecyclePreservesEmptyFinalMessages(t *testing.T) {
+	lifecycle := &runLifecycle{ctx: context.Background()}
+	wrapped, err := lifecycle.wrap(lifecycleStream(t, []schema.Message{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := wrapped.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output == nil || len(output) != 0 {
+		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunLifecyclePropagatesUpstreamError(t *testing.T) {
+	want := errors.New("upstream")
+	lifecycle := &runLifecycle{ctx: context.Background()}
+	wrapped, err := lifecycle.wrap(lifecycleStream(t, nil, want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = wrapped.Collect(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("err=%v", err)
 	}
 }

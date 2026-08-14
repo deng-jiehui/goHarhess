@@ -32,22 +32,22 @@ func (b *ConversationBuilder) System(text string) *ConversationBuilder {
 }
 
 func (b *ConversationBuilder) User(text string) *ConversationBuilder {
-	return b.Message(schema.UserMessage(text))
+	return b.UserBlocks(schema.NewTextBlock(text))
 }
 
-func (b *ConversationBuilder) UserContent(content schema.Content) *ConversationBuilder {
-	return b.Message(schema.NewMessage(schema.RoleUser, content))
+func (b *ConversationBuilder) UserBlocks(blocks ...schema.ContentBlock) *ConversationBuilder {
+	return b.Message(schema.NewMessage(schema.RoleUser, blocks...))
 }
 
 func (b *ConversationBuilder) Assistant(text string) *ConversationBuilder {
-	return b.Message(schema.AssistantMessage(text))
+	return b.AssistantBlocks(schema.NewTextBlock(text))
 }
 
-func (b *ConversationBuilder) AssistantContent(content schema.Content) *ConversationBuilder {
-	return b.Message(schema.NewMessage(schema.RoleAssistant, content))
+func (b *ConversationBuilder) AssistantBlocks(blocks ...schema.ContentBlock) *ConversationBuilder {
+	return b.Message(schema.NewMessage(schema.RoleAssistant, blocks...))
 }
 
-func (b *ConversationBuilder) AssistantCall(name, arguments, functionID string) *ConversationBuilder {
+func (b *ConversationBuilder) AssistantCall(functionID, name, arguments string) *ConversationBuilder {
 	if b == nil || b.err != nil {
 		return b
 	}
@@ -62,25 +62,14 @@ func (b *ConversationBuilder) AssistantCall(name, arguments, functionID string) 
 		b.err = fmt.Errorf("assistant function call %q arguments are not valid JSON", name)
 		return b
 	}
-	message := schema.Message{
-		Role:         schema.RoleAssistant,
-		FunctionCall: &schema.FunctionCall{Name: name, Arguments: arguments},
-	}
-	if functionID != "" {
-		message.Extra = map[string]any{"function_id": functionID}
-	}
-	return b.Message(message)
+	return b.AssistantBlocks(schema.NewFunctionToolCallBlock(functionID, name, arguments))
 }
 
-func (b *ConversationBuilder) Function(name string, content schema.Content, functionID string) *ConversationBuilder {
-	message := schema.FunctionMessage(name, content)
-	if functionID != "" {
-		message.Extra = map[string]any{"function_id": functionID}
-	}
-	return b.Message(message)
+func (b *ConversationBuilder) ToolResult(id, name string, isError bool, blocks ...schema.ContentBlock) *ConversationBuilder {
+	return b.Message(schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock(id, name, isError, blocks...)))
 }
 
-func (b *ConversationBuilder) Reasoning(text string) *ConversationBuilder {
+func (b *ConversationBuilder) Reasoning(text, signature string) *ConversationBuilder {
 	if b == nil || b.err != nil {
 		return b
 	}
@@ -88,7 +77,7 @@ func (b *ConversationBuilder) Reasoning(text string) *ConversationBuilder {
 		b.err = errors.New("reasoning requires a preceding assistant message")
 		return b
 	}
-	b.messages[len(b.messages)-1].ReasoningContent = schema.TextContent(text)
+	b.messages[len(b.messages)-1].ContentBlocks = append(b.messages[len(b.messages)-1].ContentBlocks, schema.NewReasoningBlock(text, signature))
 	return b
 }
 
@@ -123,43 +112,40 @@ func (b *ConversationBuilder) Build() ([]schema.Message, error) {
 	return schema.CloneMessages(b.messages), nil
 }
 
-// ContextBuilder collects the three assembly inputs and delegates policy to an
-// Engine at Build time.
-type ContextBuilder struct {
+// RequestBuilder collects the three assembly inputs and delegates policy to a
+// ContextBuilder Runnable at Build time.
+type RequestBuilder struct {
 	engine  runnable.Runnable[Request, Result]
 	request Request
 	err     error
 }
 
-func NewContextBuilder(engine runnable.Runnable[Request, Result]) *ContextBuilder {
-	if engine == nil {
-		engine = NewDefault()
-	}
-	return &ContextBuilder{engine: engine}
+func NewRequestBuilder(engine runnable.Runnable[Request, Result]) *RequestBuilder {
+	return &RequestBuilder{engine: engine}
 }
 
-func (b *ContextBuilder) Pinned(messages ...schema.Message) *ContextBuilder {
+func (b *RequestBuilder) Pinned(messages ...schema.Message) *RequestBuilder {
 	if b != nil && b.err == nil {
 		b.request.Pinned = append(b.request.Pinned, schema.CloneMessages(messages)...)
 	}
 	return b
 }
 
-func (b *ContextBuilder) History(messages ...schema.Message) *ContextBuilder {
+func (b *RequestBuilder) History(messages ...schema.Message) *RequestBuilder {
 	if b != nil && b.err == nil {
 		b.request.History = append(b.request.History, schema.CloneMessages(messages)...)
 	}
 	return b
 }
 
-func (b *ContextBuilder) Input(messages ...schema.Message) *ContextBuilder {
+func (b *RequestBuilder) Input(messages ...schema.Message) *RequestBuilder {
 	if b != nil && b.err == nil {
 		b.request.Input = append(b.request.Input, schema.CloneMessages(messages)...)
 	}
 	return b
 }
 
-func (b *ContextBuilder) TokenBudget(maxContextTokens, reservedOutputTokens int) *ContextBuilder {
+func (b *RequestBuilder) TokenBudget(maxContextTokens, reservedOutputTokens int) *RequestBuilder {
 	if b == nil || b.err != nil {
 		return b
 	}
@@ -172,9 +158,9 @@ func (b *ContextBuilder) TokenBudget(maxContextTokens, reservedOutputTokens int)
 	return b
 }
 
-func (b *ContextBuilder) Build(ctx context.Context) (Result, error) {
+func (b *RequestBuilder) Build(ctx context.Context) (Result, error) {
 	if b == nil || b.engine == nil {
-		return Result{}, errors.New("context builder is not configured")
+		return Result{}, errors.New("context request builder is not configured")
 	}
 	if b.err != nil {
 		return Result{}, b.err

@@ -15,23 +15,14 @@ import (
 
 func TestReactAgentAssemblesDeltaFunctionCall(t *testing.T) {
 	model := newDeltaScriptedModel(
-		[]llm.Event{
+		[]llm.Response{
+			{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.ContentBlock{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: &schema.FunctionToolCall{ID: "call-", Name: "ec", Arguments: `{"text":"hel`}})}},
 			{Messages: []schema.Message{{
-				Role: schema.RoleAssistant,
-				FunctionCall: &schema.FunctionCall{
-					Name:      "ec",
-					Arguments: `{"text":"hel`,
-				},
-			}}},
-			{Messages: []schema.Message{{
-				Role: schema.RoleAssistant,
-				FunctionCall: &schema.FunctionCall{
-					Name:      "ho",
-					Arguments: `lo"}`,
-				},
+				Role:          schema.RoleAssistant,
+				ContentBlocks: []schema.ContentBlock{{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: &schema.FunctionToolCall{ID: "1", Name: "ho", Arguments: `lo"}`}}},
 			}}},
 		},
-		[]llm.Event{
+		[]llm.Response{
 			{Messages: []schema.Message{schema.AssistantMessage("d")}},
 			{Messages: []schema.Message{schema.AssistantMessage("one")}},
 		},
@@ -51,13 +42,14 @@ func TestReactAgentAssemblesDeltaFunctionCall(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("messages = %#v", last)
 	}
-	if last[0].FunctionCall == nil || last[0].FunctionCall.Name != "echo" || last[0].FunctionCall.Arguments != `{"text":"hello"}` {
-		t.Fatalf("function call = %#v", last[0].FunctionCall)
+	calls := last[0].FunctionToolCalls()
+	if len(calls) != 1 || calls[0].ID != "call-1" || calls[0].Name != "echo" || calls[0].Arguments != `{"text":"hello"}` {
+		t.Fatalf("function calls = %#v", calls)
 	}
-	if last[1].Role != schema.RoleFunction || last[1].Text() != "hello" {
+	if last[1].Role != schema.RoleTool || len(last[1].FunctionToolResults()) != 1 {
 		t.Fatalf("observation = %#v", last[1])
 	}
-	if last[2].Text() != "done" {
+	if last[2].JoinedText("") != "done" {
 		t.Fatalf("final response = %#v", last[2])
 	}
 	model.assertDeltaStream(t)
@@ -65,11 +57,11 @@ func TestReactAgentAssemblesDeltaFunctionCall(t *testing.T) {
 
 func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 	model := newDeltaScriptedModel(
-		[]llm.Event{
+		[]llm.Response{
 			{Messages: []schema.Message{schema.AssistantMessage("Thought: call echo\nAct")}},
 			{Messages: []schema.Message{schema.AssistantMessage("ion: echo\nAction Input: {\"text\":\"hi\"}")}},
 		},
-		[]llm.Event{
+		[]llm.Response{
 			{Messages: []schema.Message{schema.AssistantMessage("Final ")}},
 			{Messages: []schema.Message{schema.AssistantMessage("Answer: done")}},
 		},
@@ -91,10 +83,10 @@ func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("messages = %#v", last)
 	}
-	if last[1].Text() != "Observation: hi\nThought: " {
+	if last[1].JoinedText("") != "Observation: hi\nThought: " {
 		t.Fatalf("observation = %#v", last[1])
 	}
-	if last[2].Text() != "Final Answer: done" {
+	if last[2].JoinedText("") != "Final Answer: done" {
 		t.Fatalf("final response = %#v", last[2])
 	}
 	model.assertDeltaStream(t)
@@ -102,11 +94,11 @@ func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 
 type deltaScriptedModel struct {
 	mu        sync.Mutex
-	responses [][]llm.Event
+	responses [][]llm.Response
 	options   []llm.ChatOptions
 }
 
-func newDeltaScriptedModel(responses ...[]llm.Event) *deltaScriptedModel {
+func newDeltaScriptedModel(responses ...[]llm.Response) *deltaScriptedModel {
 	return &deltaScriptedModel{responses: responses}
 }
 
@@ -115,10 +107,10 @@ func (m *deltaScriptedModel) Invoke(ctx context.Context, request llm.Request, op
 	if err != nil {
 		return llm.Response{}, err
 	}
-	return llm.ReduceEvents(ctx, stream, request.Options.DeltaStream)
+	return stream.Collect(ctx)
 }
 
-func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (runnable.Stream[llm.Event], error) {
+func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
 	m.mu.Lock()
 	if len(m.responses) == 0 {
 		m.mu.Unlock()
@@ -129,21 +121,22 @@ func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, _ 
 	m.options = append(m.options, request.Options)
 	m.mu.Unlock()
 
-	out := make(chan runnable.Item[llm.Event])
+	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		defer close(out)
+		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
 		for _, event := range events {
-			event.Kind = llm.EventDelta
-			select {
-			case <-ctx.Done():
-				out <- runnable.Item[llm.Event]{Err: ctx.Err()}
+			messages, err := accumulator.Apply(event)
+			if err != nil {
+				_ = writer.CloseWithError(err)
 				return
-			case out <- runnable.Item[llm.Event]{Value: event}:
+			}
+			if err := writer.Send(llm.Response{Messages: messages, Usage: event.Usage, FinishReason: event.FinishReason}); err != nil {
+				return
 			}
 		}
-		out <- runnable.Item[llm.Event]{Value: llm.Event{Kind: llm.EventDone}}
+		_ = writer.Close()
 	}()
-	return out, nil
+	return reader, nil
 }
 
 func (m *deltaScriptedModel) Capabilities() llm.Capabilities {
@@ -152,6 +145,12 @@ func (m *deltaScriptedModel) Capabilities() llm.Capabilities {
 
 func (m *deltaScriptedModel) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{Name: "delta-scripted", Provider: "test", ModelType: "scripted"}
+}
+func (m *deltaScriptedModel) Collect(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, in, m.Invoke, opts...)
+}
+func (m *deltaScriptedModel) Transform(ctx context.Context, in *runnable.StreamReader[llm.Request], opts ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, in, m.Invoke, opts...)
 }
 
 func (m *deltaScriptedModel) assertDeltaStream(t *testing.T) {

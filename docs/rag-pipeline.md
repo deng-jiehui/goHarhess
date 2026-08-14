@@ -65,12 +65,12 @@ Run retrieval with the same canonical contract:
 hits, err := searcher.Invoke(ctx, retrieval.HybridQuery{Text: query, TopK: 8})
 ```
 
-## Agent memory
+## Model reference context
 
-`memory.HybridRetriever` implements
-`Runnable[memory.RetrieveRequest, string]`. It builds a file filter, emits citation-bearing reference blocks, and
-truncates them to `RAGConfig.MaxRefToken`.
+`retrieval.HybridRetriever` implements
+`Runnable[retrieval.ReferenceRequest, string]`. It builds a file filter, emits
+citation-bearing reference blocks, and truncates them to `ReferenceRequest.MaxTokens`.
 
 Documents should include a `file` metadata value when the default file filter
 is used. Applications with another metadata schema can supply a custom
-`memory.FileFilterBuilder`.
+`retrieval.FileFilterBuilder`.

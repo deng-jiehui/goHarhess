@@ -14,10 +14,7 @@ import (
 )
 
 func routingCall(name string) schema.Message {
-	message := schema.AssistantMessage("")
-	message.FunctionCall = &schema.FunctionCall{Name: name, Arguments: `{}`}
-	message.Extra = map[string]any{"function_id": name + "-1"}
-	return message
+	return schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(name+"-1", name, `{}`))
 }
 
 func TestRoutingAgentSupervisorReturnsControlAfterSubAgent(t *testing.T) {
@@ -44,7 +41,7 @@ func TestRoutingAgentSupervisorReturnsControlAfterSubAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 2 || output[0].Role != schema.RoleFunction || output[0].Text() != "research result" || output[1].Text() != "final answer" {
+	if len(output) != 2 || output[0].Role != schema.RoleTool || toolResultText(output[0]) != "research result" || output[1].JoinedText("") != "final answer" {
 		t.Fatalf("supervisor output = %#v", output)
 	}
 }
@@ -65,7 +62,7 @@ func TestRoutingAgentRejectsModelStreamWithoutDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")}); err == nil || !strings.Contains(err.Error(), "without done event") {
+	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")}); err == nil || !strings.Contains(err.Error(), "without a result") {
 		t.Fatalf("routing error = %v", err)
 	}
 }
@@ -94,7 +91,7 @@ func TestRoutingAgentRouterReturnsSubAgentOutputDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output) != 1 || output[0].Text() != "direct result" || output[0].Name != "writer" {
+	if len(output) != 1 || output[0].JoinedText("") != "direct result" || output[0].Extra["agent_name"] != "writer" {
 		t.Fatalf("router output = %#v", output)
 	}
 }
@@ -121,11 +118,11 @@ func TestRoutingAgentDoesNotSendSupervisorToolCallToChild(t *testing.T) {
 	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("delegate")}); err != nil {
 		t.Fatal(err)
 	}
-	if len(childInput) != 1 || childInput[0].Role != schema.RoleUser || childInput[0].Text() != "delegate" {
+	if len(childInput) != 1 || childInput[0].Role != schema.RoleUser || childInput[0].JoinedText("") != "delegate" {
 		t.Fatalf("child input=%#v", childInput)
 	}
 	for _, message := range childInput {
-		if message.FunctionCall != nil {
+		if len(message.FunctionToolCalls()) != 0 {
 			t.Fatalf("unresolved supervisor call leaked: %#v", message)
 		}
 	}
@@ -151,7 +148,7 @@ func TestRoutingAgentExplicitRouterModeAllowsZeroMaxSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")})
-	if err != nil || len(output) != 1 || output[0].Text() != "router result" {
+	if err != nil || len(output) != 1 || output[0].JoinedText("") != "router result" {
 		t.Fatalf("router output=%#v err=%v", output, err)
 	}
 }
@@ -202,12 +199,12 @@ func TestRoutingAgentSupervisorHandlesUnknownSubAgentAndChildError(t *testing.T)
 		t.Fatal(err)
 	}
 	output, err := supervisor.Invoke(context.Background(), []schema.Message{schema.UserMessage("route safely")})
-	if err != nil || len(output) == 0 || output[len(output)-1].Text() != "recovered" {
+	if err != nil || len(output) == 0 || output[len(output)-1].JoinedText("") != "recovered" {
 		t.Fatalf("supervisor output=%#v err=%v", output, err)
 	}
 	joined := ""
 	for _, message := range output {
-		joined += message.Text() + "\n"
+		joined += toolResultText(message) + message.JoinedText("") + "\n"
 	}
 	if !strings.Contains(joined, "unregistered") || !strings.Contains(joined, "provider unavailable") {
 		t.Fatalf("supervisor observations=%q", joined)
@@ -282,10 +279,16 @@ func (closeOnlyAgent) Description() string { return "malformed test agent" }
 func (closeOnlyAgent) Invoke(context.Context, []schema.Message, ...runnable.Option) ([]schema.Message, error) {
 	return nil, nil
 }
-func (closeOnlyAgent) Stream(context.Context, []schema.Message, ...runnable.Option) (runnable.Stream[schema.MessageEvent], error) {
-	stream := make(chan runnable.Item[schema.MessageEvent])
-	close(stream)
-	return stream, nil
+func (closeOnlyAgent) Stream(ctx context.Context, _ []schema.Message, _ ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	reader, writer := runnable.Pipe[[]schema.Message](ctx)
+	go func() { _ = writer.CloseWithError(errors.New("child stream failed")) }()
+	return reader, nil
+}
+func (a closeOnlyAgent) Collect(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) ([]schema.Message, error) {
+	return runnable.CollectFromInvoke(ctx, in, a.Invoke, opts...)
+}
+func (a closeOnlyAgent) Transform(ctx context.Context, in *runnable.StreamReader[[]schema.Message], opts ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	return runnable.TransformFromInvoke(ctx, in, a.Invoke, opts...)
 }
 
 func TestRoutingAgentRejectsChildStreamWithoutDone(t *testing.T) {
@@ -300,7 +303,7 @@ func TestRoutingAgentRejectsChildStreamWithoutDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")}); err == nil || !strings.Contains(err.Error(), "without done event") {
+	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("route")}); err == nil || !strings.Contains(err.Error(), "child stream failed") {
 		t.Fatalf("malformed child error=%v", err)
 	}
 }

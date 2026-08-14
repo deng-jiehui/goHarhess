@@ -46,15 +46,53 @@ func (ApproxTokenCounter) Count(text string) int {
 }
 
 func countMessage(message schema.Message, counter TokenCounter) int {
-	// Provider message framing is normally three to five tokens.
-	total := 4 + counter.Count(string(message.Role)) + counter.Count(message.Name)
-	total += counter.Count(message.Content.String())
-	total += counter.Count(message.ReasoningContent.String())
-	if message.FunctionCall != nil {
-		total += counter.Count(message.FunctionCall.Name)
-		total += counter.Count(message.FunctionCall.Arguments)
+	total := 4 + counter.Count(string(message.Role))
+	var count func([]schema.ContentBlock) int
+	count = func(blocks []schema.ContentBlock) int {
+		n := 0
+		for _, b := range blocks {
+			switch b.Type {
+			case schema.ContentBlockTypeText:
+				if b.Text != nil {
+					n += counter.Count(b.Text.Text)
+				}
+			case schema.ContentBlockTypeReasoning:
+				if b.Reasoning != nil {
+					n += counter.Count(b.Reasoning.Text) + counter.Count(b.Reasoning.Signature)
+				}
+			case schema.ContentBlockTypeImage:
+				n += countMedia(b.Image, counter)
+			case schema.ContentBlockTypeFile:
+				n += countMedia(b.File, counter)
+			case schema.ContentBlockTypeAudio:
+				n += countMedia(b.Audio, counter)
+			case schema.ContentBlockTypeVideo:
+				n += countMedia(b.Video, counter)
+			case schema.ContentBlockTypeFunctionToolCall:
+				if b.FunctionToolCall != nil {
+					n += counter.Count(b.FunctionToolCall.ID) + counter.Count(b.FunctionToolCall.Name) + counter.Count(b.FunctionToolCall.Arguments)
+				}
+			case schema.ContentBlockTypeFunctionToolResult:
+				if b.FunctionToolResult != nil {
+					n += counter.Count(b.FunctionToolResult.CallID) + counter.Count(b.FunctionToolResult.Name) + count(b.FunctionToolResult.ContentBlocks)
+				}
+			case schema.ContentBlockTypeOpaque:
+				if b.Opaque != nil {
+					n += counter.Count(b.Opaque.Kind) + counter.Count(string(b.Opaque.Raw))
+				}
+			}
+		}
+		return n
 	}
+	total += count(message.ContentBlocks)
 	return total
+}
+
+func countMedia(media *schema.MediaContent, counter TokenCounter) int {
+	if media == nil {
+		return 0
+	}
+	return counter.Count(media.URI) + counter.Count(media.MIMEType) + counter.Count(string(media.Data))
 }
 
 func countMessages(messages []schema.Message, counter TokenCounter) int {
@@ -93,42 +131,4 @@ func truncateText(text string, limit int, counter TokenCounter, keepEnd bool) st
 		return strings.TrimSpace(string(runes[len(runes)-best:]))
 	}
 	return strings.TrimSpace(string(runes[:best]))
-}
-
-func truncateContent(content schema.Content, limit int, counter TokenCounter, keepEnd bool) schema.Content {
-	if !content.IsMultimodal() {
-		return schema.TextContent(truncateText(content.String(), limit, counter, keepEnd))
-	}
-	items := content.Items()
-	nonTextTokens := 0
-	for _, item := range items {
-		if item.Text == nil {
-			nonTextTokens += counter.Count(item.ValueString())
-		}
-	}
-	textBudget := limit - nonTextTokens
-	if textBudget < 0 {
-		textBudget = 0
-	}
-	remaining := textBudget
-	if keepEnd {
-		for index := len(items) - 1; index >= 0; index-- {
-			if items[index].Text == nil {
-				continue
-			}
-			trimmed := truncateText(*items[index].Text, remaining, counter, true)
-			items[index] = schema.TextItem(trimmed)
-			remaining -= counter.Count(trimmed)
-		}
-	} else {
-		for index := range items {
-			if items[index].Text == nil {
-				continue
-			}
-			trimmed := truncateText(*items[index].Text, remaining, counter, false)
-			items[index] = schema.TextItem(trimmed)
-			remaining -= counter.Count(trimmed)
-		}
-	}
-	return schema.MultiContent(items...)
 }

@@ -7,7 +7,6 @@ import (
 
 	"goharness/pkg/control"
 	"goharness/pkg/runnable"
-	statepkg "goharness/pkg/state"
 )
 
 type streamCarrier struct {
@@ -89,7 +88,7 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 	revision, _ := g.recoveryMetadata()
 	ctx = bindCallbacks(ctx, RunInfo{
 		Name: g.Name(), Revision: revision, InputType: typeName(g.inputType), OutputType: typeName(g.outputType), ResumeMode: ResumeModeInvoke,
-	})
+	}, g.Snapshot().Nodes)
 	var runtimeState any
 	if g.stateFactory != nil {
 		runtimeState, err = g.stateFactory(ctx, input)
@@ -97,7 +96,7 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 			return zero, graphFailure(ctx, err)
 		}
 		ctx = withRuntimeState(ctx, runtimeState)
-		ctx = withRuntimeStateCheckpointProvider(ctx, func(snapshotCtx context.Context) (statepkg.GraphStateCheckpoint, error) {
+		ctx = withRuntimeStateCheckpointProvider(ctx, func(snapshotCtx context.Context) (GraphStateCheckpoint, error) {
 			return g.snapshotRuntimeState(snapshotCtx, runtimeState)
 		})
 	}
@@ -110,7 +109,7 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 	currentNode := Start
 	pending := make([]pendingStreamNode, 0)
 	visits := map[string]int{}
-	cursor := statepkg.CursorStackFromContext(ctx)
+	cursor := CursorStackFromContext(ctx)
 	for step := 0; ; step++ {
 		if step > maxSteps {
 			return zero, graphFailure(ctx, &ExecutionError{Code: "graph.max_steps", NodeID: currentNode, Step: step, Err: fmt.Errorf("maximum of %d node executions exceeded", maxSteps)})
@@ -237,6 +236,9 @@ func (g *Graph[I, O]) executeStreamPlan(ctx context.Context, input I, plan runna
 		}
 		if node.post != nil {
 			if err := collectStream(ctx, &output); err != nil {
+				if request, interrupted := interruptFromExecution(nodeCtx, err); interrupted {
+					return zero, g.persistInterruption(nodeCtx, checkpoint, request, InterruptPointDuringNode, next, step, visits, cursor, runtimeState)
+				}
 				return zero, graphFailure(nodeCtx, &ExecutionError{Code: "node.collect", NodeID: next, Step: step, Err: err})
 			}
 			finishPendingBeforeCurrent(&pending, next, step)
