@@ -60,7 +60,7 @@ payload, and that payload matches `Type`.
 type ContentBlock struct {
 	Type ContentBlockType `json:"type"`
 
-	Text               *TextContent       `json:"text,omitempty"`
+	Text               *Text              `json:"text,omitempty"`
 	Image              *MediaContent      `json:"image,omitempty"`
 	File               *MediaContent      `json:"file,omitempty"`
 	Audio              *MediaContent      `json:"audio,omitempty"`
@@ -90,7 +90,7 @@ The payloads use provider-neutral fields and retain an escape hatch for data
 the framework does not interpret:
 
 ```go
-type TextContent struct {
+type Text struct {
 	Text  string         `json:"text"`
 	Extra map[string]any `json:"extra,omitempty"`
 }
@@ -186,7 +186,7 @@ schema.NewOpaqueBlock(kind, raw)
 Payload accessors return defensive payload copies, not wrapper blocks:
 
 ```go
-func (m Message) TextBlocks() []TextContent
+func (m Message) TextBlocks() []Text
 func (m Message) JoinedText(separator string) string
 func (m Message) ReasoningBlocks() []Reasoning
 func (m Message) FunctionToolCalls() []FunctionToolCall
