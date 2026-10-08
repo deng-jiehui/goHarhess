@@ -18,7 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/httpclient"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -373,7 +373,7 @@ func (t *MCPTool) Invoke(ctx context.Context, input tool.CallInput, _ ...runnabl
 	if ctx == nil {
 		return tool.Result{}, errors.New("MCP tool context cannot be nil")
 	}
-	callbackRequest := CallbackRequest{Operation: OperationCallTool, CallTool: &CallToolRequest{Name: t.name, Args: callback.CloneMetadata(input.Args)}}
+	callbackRequest := CallbackRequest{Operation: OperationCallTool, CallTool: &CallToolRequest{Name: t.name, Args: observe.CloneMetadata(input.Args)}}
 	operationCtx, invocation := beginCallback(ctx, callbackRequest)
 	result, err := t.client.sdk.CallTool(operationCtx, sdkmcp.CallToolRequest{Params: sdkmcp.CallToolParams{
 		Name:      t.name,

@@ -1075,7 +1075,7 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			}
 			taskCtx = withCallSite(taskCtx, &callSite{coord: coord, frame: frame, taskID: task.ID, step: step + index, owner: managedOwner})
 		}
-		event := Event{Type: EventNodeStart, NodeID: task.Node, Step: step + index}
+		event := lifecycleEvent{Type: eventNodeStart, NodeID: task.Node, Step: step + index}
 		taskCtx = bindEventContext(taskCtx, event)
 		publish(taskCtx, event)
 		var input any

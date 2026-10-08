@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -33,7 +32,12 @@ func (m *retryModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Op
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	if call == 1 && m.failFirst {
 		if m.partialFirst {
-			callback.EmitStream(ctx, llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("partial"))}})
+			// 已产出部分增量后失败：首个 Recv 成功即视为流已开始，禁止重试。
+			go func() {
+				_ = writer.Send(llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("partial"))}})
+				_ = writer.CloseWithError(errors.New("temporary stream"))
+			}()
+			return reader, nil
 		}
 		_ = writer.CloseWithError(errors.New("temporary stream"))
 		return reader, nil
@@ -44,7 +48,6 @@ func (m *retryModel) Stream(ctx context.Context, _ llm.Request, _ ...runnable.Op
 	}
 	go func() {
 		response := llm.Response{Messages: []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("ok"))}}
-		callback.EmitStream(ctx, response.Clone())
 		_ = writer.Send(response)
 		_ = writer.Close()
 	}()
@@ -114,6 +117,10 @@ func TestRetryingModelDoesNotRetryAfterStreamData(t *testing.T) {
 	reader, err := model.Stream(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	partial, err := reader.Recv()
+	if err != nil || partial.Messages[0].JoinedText("") != "partial" {
+		t.Fatalf("partial chunk=%#v err=%v", partial, err)
 	}
 	if _, err := reader.Recv(); err == nil {
 		t.Fatal("partial stream error was accepted")

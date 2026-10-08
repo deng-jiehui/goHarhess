@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -85,7 +84,6 @@ func (m *StepModel) Stream(ctx context.Context, request llm.Request, options ...
 func streamResponse(ctx context.Context, response llm.Response) *runnable.StreamReader[llm.Response] {
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		callback.EmitStream(ctx, response.Clone())
 		if err := writer.Send(response); err != nil {
 			_ = writer.CloseWithError(err)
 			return
@@ -167,9 +165,6 @@ func (m *SegmentModel) Stream(ctx context.Context, request llm.Request, options 
 			return
 		}
 		chunk := (len(m.text) + m.segments - 1) / m.segments
-		// 兼容回调只在启用时按已有文本前缀发快照；未启用回调时不做
-		// 任何拼接，避免把替身自己的分配计入被测路径。
-		hasCallback := callback.HasStreamCallbacks[llm.Response](ctx)
 		for sent := 0; sent < len(m.text); sent += chunk {
 			end := sent + chunk
 			if end > len(m.text) {
@@ -178,9 +173,6 @@ func (m *SegmentModel) Stream(ctx context.Context, request llm.Request, options 
 			if err := mw.AppendText(m.text[sent:end]); err != nil {
 				_ = writer.CloseWithError(err)
 				return
-			}
-			if hasCallback {
-				callback.EmitStream(ctx, llm.Response{Messages: []schema.Message{schema.AssistantMessage(m.text[:end])}})
 			}
 		}
 		if len(m.text) == 0 {

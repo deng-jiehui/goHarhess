@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
@@ -85,8 +86,8 @@ func TestCursorResumeUsesRuntimeStatePreHandler(t *testing.T) {
 }
 
 func TestControlEventDoesNotExposeState(t *testing.T) {
-	if _, exists := reflect.TypeOf(graph.Event{}).FieldByName("State"); exists {
-		t.Fatal("control Event exposes runtime State")
+	if _, exists := reflect.TypeOf(observe.Event{}).FieldByName("State"); exists {
+		t.Fatal("observe.Event exposes runtime State")
 	}
 }
 

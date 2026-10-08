@@ -138,97 +138,50 @@ approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) err
 
 返回 typed interrupt 时整批执行数为零，由外层 Graph 保存检查点。Resume 会重新运行 Hook，审批凭证由应用通过 Context 或自己的存储提供。
 
-## 生命周期 Callback
+## 生命周期观测
 
-生命周期 Handler 只通过 Context 注册。各领域定义自己的强类型接口：
-
-| 包 | 生命周期方法 |
-| --- | --- |
-| `pkg/llm` | `OnChatModelStart/End/Error` |
-| `pkg/tool` | `OnToolStart/End/Error` |
-| `pkg/retrieval` | `OnRetrieverStart/End/Error` |
-| `extensions/mcp` | `OnMCPStart/End/Error` |
-| `pkg/graph` | `OnGraphStart/End/Error`、`OnNodeStart/Output/End` |
+运行期观测统一走 `pkg/observe`：`observe.With` 注册的 Observer 会收到本次运行的全部
+run / node / llm / tool / interrupt / checkpoint 事件（retrieval、MCP 等扩展使用自定义
+`Kind`）。事件携带 Trace（TraceID/RunID/SpanID/ParentSpanID）、耗时、token 用量与少量
+结构化属性；`Attrs` 里有 `graph.node_id`、`graph.step` 等键。
 
 ```go
-handlers := []callback.Handler{
-    graph.CallbackFuncs{
-        CallbackName: "graph-trace",
-        NodeEnd: func(ctx context.Context, result graph.NodeResult) error {
-            log.Printf("node=%s step=%d duration=%s", result.NodeID, result.Step, result.Duration)
-            return nil
-        },
-    },
-    llm.CallbackFuncs{
-        CallbackName: "llm-usage",
-        End: func(ctx context.Context, response llm.Response) error {
-            if response.Usage != nil {
-                log.Printf("tokens=%d", response.Usage.TotalTokens)
-            }
-            return nil
-        },
-    },
-    tool.CallbackFuncs{
-        CallbackName: "tool-audit",
-        Error: func(ctx context.Context, spec tool.Spec, input tool.CallInput, err error) error {
-            log.Printf("tool=%s err=%v", spec.Name, err)
-            return nil
-        },
-    },
-}
-
-manager, err := callback.NewManager(
-    callback.Config{Timeout: 2 * time.Second},
-    handlers,
-    callback.ErrorSinkFunc(func(ctx context.Context, failure callback.CallbackError) {
-        log.Printf("callback failure: %v", failure)
-    }),
-)
-ctx = callback.WithManager(ctx, manager)
+observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+    switch {
+    case event.Kind == observe.KindNode && event.Phase == observe.PhaseEnd:
+        log.Printf("node=%s step=%v duration=%s", event.Name, event.Attrs["graph.step"], event.Duration)
+    case event.Kind == observe.KindLLM && event.Phase == observe.PhaseEnd:
+        if event.Usage != nil {
+            log.Printf("tokens=%d", event.Usage.TotalTokens)
+        }
+    case event.Kind == observe.KindTool && event.Phase == observe.PhaseError:
+        log.Printf("tool=%s err=%v", event.Name, event.Err)
+    }
+})
+ctx = observe.With(ctx, observer)
 output, err := assistant.Invoke(ctx, input)
 ```
 
-Handler 同步直调、按注册顺序运行。Handler 的 error 或 panic 会被隔离并报告到 `ErrorSink`，不会替换 Agent、Graph、Model 或 Tool 的业务结果。`Config.Timeout` 是协作式 deadline，对同一 Manager 下每次 Handler 调用统一生效，不按错误种类区分；0 表示不附加回调期限、继承传入 Context。Handler 必须响应 `ctx.Done()`。
+Observer 同步直调、按注册顺序运行。Observer 的 panic 会被隔离并记录到 `slog`，不会替换
+Agent、Graph、Model 或 Tool 的业务结果；接口不返回 error，失败重试由接入方自行排队。
 
-回调只做快速记录：整理事件、更新计数、写入本地日志或提交到有界队列，远程发送、通知等耗时工作交给接入的日志 SDK 或告警组件在后台完成。执行期限结束会触发返回流程，但实际返回仍要等待同步回调结束——慢回调会拖延 `Execute` 返回，框架不强制终止用户回调。错误载荷的 Context 来源按事件区分：普通工具错误回调继承工具执行 Context；`AbandonedError` 未归还告警在调用方 Context 上派发。后台发送使用组件自己的期限，事件里应提前提取工具名、调用身份与错误摘要，不依赖业务请求继续存活。接入组件使用队列时要有容量限制，队列满时明确拒绝或丢弃并计数，不做无界入队：
+Observer 只做快速记录：整理事件、更新计数、写入本地日志或提交到有界队列，远程发送、
+通知等耗时工作交给接入的日志 SDK、告警组件或 `observe.Async` 包装在后台完成。执行期限
+结束会触发返回流程，但实际返回仍要等待同步 Observer 结束——慢 Observer 会拖延 `Execute`
+返回，框架不强制终止用户观测者。放弃告警（`AbandonedError`）以 `Kind==tool`、
+`Phase==error`、`Attrs["tool.abandoned"]==true` 的事件派发，并在调用方 Context 上发射。
+接入组件使用队列时要有容量限制，队列满时明确拒绝或丢弃并计数，不做无界入队——
+`observe.Async(observer, 256, true)` 已内置这一策略并暴露 `Dropped()` 计数。
 
-```go
-var queue = make(chan toolEvent, 256) // 接入组件的后台发送协程消费它
-observer := tool.CallbackFuncs{
-    CallbackName: "tool-audit",
-    Error: func(ctx context.Context, spec tool.Spec, input tool.CallInput, err error) error {
-        event := toolEvent{Name: spec.Name, Err: err.Error()}
-        if abandoned := (*tool.AbandonedError)(nil); errors.As(err, &abandoned) {
-            event.Abandoned = abandoned.Abandoned
-        }
-        select {
-        case queue <- event: // 快速入队；满了丢弃并计数，不阻塞返回
-        default:
-            dropped.Add(1)
-        }
-        return nil
-    },
-}
-```
+Graph 为每个节点创建独立子 Span；节点事件的 `Name` 是节点 ID，`Attrs` 携带
+`graph.node_id`、`graph.node_kind`、`graph.step`、输入输出类型名，不依赖通用 metadata 字符串。
 
-Graph 为每个节点创建独立子 Span。`graph.NodeExecution` 和 `graph.NodeResult` 直接携带 NodeID、Step、状态和耗时，不依赖通用 metadata 字符串。
+## 实时事件流
 
-## 实时 EventStream
-
-实时数据不进入生命周期 Callback：
-
-```go
-ctx = callback.WithStreamCallbacks(ctx,
-    callback.StreamCallbackOf[llm.Response]("ui", func(
-        ctx context.Context,
-        partial llm.Response,
-    ) error {
-        return renderPartial(ctx, partial)
-    }),
-)
-```
-
-组件使用 `callback.EmitStream(ctx, value)` 同步发布强类型数据。Stream observer 的失败同样隔离并交给 Manager 的 `ErrorSink`；框架不提供异步队列、Flush 或无界 Goroutine 管理器。
+实时数据不进入观测事件流，而走 `pkg/stream` 公共流（`KindMessage`/`KindActivity`/
+`KindLifecycle`/`KindResult`）。组件用 `stream.PublishMessage`/`PublishSnapshots`/
+`PublishActivity` 发布，Agent/Graph 运行期间自动生效；裸组件可用 `stream.Run` 开启
+作用域，调用方从 `stream.Reader` 逐条 `Recv` 事件。
 
 ## Agent 装配
 
@@ -252,4 +205,4 @@ reactAgent, err := agent.NewReactAgent(
 
 `WithToolRetries`/`WithToolRetryBackoff` 只作用于只读工具的自动重试；废弃的 `WithMaxRetries`/`WithRetryBackoff` 保留为别名，两侧同时提供且值不同（含显式零值）会被拒绝——`WithToolRetries(0)` 可显式关闭重试，不会被旧字段重新启用。模型重试与限流是独立配置：`WithModelRetry` 接受 `llm.RetryConfig`（`MaxAttempts ≥ 2` 才生效），`WithModelRateLimit` 接受 `llm.RateLimitConfig`，框架保证「重试外层、限流内层」——每次真实请求都重新占用配额。构造前会检查模型外层连续的内置策略链：同类策略层已存在时拒绝重复配置；已有手工重试层且只配置限流时，若重试层正是最外层则剥下重组（保留原重试配置），否则明确拒绝。
 
-Callback Manager 不属于 Agent 配置；它只从运行 Context 解析。`WithMaxConcurrency` 限制工具批次并发，与 Callback 执行模型无关。
+Observer 注册不属于 Agent 配置；它只从运行 Context 解析。`WithMaxConcurrency` 限制工具批次并发，与观测执行模型无关。

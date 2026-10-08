@@ -53,21 +53,21 @@ type Snapshot struct {
 	Edges       []EdgeInfo `json:"edges"`
 }
 
-type EventType string
+type lifecycleEventType string
 
 const (
-	EventGraphStart EventType = "graph_start"
-	EventNodeStart  EventType = "node_start"
-	EventNodeOutput EventType = "node_output"
-	EventNodeEnd    EventType = "node_end"
-	EventGraphEnd   EventType = "graph_end"
-	EventGraphError EventType = "graph_error"
+	eventGraphStart lifecycleEventType = "graph_start"
+	eventNodeStart  lifecycleEventType = "node_start"
+	eventNodeOutput lifecycleEventType = "node_output"
+	eventNodeEnd    lifecycleEventType = "node_end"
+	eventGraphEnd   lifecycleEventType = "graph_end"
+	eventGraphError lifecycleEventType = "graph_error"
 )
 
-// Event is control-plane only. Runtime State and node values never escape
-// through an any-typed observation API.
-type Event struct {
-	Type   EventType
+// lifecycleEvent 是调度循环的控制面信封，只在包内流向 lifecycleSink；
+// 运行时 State 与节点值永远不经过它外泄。
+type lifecycleEvent struct {
+	Type   lifecycleEventType
 	NodeID string
 	Step   int
 	Err    error

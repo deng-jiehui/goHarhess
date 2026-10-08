@@ -11,8 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/goharness/goharness/internal/streamcompat"
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -374,7 +373,6 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 				state.Response = append(state.Response, observations...)
 				state.Calls = nil
 				state.HasCalls = false
-				streamcompat.Snapshot(ctx, nameMessages(state.Response))
 				return stream.PublishSnapshots(ctx, observations)
 			}),
 		); err != nil {
@@ -455,11 +453,11 @@ func toolNodeInput(ctx context.Context, messages []schema.Message, calls []Call)
 			}
 		}
 	}
-	metadata := callback.MetadataFromContext(ctx)
+	metadata := observe.MetadataFromContext(ctx)
 	if separateTail {
 		start := len(prepared) - len(calls)
 		for index, call := range calls {
-			prepared[start+index].Extra = callback.CloneMetadata(prepared[start+index].Extra)
+			prepared[start+index].Extra = observe.CloneMetadata(prepared[start+index].Extra)
 			for key, value := range metadata {
 				prepared[start+index].Extra[key] = value
 			}
@@ -473,7 +471,7 @@ func toolNodeInput(ctx context.Context, messages []schema.Message, calls []Call)
 		prepared = prepared[:len(prepared)-1]
 		for _, call := range calls {
 			message := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(call.FunctionID, call.Name, call.Arguments))
-			message.Extra = callback.CloneMetadata(last.Extra)
+			message.Extra = observe.CloneMetadata(last.Extra)
 			for key, value := range metadata {
 				message.Extra[key] = value
 			}
@@ -484,7 +482,7 @@ func toolNodeInput(ctx context.Context, messages []schema.Message, calls []Call)
 		return prepared
 	}
 	for _, call := range calls {
-		extra := callback.CloneMetadata(metadata)
+		extra := observe.CloneMetadata(metadata)
 		extra["function_id"] = call.FunctionID
 		extra["tool_call_id"] = call.FunctionID
 		message := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock(call.FunctionID, call.Name, call.Arguments))

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 
@@ -163,17 +163,21 @@ func TestModeParitySuccessAndLifecycleOrder(t *testing.T) {
 			events = append(events, kind+":"+node)
 			mu.Unlock()
 		}
-		manager, err := callback.NewManager(callback.Config{}, []callback.Handler{graph.CallbackFuncs{
-			CallbackName: "parity",
-			NodeStart:    func(_ context.Context, value graph.NodeExecution) error { record("start", value.NodeID); return nil },
-			NodeEnd:      func(_ context.Context, value graph.NodeResult) error { record("end", value.NodeID); return nil },
-		}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+			if event.Kind != observe.KindNode {
+				return
+			}
+			nodeID, _ := event.Attrs["graph.node_id"].(string)
+			switch event.Phase {
+			case observe.PhaseStart:
+				record("start", nodeID)
+			case observe.PhaseEnd:
+				record("end", nodeID)
+			}
+		})
 		counters := &parityCounters{}
 		compiled := newParityGraph(t, "parity-success", parityHooks{}, counters)
-		output, err := runGraph(callback.WithManager(context.Background(), manager), compiled, mode, "in")
+		output, err := runGraph(observe.With(context.Background(), collector), compiled, mode, "in")
 		if err != nil || output != "in-first-second" {
 			t.Fatalf("%s output=%q err=%v", mode, output, err)
 		}

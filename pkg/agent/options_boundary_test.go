@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/goharness/goharness/pkg/agent"
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
@@ -50,7 +50,7 @@ func (b *probeBuilder) Invoke(ctx context.Context, request contextengine.Request
 			return contextengine.Result{}, fmt.Errorf("builder received llm option")
 		}
 	}
-	if callback.MetadataFromContext(ctx)["tenant"] != "acme" {
+	if observe.MetadataFromContext(ctx)["tenant"] != "acme" {
 		return contextengine.Result{}, fmt.Errorf("builder lost scoped metadata")
 	}
 	return contextengine.Result{Messages: schema.CloneMessages(request.Input)}, nil
@@ -112,7 +112,7 @@ func TestComponentOptionsDispatchByType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runCtx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
+	runCtx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
 	_, err = value.Invoke(runCtx, []schema.Message{schema.UserMessage("hi")},
 		withProbeMode("hit"),
 		llm.WithDeltaStream(true),

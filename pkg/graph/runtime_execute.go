@@ -483,17 +483,17 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	if err != nil {
 		return zero, fmt.Errorf("enter graph callback scope: %w", err)
 	}
-	resumeMode := ResumeModeInvoke
+	runMode := resumeModeInvoke
 	if progress != nil {
-		resumeMode = ResumeModeResume
+		runMode = resumeModeResume
 	}
 	revision, _ := g.recoveryMetadata()
-	ctx = bindCallbacks(ctx, RunInfo{
+	ctx = bindCallbacks(ctx, runInfo{
 		Name:       g.Name(),
 		Revision:   revision,
 		InputType:  typeName(g.inputType),
 		OutputType: typeName(g.outputType),
-		ResumeMode: resumeMode,
+		ResumeMode: runMode,
 	}, g.Snapshot().Nodes)
 
 	var runtimeState any
@@ -646,7 +646,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 	}
 	transactional := g.stepMerger != nil
 
-	publish(ctx, Event{Type: EventGraphStart})
+	publish(ctx, lifecycleEvent{Type: eventGraphStart})
 	currentNode := Start
 	visits := map[string]int{}
 	startStep := 0
@@ -1022,7 +1022,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 			}
 			nodeCtx = withCallSite(nodeCtx, &callSite{coord: setup.checkpoint.coord, frame: setup.checkpoint.frame, taskID: taskID, step: step, owner: managedOwner})
 		}
-		nodeStart := Event{Type: EventNodeStart, NodeID: next, Step: step}
+		nodeStart := lifecycleEvent{Type: eventNodeStart, NodeID: next, Step: step}
 		nodeCtx = bindEventContext(nodeCtx, nodeStart)
 		publish(nodeCtx, nodeStart)
 
@@ -1304,14 +1304,14 @@ func postHandlerError(node string, step int, err error) error {
 func (g *Graph[I, O]) runtimeOutput(ctx context.Context, value erasedValue, from string, step int) (O, error) {
 	var zero O
 	if value.value == nil {
-		publish(ctx, Event{Type: EventGraphEnd, Step: step})
+		publish(ctx, lifecycleEvent{Type: eventGraphEnd, Step: step})
 		return zero, nil
 	}
 	output, ok := value.value.(O)
 	if !ok {
 		return zero, graphFailure(ctx, &ExecutionError{Code: "graph.output.type", NodeID: from, Step: step, Err: fmt.Errorf("runtime type %T, want %s", value.value, typeName(g.outputType))})
 	}
-	publish(ctx, Event{Type: EventGraphEnd, Step: step})
+	publish(ctx, lifecycleEvent{Type: eventGraphEnd, Step: step})
 	return output, nil
 }
 

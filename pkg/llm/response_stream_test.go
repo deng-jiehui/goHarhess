@@ -7,26 +7,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestObserveReaderOwnsLifecycleUntilEOF(t *testing.T) {
 	var starts, ends, failures int
-	observer := llm.CallbackFuncs{
-		CallbackName: "model",
-		Start:        func(context.Context, llm.Request) error { starts++; return nil },
-		End:          func(context.Context, llm.Response) error { ends++; return nil },
-		Error:        func(context.Context, error) error { failures++; return nil },
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindLLM {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseStart:
+			starts++
+		case observe.PhaseEnd:
+			ends++
+		case observe.PhaseError:
+			failures++
+		}
+	})
 	upstream, writer := runnable.Pipe[llm.Response](context.Background())
-	observed, err := llm.ObserveReader(callback.WithManager(context.Background(), manager), "test", llm.Request{}, upstream)
+	observed, err := llm.ObserveReader(observe.With(context.Background(), collector), "test", llm.Request{}, upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +48,13 @@ func TestObserveReaderOwnsLifecycleUntilEOF(t *testing.T) {
 
 func TestObserveReaderReportsUpstreamError(t *testing.T) {
 	seen := make(chan error, 1)
-	observer := llm.CallbackFuncs{CallbackName: "model", Error: func(_ context.Context, err error) error { seen <- err; return nil }}
-	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindLLM && event.Phase == observe.PhaseError {
+			seen <- event.Err
+		}
+	})
 	upstream, writer := runnable.Pipe[llm.Response](context.Background())
-	observed, err := llm.ObserveReader(callback.WithManager(context.Background(), manager), "test", llm.Request{}, upstream)
+	observed, err := llm.ObserveReader(observe.With(context.Background(), collector), "test", llm.Request{}, upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,15 +71,20 @@ func TestObserveReaderReportsUpstreamError(t *testing.T) {
 func TestObserveReaderReportsEmptyUpstreamAsTruncated(t *testing.T) {
 	var ends int
 	seen := make(chan error, 1)
-	observer := llm.CallbackFuncs{
-		CallbackName: "model",
-		End:          func(context.Context, llm.Response) error { ends++; return nil },
-		Error:        func(_ context.Context, err error) error { seen <- err; return nil },
-	}
-	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindLLM {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseEnd:
+			ends++
+		case observe.PhaseError:
+			seen <- event.Err
+		}
+	})
 	upstream, writer := runnable.Pipe[llm.Response](context.Background())
 	_ = writer.Close()
-	observed, err := llm.ObserveReader(callback.WithManager(context.Background(), manager), "test", llm.Request{}, upstream)
+	observed, err := llm.ObserveReader(observe.With(context.Background(), collector), "test", llm.Request{}, upstream)
 	if err != nil {
 		t.Fatal(err)
 	}

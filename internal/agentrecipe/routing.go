@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/goharness/goharness/internal/streamcompat"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -262,7 +261,6 @@ func emitRoutingSnapshot(ctx context.Context, hooks RoutingHooks, response []sch
 	if hooks.NameMessages != nil {
 		emitted = hooks.NameMessages(emitted)
 	}
-	streamcompat.Snapshot(ctx, emitted)
 	return stream.PublishSnapshots(ctx, emitted)
 }
 

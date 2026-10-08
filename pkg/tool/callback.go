@@ -3,92 +3,43 @@ package tool
 import (
 	"context"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
-type Callback interface {
-	callback.Handler
-	OnToolStart(context.Context, Spec, CallInput) error
-	OnToolEnd(context.Context, Spec, CallInput, Result) error
-	OnToolError(context.Context, Spec, CallInput, error) error
-}
+// 本文件是 tool 生命周期的观测发射点：Begin/End 各产生一条
+// observe.Event（kind=tool），CallInput/Result 经 CapturePayload 脱敏后
+// 才进入 Payload。
 
-type CallbackFuncs struct {
-	CallbackName string
-	Start        func(context.Context, Spec, CallInput) error
-	End          func(context.Context, Spec, CallInput, Result) error
-	Error        func(context.Context, Spec, CallInput, error) error
-}
-
-func (f CallbackFuncs) Name() string { return f.CallbackName }
-func (f CallbackFuncs) OnToolStart(ctx context.Context, spec Spec, input CallInput) error {
-	if f.Start == nil {
-		return nil
-	}
-	return f.Start(ctx, cloneSpecForCallback(spec), cloneCallInput(input))
-}
-func (f CallbackFuncs) OnToolEnd(ctx context.Context, spec Spec, input CallInput, result Result) error {
-	if f.End == nil {
-		return nil
-	}
-	return f.End(ctx, cloneSpecForCallback(spec), cloneCallInput(input), cloneResult(result))
-}
-func (f CallbackFuncs) OnToolError(ctx context.Context, spec Spec, input CallInput, err error) error {
-	if f.Error == nil {
-		return nil
-	}
-	return f.Error(ctx, cloneSpecForCallback(spec), cloneCallInput(input), err)
-}
-
-// BeginCallback starts one Tool child operation and notifies typed observers.
-func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Context, callback.Invocation) {
-	metadata := callback.CloneMetadata(input.Metadata)
+// BeginCallback starts one Tool child operation and notifies observers.
+func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Context, observe.Invocation) {
+	metadata := observe.CloneMetadata(input.Metadata)
 	metadata["tool.read_only"] = spec.IsReadOnly
 	metadata["tool.file_access"] = spec.FileAccess
-	toolCtx, invocation := callback.Begin(ctx, "tool", spec.Name, metadata)
-	observe.EmitPayload(toolCtx, observe.EventOf(invocation.WithPhase(callback.PhaseStart), observe.KindTool, nil), input)
-	_ = callback.Dispatch[Callback](toolCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, handler Callback) error {
-		return handler.OnToolStart(ctx, cloneSpecForCallback(spec), cloneCallInput(input))
-	})
+	toolCtx, invocation := observe.Begin(ctx, "tool", spec.Name, metadata)
+	observe.EmitPayload(toolCtx, observe.EventOf(invocation.WithPhase(observe.PhaseStart), observe.KindTool, nil), input)
 	return toolCtx, invocation
 }
 
-// EndCallback notifies typed Tool observers of the terminal result.
-func EndCallback(ctx context.Context, invocation callback.Invocation, spec Spec, input CallInput, result Result, callErr error) {
+// EndCallback notifies observers of the terminal result.
+func EndCallback(ctx context.Context, invocation observe.Invocation, spec Spec, input CallInput, result Result, callErr error) {
 	if callErr != nil {
-		failed := invocation.WithPhase(callback.PhaseError)
+		failed := invocation.WithPhase(observe.PhaseError)
 		event := observe.EventOf(failed, observe.KindTool, nil)
 		event.Err = callErr
 		observe.Emit(ctx, event)
-		_ = callback.Dispatch[Callback](ctx, failed, func(ctx context.Context, handler Callback) error {
-			return handler.OnToolError(ctx, cloneSpecForCallback(spec), cloneCallInput(input), callErr)
-		})
 		return
 	}
-	end := invocation.WithPhase(callback.PhaseEnd)
+	end := invocation.WithPhase(observe.PhaseEnd)
 	observe.EmitPayload(ctx, observe.EventOf(end, observe.KindTool, nil), result)
-	_ = callback.Dispatch[Callback](ctx, end, func(ctx context.Context, handler Callback) error {
-		return handler.OnToolEnd(ctx, cloneSpecForCallback(spec), cloneCallInput(input), cloneResult(result))
-	})
 }
 
-func cloneSpecForCallback(spec Spec) Spec {
-	spec.Parameters = callback.CloneMetadata(spec.Parameters)
-	return spec
-}
-
+// cloneCallInput 制备执行前输入快照：放弃告警在后台路径上引用它，
+// 工具/中间件超时后仍可能修改原始 Args 与 Metadata。
 func cloneCallInput(input CallInput) CallInput {
-	input.Args = callback.CloneMetadata(input.Args)
-	input.Metadata = callback.CloneMetadata(input.Metadata)
+	input.Args = observe.CloneMetadata(input.Args)
+	input.Metadata = observe.CloneMetadata(input.Metadata)
 	input.Messages = schema.CloneMessages(input.Messages)
 	input.Files = append([]string(nil), input.Files...)
 	return input
-}
-
-func cloneResult(result Result) Result {
-	result.ContentBlocks = cloneResultBlocks(result.ContentBlocks)
-	result.Data = callback.CloneValue(result.Data)
-	return result
 }

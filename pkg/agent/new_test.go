@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/goharness/goharness/pkg/agent"
-	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
@@ -52,10 +52,10 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 	}
 	var mu sync.Mutex
 	started := map[string]int{}
-	ctx := graph.WithEventSink(context.Background(), graph.EventSinkFunc(func(_ context.Context, event graph.Event) {
-		if event.Type == graph.EventNodeStart {
+	ctx := observe.With(context.Background(), observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindNode && event.Phase == observe.PhaseStart {
 			mu.Lock()
-			started[event.NodeID]++
+			started[event.Attrs["graph.node_id"].(string)]++
 			mu.Unlock()
 		}
 	}))

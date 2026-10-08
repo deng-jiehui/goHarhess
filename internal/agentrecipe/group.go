@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/goharness/goharness/internal/streamcompat"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -127,7 +126,6 @@ func NewGroupRecipe(name string, hooks GroupHooks) (*Recipe, error) {
 				}
 				roundOutput := withSpeaker(outcome.Value, memberName)
 				stream.EnsureMessageIDs(roundOutput)
-				streamcompat.Snapshot(ctx, concatMessages(state.Response, roundOutput))
 				if err := stream.PublishSnapshots(ctx, roundOutput); err != nil {
 					return err
 				}

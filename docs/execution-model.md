@@ -196,14 +196,14 @@ if errors.Is(err, graph.ErrInterrupted) {
 追踪元数据统一经 `context.Context` 传递，与 Option 完全分离：
 
 ```go
-ctx := callback.WithMetadata(ctx, map[string]any{
+ctx := observe.WithMetadata(ctx, map[string]any{
     "request_id": "req-123",
     "source":     "web",
 })
 ```
 
-`callback.WithMetadata`/`callback.WithoutMetadata` 基于当前快照返回派生
-ctx，`callback.MetadataFromContext` 返回独立副本；三者对 map、slice 与
+`observe.WithMetadata`/`observe.WithoutMetadata` 基于当前快照返回派生
+ctx，`observe.MetadataFromContext` 返回独立副本；三者对 map、slice 与
 嵌套容器做递归复制，父调用与并行分支互不影响。框架在对应调用边界写入
 自身信息——Agent 加载会话后注入 `conversation_id`/`checkpoint_version`，
 Graph 节点与工具调用沿用既有回调入口的补充标签。组件需要分支级标签时

@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/goharness/goharness/pkg/agent"
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
@@ -404,21 +404,20 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 	var startCalled atomic.Bool
 	var errorCalled atomic.Bool
 	callbackDone := make(chan struct{}, 1)
-	audit := tool.CallbackFuncs{
-		CallbackName: "audit",
-		Start: func(context.Context, tool.Spec, tool.CallInput) error {
+	audit := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindTool {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseStart:
 			startCalled.Store(true)
-			return nil
-		},
-		Error: func(_ context.Context, _ tool.Spec, _ tool.CallInput, callErr error) error {
+		case observe.PhaseError:
 			errorCalled.Store(true)
-			if !errors.Is(callErr, tool.ErrPermissionDenied) {
-				return fmt.Errorf("audit expected permission denial, got %v", callErr)
+			if errors.Is(event.Err, tool.ErrPermissionDenied) {
+				callbackDone <- struct{}{}
 			}
-			callbackDone <- struct{}{}
-			return nil
-		},
-	}
+		}
+	})
 	var handlerCalls atomic.Int32
 	deleteTool := tool.NewFunctionTool(tool.Spec{Name: "delete"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		handlerCalls.Add(1)
@@ -438,15 +437,11 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{audit})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runCtx := callback.WithManager(tool.WithSubject(context.Background(), tool.Subject{
+	runCtx := observe.With(tool.WithSubject(context.Background(), tool.Subject{
 		ID:       "viewer-1",
 		TenantID: "tenant-a",
 		Roles:    []tool.Role{"viewer"},
-	}), manager)
+	}), audit)
 	messages, err := value.Invoke(
 		runCtx,
 		[]schema.Message{schema.UserMessage("delete it")},
@@ -516,7 +511,7 @@ func TestReactAgentIsolatesNestedToolMetadata(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		runCtx := callback.WithMetadata(context.Background(), map[string]any{"nested": metadata["nested"]})
+		runCtx := observe.WithMetadata(context.Background(), map[string]any{"nested": metadata["nested"]})
 		_, runErr := value.Invoke(runCtx, []schema.Message{schema.UserMessage("run")}, agent.WithMaxParallelTools(2))
 		done <- runErr
 	}()

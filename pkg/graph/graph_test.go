@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
@@ -176,7 +176,7 @@ func TestGraphDispatchesOptionsByTargetAndKeepsCompiledSnapshot(t *testing.T) {
 			return "", err
 		}
 		observed = resolved
-		metadata = callback.MetadataFromContext(ctx)
+		metadata = observe.MetadataFromContext(ctx)
 		return value, nil
 	})
 	if err := g.AddNode("node", node); err != nil {
@@ -186,7 +186,7 @@ func TestGraphDispatchesOptionsByTargetAndKeepsCompiledSnapshot(t *testing.T) {
 	_ = g.AddEdge("node", graph.End)
 	compiled := mustCompile(t, g)
 	// 追踪元数据经 ctx 传入，沿调用链继承到节点作用域。
-	runCtx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
+	runCtx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
 	if _, err := compiled.Invoke(runCtx, "ok", targeted); err != nil {
 		t.Fatal(err)
 	}

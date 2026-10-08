@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -239,12 +238,11 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 
 	// 放弃告警引用的是执行前制备的输入快照：工具与中间件可能在后台继续
 	// 修改 Args、Metadata 等可变载荷，超时后再克隆会与它们并发读写。
-	// 没有回调管理者时告警无人接收，不制备快照。
+	// 没有观测者时告警无人接收，不制备快照。
 	var alertInput CallInput
-	hasObserver := false
-	if _, ok := callback.ManagerFromContext(ctx); ok {
+	hasObserver := observe.Active(ctx)
+	if hasObserver {
 		alertInput = cloneCallInput(input)
-		hasObserver = true
 	}
 
 	// track 串行化「执行完成」与「登记放弃」的判定：后台 worker 完成时在同一
@@ -312,13 +310,13 @@ func (r *Runtime) settleAbandoned(name string) {
 	r.abandoned[name]--
 }
 
-// alertAbandoned 把放弃事件报告给工具级观察者：载荷携带该工具当前的
-// 未归还数与熔断阈值。调用方 ctx 可能已取消，告警仍在原调用上下文派发。
+// alertAbandoned 把放弃事件报告给观测者：载荷携带该工具当前的未归还数
+// 与熔断阈值。调用方 ctx 可能已取消，告警仍在原调用上下文派发。
 func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput, count int, cause error) {
-	metadata := callback.CloneMetadata(input.Metadata)
+	metadata := observe.CloneMetadata(input.Metadata)
 	metadata["tool.read_only"] = spec.IsReadOnly
 	metadata["tool.file_access"] = spec.FileAccess
-	alertCtx, invocation := callback.Begin(ctx, "tool", spec.Name, metadata)
+	alertCtx, invocation := observe.Begin(ctx, "tool", spec.Name, metadata)
 	alert := &AbandonedError{ToolName: spec.Name, Abandoned: count, Threshold: r.config.MaxAbandoned, Err: cause}
 	event := observe.EventOf(invocation.WithPhase(observe.PhaseError), observe.KindTool, map[string]any{
 		"tool.abandoned":           true,
@@ -326,10 +324,7 @@ func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput
 		"tool.abandoned_threshold": r.config.MaxAbandoned,
 	})
 	event.Err = alert
-	observe.Emit(alertCtx, event)
-	_ = callback.Dispatch[Callback](alertCtx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
-		return handler.OnToolError(ctx, cloneSpecForCallback(spec), cloneCallInput(input), alert)
-	})
+	observe.EmitPayload(alertCtx, event, input)
 }
 
 func effectiveTimeout(configured time.Duration) time.Duration {

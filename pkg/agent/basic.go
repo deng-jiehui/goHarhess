@@ -61,7 +61,6 @@ func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, opti
 	}
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
-	runCtx = a.bindModelStream(runCtx)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	recipeConfig := recipeRunConfig(session, messages, 1)
 	var dataStream *runnable.StreamReader[[]schema.Message]

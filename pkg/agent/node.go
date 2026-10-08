@@ -66,13 +66,12 @@ func (n *AgentNode) Invoke(ctx context.Context, messages []schema.Message, invoc
 		options = append(options, WithDeltaStream(true))
 	}
 	options = append(options, invocationOptions...)
-	childCtx := graph.WithEventSinkIsolated(ctx, nil)
-	reader, err := n.agent.Stream(childCtx, schema.CloneMessages(messages), options...)
+	reader, err := n.agent.Stream(ctx, schema.CloneMessages(messages), options...)
 	if err != nil {
 		return n.outcome(ctx, nil, err)
 	}
 	defer reader.Close()
-	output, err := reader.Collect(childCtx)
+	output, err := reader.Collect(ctx)
 	return n.outcome(ctx, output, err)
 }
 

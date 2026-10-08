@@ -7,22 +7,28 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/retrieval"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 
-func TestHybridSearcherDispatchesLifecycleCallbacksWithoutChangingResults(t *testing.T) {
-	events := make(chan string, 2)
-	observer := retrieval.CallbackFuncs{CallbackName: "retrieval-audit", Start: func(context.Context, retrieval.CallbackInput) error { events <- "start"; return nil }, End: func(context.Context, retrieval.CallbackOutput) error { events <- "end"; return nil }}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestHybridSearcherEmitsLifecycleEventsWithoutChangingResults(t *testing.T) {
+	events := make(chan string, 8)
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.Kind("retrieval") || event.Name != string(retrieval.OperationHybridSearch) {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseStart:
+			events <- "start"
+		case observe.PhaseEnd:
+			events <- "end"
+		}
+	})
 	searcher := mustHybridSearcher(t, retrieval.HybridSearchConfig{
 		Embedder: fixedEmbedder{vector: []float32{1}}, VectorStore: &fixedVectorStore{hits: []retrieval.SearchHit{{ID: "a", Score: 1, Text: "A"}}}, KeywordSearch: fixedSearchEngine{hits: []retrieval.SearchHit{{ID: "a", Score: 1, Text: "A"}}}, FinalTopK: 1,
 	})
-	hits, err := searcher.Invoke(callback.WithManager(context.Background(), manager), retrieval.HybridQuery{Text: "query"})
+	hits, err := searcher.Invoke(observe.With(context.Background(), observer), retrieval.HybridQuery{Text: "query"})
 	if err != nil || len(hits) != 1 || hits[0].ID != "a" {
 		t.Fatalf("hits=%#v err=%v", hits, err)
 	}

@@ -93,10 +93,9 @@ activity.End(err)
 - 命中已完成的缓存发布完整 Snapshot。公开流的缓存 miss 不合并其他在途请求，
   以免把一个运行的事件与取消权共享给另一个运行；仍然写入完成缓存。
 - Agent 的 result 等待会话提交完成；内部 Graph 不发布额外顶层 result。
-- 旧 schema.MessageEvent、callback.EmitStream、DeltaAccumulator 已明确弃用，保留兼容。
-  Agent 与配方的旧消息通知集中在 internal/streamcompat，只有显式订阅才构造旧快照。
-  新 UI 只消费公共流；工具观察、路由和群聊结果也发布带消息 ID 的公共快照。
-  Provider 不使用旧的前缀猜测累积器，旧累积器仅服务历史调用者，不再扩展。
+- 旧 schema.MessageEvent、callback.EmitStream 与 internal/streamcompat 已在轻量化阶段
+  删除；公共流是唯一的消息增量通道。新 UI 只消费公共流；工具观察、路由和群聊结果也发布
+  带消息 ID 的公共快照。Provider 不使用前缀猜测累积器。
 - 第一版不提供断线重放、持久化事件、任意历史编辑、SSE/WebSocket 服务实现。
   网络适配器只需对 Event 编码，并将终止错误转换为自己的网络错误消息。
 

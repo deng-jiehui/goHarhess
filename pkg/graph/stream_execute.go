@@ -119,8 +119,8 @@ func removePendingCurrent(pending *[]pendingStreamNode, id string, step int) {
 }
 
 func finishStreamNode(ctx context.Context, id string, step int) {
-	publish(ctx, Event{Type: EventNodeOutput, NodeID: id, Step: step})
-	publish(ctx, Event{Type: EventNodeEnd, NodeID: id, Step: step})
+	publish(ctx, lifecycleEvent{Type: eventNodeOutput, NodeID: id, Step: step})
+	publish(ctx, lifecycleEvent{Type: eventNodeEnd, NodeID: id, Step: step})
 }
 
 func hasConditionalEdge(from string, edges []runtimeEdge) bool {

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 
@@ -275,18 +275,11 @@ func TestCompiledGraphStreamCommitsStateBeforeNodeEnd(t *testing.T) {
 	}
 	var state *runState
 	var observed atomic.Int32
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{graph.CallbackFuncs{
-		CallbackName: "state-order",
-		NodeEnd: func(_ context.Context, result graph.NodeResult) error {
-			if result.NodeID == "source" && state != nil {
-				observed.Store(int32(state.Value))
-			}
-			return nil
-		},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindNode && event.Phase == observe.PhaseEnd && event.Attrs["graph.node_id"] == "source" && state != nil {
+			observed.Store(int32(state.Value))
+		}
+	})
 	g := graph.NewGraph[int, int]("stream-state-order")
 	if err := g.SetStateFactory(func(_ context.Context, input int) (*runState, error) {
 		state = &runState{Value: input}
@@ -314,7 +307,7 @@ func TestCompiledGraphStreamCommitsStateBeforeNodeEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, err := compiled.Stream(callback.WithManager(context.Background(), manager), 1)
+	reader, err := compiled.Stream(observe.With(context.Background(), collector), 1)
 	if err != nil {
 		t.Fatal(err)
 	}

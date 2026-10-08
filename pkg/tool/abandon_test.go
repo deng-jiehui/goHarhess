@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
@@ -46,20 +46,14 @@ func TestRuntimeAbandonCountsAndAlerts(t *testing.T) {
 	binding := registerTool(t, runtime, stuckTool("slow", release, started))
 
 	alerts := make(chan error, 4)
-	observer := CallbackFuncs{
-		CallbackName: "audit",
-		Error: func(_ context.Context, _ Spec, _ CallInput, err error) error {
-			alerts <- err
-			return nil
-		},
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := callback.WithManager(context.Background(), manager)
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindTool && event.Phase == observe.PhaseError {
+			alerts <- event.Err
+		}
+	})
+	ctx := observe.With(context.Background(), observer)
 
-	_, err = runtime.NewScope(1, 20*time.Millisecond).Execute(ctx, binding, CallInput{})
+	_, err := runtime.NewScope(1, 20*time.Millisecond).Execute(ctx, binding, CallInput{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Execute error = %v, want deadline exceeded", err)
 	}
@@ -219,25 +213,21 @@ func TestRuntimeAbandonAlertSnapshotsInput(t *testing.T) {
 	}))
 
 	observed := make(chan int, 1)
-	observer := CallbackFuncs{
-		CallbackName: "audit",
-		Error: func(_ context.Context, _ Spec, input CallInput, err error) error {
-			var abandoned *AbandonedError
-			if !errors.As(err, &abandoned) {
-				return nil
-			}
-			values, _ := input.Args["values"].([]any)
-			observed <- len(values)
-			return nil
-		},
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := callback.WithManager(context.Background(), manager)
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		var abandoned *AbandonedError
+		if event.Kind != observe.KindTool || event.Phase != observe.PhaseError || !errors.As(event.Err, &abandoned) {
+			return
+		}
+		input, _ := event.Payload.(CallInput)
+		values, _ := input.Args["values"].([]any)
+		observed <- len(values)
+	})
+	ctx := observe.With(context.Background(),
+		observe.CapturePayload(func(_ observe.Event, raw any) any { return raw }),
+		collector,
+	)
 
-	_, err = runtime.NewScope(1, 20*time.Millisecond).Execute(ctx, binding, CallInput{
+	_, err := runtime.NewScope(1, 20*time.Millisecond).Execute(ctx, binding, CallInput{
 		Args: map[string]any{"values": []any{1, 2}},
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/goharness/goharness/pkg/agent"
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/state"
 )
@@ -155,7 +155,7 @@ func TestConversationMetadataFlowsThroughContextNotState(t *testing.T) {
 	var observedValues []map[string]any
 	model := llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
 		mu.Lock()
-		observed = append(observed, callback.MetadataFromContext(ctx))
+		observed = append(observed, observe.MetadataFromContext(ctx))
 		observedValues = append(observedValues, state.ValuesFromContext(ctx))
 		mu.Unlock()
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
@@ -166,7 +166,7 @@ func TestConversationMetadataFlowsThroughContextNotState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runCtx := callback.WithMetadata(context.Background(), map[string]any{"source": "web"})
+	runCtx := observe.WithMetadata(context.Background(), map[string]any{"source": "web"})
 	invoke := func() {
 		_, err := value.Invoke(runCtx, []schema.Message{schema.UserMessage("hi")},
 			agent.WithConversationID("ctx-meta"),

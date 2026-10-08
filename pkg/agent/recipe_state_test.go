@@ -7,18 +7,18 @@ import (
 	"testing"
 
 	"github.com/goharness/goharness/pkg/agent"
-	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestAgentRecipesKeepControlStateOutOfGraphValues(t *testing.T) {
-	if _, exists := reflect.TypeOf(graph.Event{}).FieldByName("State"); exists {
-		t.Fatal("graph control event exposes erased state")
+	if _, exists := reflect.TypeOf(observe.Event{}).FieldByName("State"); exists {
+		t.Fatal("observe event exposes erased state")
 	}
 	var seen atomic.Int32
-	ctx := graph.WithEventSink(context.Background(), graph.EventSinkFunc(func(_ context.Context, event graph.Event) {
+	ctx := observe.With(context.Background(), observe.ObserverFunc(func(_ context.Context, _ observe.Event) {
 		seen.Add(1)
 	}))
 

@@ -155,7 +155,6 @@ func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, op
 	}
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
-	runCtx = a.bindModelStream(runCtx)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	recipeConfig := recipeRunConfig(session, messages, 0)
 	var stream *runnable.StreamReader[[]schema.Message]

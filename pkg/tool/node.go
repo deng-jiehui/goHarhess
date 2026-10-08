@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -385,7 +385,7 @@ func (n *ToolsNode) invokeCall(ctx context.Context, scope *Scope, call ToolCall,
 	input := CallInput{
 		RawArgs:  call.Arguments,
 		Args:     args,
-		Metadata: callback.MetadataFromContext(ctx),
+		Metadata: observe.MetadataFromContext(ctx),
 	}
 	// 幂等键含运行级前缀：同一运行的恢复中保持不变，不同运行互不冲突。
 	if batch != nil {

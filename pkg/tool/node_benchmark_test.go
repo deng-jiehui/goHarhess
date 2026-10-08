@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/goharness/goharness/internal/benchfixture"
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
@@ -169,25 +169,21 @@ func benchmarkToolGroup(b *testing.B, profile string) {
 				if need {
 					label = "on"
 				}
-				manager, err := callback.NewManager(callback.Config{}, benchCallbacks(callbacks))
-				if err != nil {
-					b.Fatal(err)
-				}
 				tools, runs := benchTools(8, flagSet(8, need))
 				benchToolBatch(b, fmt.Sprintf("ToolCallbacks/calls=8/callbacks=%d/history=%s", callbacks, label),
-					tools, runs, 100, callback.WithManager(ctx, manager))
+					tools, runs, 100, observe.With(ctx, benchObservers(callbacks)...))
 			}
 		}
 	}
 }
 
-// benchCallbacks 生成 count 个不打印、不编码的空回调。
-func benchCallbacks(count int) []callback.Handler {
-	handlers := make([]callback.Handler, 0, count)
+// benchObservers 生成 count 个不打印、不编码的空观测者。
+func benchObservers(count int) []observe.Observer {
+	observers := make([]observe.Observer, 0, count)
 	for i := 0; i < count; i++ {
-		handlers = append(handlers, tool.CallbackFuncs{CallbackName: fmt.Sprintf("bench-cb-%d", i)})
+		observers = append(observers, observe.ObserverFunc(func(context.Context, observe.Event) {}))
 	}
-	return handlers
+	return observers
 }
 
 func BenchmarkGHSmoke(b *testing.B)  { benchmarkToolGroup(b, "smoke") }

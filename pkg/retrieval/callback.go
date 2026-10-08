@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/observe"
 )
 
@@ -24,6 +23,8 @@ const (
 	OperationDocumentIndex Operation = "document_index"
 )
 
+// CallbackInput/CallbackOutput/CallbackFailure 是观测事件的原始载荷：
+// 经 observe.CapturePayload 脱敏后才进入 Event.Payload。
 type CallbackInput struct {
 	Operation  Operation
 	Document   *Document
@@ -50,41 +51,6 @@ type CallbackFailure struct {
 	Err   error
 }
 
-type Callback interface {
-	callback.Handler
-	OnRetrieverStart(context.Context, CallbackInput) error
-	OnRetrieverEnd(context.Context, CallbackOutput) error
-	OnRetrieverError(context.Context, CallbackFailure) error
-}
-
-type CallbackFuncs struct {
-	CallbackName string
-	Start        func(context.Context, CallbackInput) error
-	End          func(context.Context, CallbackOutput) error
-	Error        func(context.Context, CallbackFailure) error
-}
-
-func (f CallbackFuncs) Name() string { return f.CallbackName }
-func (f CallbackFuncs) OnRetrieverStart(ctx context.Context, input CallbackInput) error {
-	if f.Start == nil {
-		return nil
-	}
-	return f.Start(ctx, input.Clone())
-}
-func (f CallbackFuncs) OnRetrieverEnd(ctx context.Context, output CallbackOutput) error {
-	if f.End == nil {
-		return nil
-	}
-	return f.End(ctx, output.Clone())
-}
-func (f CallbackFuncs) OnRetrieverError(ctx context.Context, failure CallbackFailure) error {
-	if f.Error == nil {
-		return nil
-	}
-	failure.Input = failure.Input.Clone()
-	return f.Error(ctx, failure)
-}
-
 func (i CallbackInput) Validate() error {
 	count := 0
 	for _, active := range []bool{i.Document != nil, i.Embedding != nil, i.Vector != nil, i.TextSearch != nil, i.Rerank != nil, i.Hybrid != nil, i.Documents != nil} {
@@ -106,32 +72,23 @@ func (o CallbackOutput) Clone() CallbackOutput {
 	return cloneCallbackValue(o).(CallbackOutput)
 }
 
-func cloneCallbackValue(value any) any { return callback.CloneValue(value) }
+func cloneCallbackValue(value any) any { return observe.CloneValue(value) }
 
-func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, callback.Invocation) {
-	operationCtx, invocation := callback.Begin(ctx, "retrieval", string(input.Operation), nil)
-	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(callback.PhaseStart), kindRetrieval, nil), input)
-	_ = callback.Dispatch[Callback](operationCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, handler Callback) error {
-		return handler.OnRetrieverStart(ctx, input.Clone())
-	})
+// BeginCallback 开启一次检索子操作并发射 kind=retrieval 的 start 事件。
+func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, observe.Invocation) {
+	operationCtx, invocation := observe.Begin(ctx, "retrieval", string(input.Operation), nil)
+	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(observe.PhaseStart), kindRetrieval, nil), input)
 	return operationCtx, invocation
 }
 
-func EndCallback(ctx context.Context, invocation callback.Invocation, output CallbackOutput, err error) {
+// EndCallback 收尾检索子操作：失败发 error 事件，成功发 end 事件。
+func EndCallback(ctx context.Context, invocation observe.Invocation, output CallbackOutput, err error) {
 	if err != nil {
 		failure := CallbackFailure{Input: CallbackInput{Operation: output.Operation}, Err: err}
-		failed := invocation.WithPhase(callback.PhaseError)
-		event := observe.EventOf(failed, kindRetrieval, nil)
+		event := observe.EventOf(invocation.WithPhase(observe.PhaseError), kindRetrieval, nil)
 		event.Err = err
 		observe.EmitPayload(ctx, event, failure)
-		_ = callback.Dispatch[Callback](ctx, failed, func(ctx context.Context, handler Callback) error {
-			return handler.OnRetrieverError(ctx, failure)
-		})
 		return
 	}
-	end := invocation.WithPhase(callback.PhaseEnd)
-	observe.EmitPayload(ctx, observe.EventOf(end, kindRetrieval, nil), output)
-	_ = callback.Dispatch[Callback](ctx, end, func(ctx context.Context, handler Callback) error {
-		return handler.OnRetrieverEnd(ctx, output.Clone())
-	})
+	observe.EmitPayload(ctx, observe.EventOf(invocation.WithPhase(observe.PhaseEnd), kindRetrieval, nil), output)
 }

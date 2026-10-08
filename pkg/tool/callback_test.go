@@ -5,16 +5,25 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestToolModelVisibleErrorUsesEndLifecycle(t *testing.T) {
 	endCalls, errorCalls := 0, 0
-	observer := tool.CallbackFuncs{CallbackName: "audit", End: func(context.Context, tool.Spec, tool.CallInput, tool.Result) error { endCalls++; return nil }, Error: func(context.Context, tool.Spec, tool.CallInput, error) error { errorCalls++; return nil }}
-	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	ctx, invocation := tool.BeginCallback(callback.WithManager(context.Background(), manager), tool.Spec{Name: "search"}, tool.CallInput{})
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindTool {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseEnd:
+			endCalls++
+		case observe.PhaseError:
+			errorCalls++
+		}
+	})
+	ctx, invocation := tool.BeginCallback(observe.With(context.Background(), observer), tool.Spec{Name: "search"}, tool.CallInput{})
 	tool.EndCallback(ctx, invocation, tool.Spec{Name: "search"}, tool.CallInput{}, tool.ErrorResult(schema.NewTextBlock("denied")), nil)
 	if endCalls != 1 || errorCalls != 0 {
 		t.Fatalf("end/error=%d/%d", endCalls, errorCalls)

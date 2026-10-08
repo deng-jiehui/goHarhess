@@ -22,6 +22,7 @@ func (payloadRequest) OnEvent(context.Context, Event) {}
 
 // CapturePayload 显式开启载荷捕获：把它交给 With 后，发射点在事件中
 // 填充经 redact 脱敏的 Payload。默认事件只有元数据，不含 prompt 与回复。
+// 必须作为 With 的直接参数传入——包进 Multi 后 With 无法识别脱敏钩子。
 func CapturePayload(redact RedactFunc) Observer {
 	return payloadRequest{redact: redact}
 }

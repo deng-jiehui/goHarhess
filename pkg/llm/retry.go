@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/stream"
 )
@@ -114,7 +113,7 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 		defer writer.Close()
 		for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
 			var started atomic.Bool
-			attemptCtx := callback.WithStreamSignal[Response](executionCtx, func() {
+			attemptCtx := withStreamSignal[Response](executionCtx, func() {
 				started.Store(true)
 			})
 			attemptCtx, published := stream.TrackMessages(attemptCtx)

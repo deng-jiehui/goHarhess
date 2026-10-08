@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
@@ -78,21 +77,14 @@ func responseReaderFromWire(ctx context.Context, events <-chan wireEvent, cancel
 				}
 				switch event.kind {
 				case wireEventDelta:
-					callback.NotifyStream[Response](ctx)
+					notifyStream[Response](ctx)
 					err := accumulator.apply(event.messages)
 					if err != nil {
 						_ = writer.CloseWithError(err)
 						return
 					}
-					if callback.HasStreamCallbacks[Response](ctx) {
-						response.Messages = accumulator.messages()
-						callback.EmitStream(ctx, response.Clone())
-					}
 				case wireEventUsage:
-					if callback.HasStreamCallbacks[Response](ctx) {
-						response.Messages = accumulator.messages()
-						callback.EmitStream(ctx, response.Clone())
-					}
+					response.Messages = accumulator.messages()
 				case wireEventDone:
 					var err error
 					response.Messages, err = accumulator.finish(&schema.ResponseMeta{ID: responseID, Model: model, FinishReason: response.FinishReason, Usage: response.Usage})

@@ -4,33 +4,30 @@ import (
 	"context"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestChatModelNodeOwnsOneLifecycleAndPreservesResponse(t *testing.T) {
 	var starts, ends int
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{llm.CallbackFuncs{
-		CallbackName: "audit",
-		Start: func(context.Context, llm.Request) error {
+	collector := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindLLM {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseStart:
 			starts++
-			return nil
-		},
-		End: func(context.Context, llm.Response) error {
+		case observe.PhaseEnd:
 			ends++
-			return nil
-		},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
+		}
+	})
 	node, err := llm.NewChatModelNode(llm.NewScriptedModel([]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock("done"))}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := node.Invoke(callback.WithManager(context.Background(), manager), llm.Request{
+	response, err := node.Invoke(observe.With(context.Background(), collector), llm.Request{
 		Messages: []schema.Message{schema.NewMessage(schema.RoleUser, schema.NewTextBlock("run"))},
 	})
 	if err != nil {

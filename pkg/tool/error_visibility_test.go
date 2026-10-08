@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
@@ -33,21 +33,18 @@ func invokeOne(t *testing.T, value tool.Tool, args string) (string, bool) {
 func TestToolErrorSanitizedByDefault(t *testing.T) {
 	internal := errors.New("dial tcp 10.0.0.8:5432: connection refused (secret db)")
 	var captured error
-	observer := tool.CallbackFuncs{
-		CallbackName: "audit",
-		Error:        func(_ context.Context, _ tool.Spec, _ tool.CallInput, err error) error { captured = err; return nil },
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindTool && event.Phase == observe.PhaseError {
+			captured = event.Err
+		}
+	})
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "db"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.Result{}, internal
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("db", `{}`, "call-1")})
+	out, err := node.Invoke(observe.With(context.Background(), observer), []schema.Message{toolCallMessage("db", `{}`, "call-1")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,29 +220,28 @@ func TestWrappedArgsErrorDoesNotLeakOuterContext(t *testing.T) {
 
 // 结果转换失败属调用生命周期内的失败：模型收到脱敏 isError，
 // 诊断侧走错误回调拿完整错误，不会先收到成功终态。
-func TestResultConversionFailureReportsErrorCallback(t *testing.T) {
+func TestResultConversionFailureReportsErrorEvent(t *testing.T) {
 	endCalls, errorCalls := 0, 0
 	var captured error
-	observer := tool.CallbackFuncs{
-		CallbackName: "audit",
-		End:          func(context.Context, tool.Spec, tool.CallInput, tool.Result) error { endCalls++; return nil },
-		Error: func(_ context.Context, _ tool.Spec, _ tool.CallInput, err error) error {
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindTool {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseEnd:
+			endCalls++
+		case observe.PhaseError:
 			errorCalls++
-			captured = err
-			return nil
-		},
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+			captured = event.Err
+		}
+	})
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "db"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.Result{Data: func() {}}, nil
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("db", `{}`, "call-1")})
+	out, err := node.Invoke(observe.With(context.Background(), observer), []schema.Message{toolCallMessage("db", `{}`, "call-1")})
 	if err != nil {
 		t.Fatal(err)
 	}

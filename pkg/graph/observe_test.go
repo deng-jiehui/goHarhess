@@ -132,8 +132,8 @@ func TestObserveGraphErrorSequence(t *testing.T) {
 	}
 }
 
-// TestObserveWithoutManagerStillEmits 验证 observe.With 单独存在时（无
-// callback.Manager）图也发射事件——bindCallbacks 的注册条件必须覆盖它。
+// TestObserveWithoutManagerStillEmits 验证 observe.With 注册观测者后
+// 图发射完整生命周期事件。
 func TestObserveWithoutManagerStillEmits(t *testing.T) {
 	log := &eventLog{}
 	g := graph.NewGraph[int, int]("solo")

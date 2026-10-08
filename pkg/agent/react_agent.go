@@ -85,7 +85,6 @@ func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, opti
 		return nil, err
 	}
 	runOpts.session = session
-	runCtx = a.bindModelStream(runCtx)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
 	stream, err := a.runReact(runCtx, prepared, conversationInput(session, messages), runOpts)
 	if err != nil {

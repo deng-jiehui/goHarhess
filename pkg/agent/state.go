@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/goharness/goharness/internal/agentrecipe"
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/schema"
@@ -26,11 +26,11 @@ func (s *conversationSession) bind(ctx context.Context) context.Context {
 		return ctx
 	}
 	checkpoint := s.checkpoint.Clone()
-	checkpoint.Values = callback.CloneMetadata(s.values)
+	checkpoint.Values = observe.CloneMetadata(s.values)
 	ctx = state.WithCheckpoint(ctx, checkpoint)
 	// 会话标识属于运行追踪信息，经 ctx 元数据下发给回调与工具；
 	// 与持久化 State 分离，不参与业务 values。
-	return callback.WithMetadata(ctx, map[string]any{
+	return observe.WithMetadata(ctx, map[string]any{
 		"conversation_id":    checkpoint.ConversationID,
 		"checkpoint_version": checkpoint.Version,
 	})
@@ -125,7 +125,7 @@ func (b *base) loadConversation(
 	}
 	// checkpoint 由 Store.Load 返回的独立副本，已归本次运行所有；
 	// 只需要隔离 Values 供运行期修改，不再整份克隆。
-	values := callback.CloneMetadata(checkpoint.Values)
+	values := observe.CloneMetadata(checkpoint.Values)
 	if !opts.resume {
 		for key, value := range opts.StateValues {
 			values[key] = value

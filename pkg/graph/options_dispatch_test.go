@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 
@@ -111,7 +111,7 @@ func TestDeepTargetedPathReachesOnlyFinalNode(t *testing.T) {
 func TestRunContextMetadataReachesNodes(t *testing.T) {
 	var observed map[string]any
 	node := runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
-		observed = callback.MetadataFromContext(ctx)
+		observed = observe.MetadataFromContext(ctx)
 		return input, nil
 	})
 	g := graph.NewGraph[string, string]("meta-ctx")
@@ -124,7 +124,7 @@ func TestRunContextMetadataReachesNodes(t *testing.T) {
 	if err := g.AddEdge("node", graph.End); err != nil {
 		t.Fatal(err)
 	}
-	runCtx := callback.WithMetadata(context.Background(), map[string]any{
+	runCtx := observe.WithMetadata(context.Background(), map[string]any{
 		"tenant": "global",
 		"mode":   "run",
 	})
@@ -136,7 +136,7 @@ func TestRunContextMetadataReachesNodes(t *testing.T) {
 	}
 	// 读到的快照与运行上下文互相隔离。
 	observed["tenant"] = "mutated"
-	if got := callback.MetadataFromContext(runCtx)["tenant"]; got != "global" {
+	if got := observe.MetadataFromContext(runCtx)["tenant"]; got != "global" {
 		t.Fatalf("context metadata mutated: %v", got)
 	}
 }
@@ -148,17 +148,17 @@ func TestParallelBranchMetadataIsolationViaDerivedContext(t *testing.T) {
 	var mu sync.Mutex
 	inner := runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
 		mu.Lock()
-		innerSeen = callback.MetadataFromContext(ctx)
+		innerSeen = observe.MetadataFromContext(ctx)
 		mu.Unlock()
 		return input, nil
 	})
 	// relay 分支在调用内部组件前创建派生 ctx 追加分支标签。
 	relay := &relayBranch{inner: inner, derive: func(ctx context.Context) context.Context {
-		return callback.WithMetadata(ctx, map[string]any{"branch": "relayed"})
+		return observe.WithMetadata(ctx, map[string]any{"branch": "relayed"})
 	}}
 	plain := runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
 		mu.Lock()
-		plainSeen = callback.MetadataFromContext(ctx)
+		plainSeen = observe.MetadataFromContext(ctx)
 		mu.Unlock()
 		return input, nil
 	})
@@ -181,7 +181,7 @@ func TestParallelBranchMetadataIsolationViaDerivedContext(t *testing.T) {
 	finish := runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if branch, exists := callback.MetadataFromContext(ctx)["branch"]; exists {
+		if branch, exists := observe.MetadataFromContext(ctx)["branch"]; exists {
 			t.Fatalf("branch tag leaked to downstream: %v", branch)
 		}
 		return input, nil
@@ -194,7 +194,7 @@ func TestParallelBranchMetadataIsolationViaDerivedContext(t *testing.T) {
 	_ = g.AddEdge(graph.Start, "fanout")
 	_ = g.AddEdge("fanout", "finish")
 	_ = g.AddEdge("finish", graph.End)
-	runCtx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
+	runCtx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
 	if _, err := mustCompile(t, g).Invoke(runCtx, "base"); err != nil {
 		t.Fatal(err)
 	}

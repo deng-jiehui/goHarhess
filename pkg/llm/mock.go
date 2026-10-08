@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/goharness/goharness/pkg/callback"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
@@ -52,7 +51,6 @@ func (m *ScriptedModel) Stream(ctx context.Context, request Request, options ...
 	}
 	reader, writer := runnable.Pipe[Response](ctx)
 	go func() {
-		callback.EmitStream(ctx, response.Clone())
 		if err := writer.Send(response.Clone()); err != nil {
 			return
 		}

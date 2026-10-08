@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/stream"
 )
@@ -25,7 +25,7 @@ func ObserveReader(ctx context.Context, name string, request Request, reader *ru
 
 // ObserveReaderWithInvocation wraps a Reader for callers that already opened
 // the lifecycle invocation and must avoid a duplicate Start event.
-func ObserveReaderWithInvocation(ctx context.Context, invocation callback.Invocation, upstream *runnable.StreamReader[Response]) (*runnable.StreamReader[Response], error) {
+func ObserveReaderWithInvocation(ctx context.Context, invocation observe.Invocation, upstream *runnable.StreamReader[Response]) (*runnable.StreamReader[Response], error) {
 	if ctx == nil {
 		return nil, errors.New("model observe context cannot be nil")
 	}

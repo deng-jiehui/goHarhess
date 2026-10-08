@@ -9,30 +9,32 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
-func TestToolsNodeDispatchesLifecycleCallbacksWithoutChangingResult(t *testing.T) {
+func TestToolsNodeEmitsLifecycleEventsWithoutChangingResult(t *testing.T) {
 	events := make(chan string, 3)
-	observer := tool.CallbackFuncs{
-		CallbackName: "tool-audit",
-		Start:        func(context.Context, tool.Spec, tool.CallInput) error { events <- "start"; return nil },
-		End:          func(context.Context, tool.Spec, tool.CallInput, tool.Result) error { events <- "end"; return nil },
-	}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindTool {
+			return
+		}
+		switch event.Phase {
+		case observe.PhaseStart:
+			events <- "start"
+		case observe.PhaseEnd:
+			events <- "end"
+		}
+	})
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
+	output, err := node.Invoke(observe.With(context.Background(), observer), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
 	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
@@ -99,7 +101,7 @@ func TestToolsNodeBuildsCallInputFromRuntimeContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
+	ctx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
 	messages := []schema.Message{
 		schema.NewMessage(schema.RoleUser, schema.NewFileBlock("guide.pdf", "application/pdf")),
 		toolCallMessage("read", `{}`, "call-1"),
@@ -142,19 +144,15 @@ func TestToolsNodeCallExtraReachesMetadataWithoutLegacyCorrelationOverride(t *te
 	}
 }
 
-func TestToolsNodeCallbackFailureDoesNotChangeBusinessResult(t *testing.T) {
-	observer := tool.CallbackFuncs{CallbackName: "broken", Start: func(context.Context, tool.Spec, tool.CallInput) error { return errors.New("audit failed") }}
-	manager, err := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestToolsNodeObserverPanicDoesNotChangeBusinessResult(t *testing.T) {
+	observer := observe.ObserverFunc(func(context.Context, observe.Event) { panic("audit failed") })
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := node.Invoke(callback.WithManager(context.Background(), manager), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
+	output, err := node.Invoke(observe.With(context.Background(), observer), []schema.Message{toolCallMessage("echo", `{}`, "call-1")})
 	if err != nil || len(output) != 1 || toolResultText(output[0]) != "ok" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}

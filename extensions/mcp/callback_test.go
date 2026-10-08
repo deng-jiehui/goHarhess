@@ -9,7 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	mcpext "github.com/goharness/goharness/extensions/mcp"
-	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
@@ -27,18 +27,18 @@ func TestMCPCallbackReportsProviderNeutralOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	var starts, ends []mcpext.Operation
-	observer := mcpext.CallbackFuncs{CallbackName: "mcp", Start: func(_ context.Context, request mcpext.CallbackRequest) error {
-		if err := request.Validate(); err != nil {
-			t.Error(err)
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.Kind("mcp") {
+			return
 		}
-		starts = append(starts, request.Operation)
-		return nil
-	}, End: func(_ context.Context, response mcpext.CallbackResponse) error {
-		ends = append(ends, response.Operation)
-		return nil
-	}}
-	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	ctx := callback.WithManager(context.Background(), manager)
+		switch event.Phase {
+		case observe.PhaseStart:
+			starts = append(starts, mcpext.Operation(event.Name))
+		case observe.PhaseEnd:
+			ends = append(ends, mcpext.Operation(event.Name))
+		}
+	})
+	ctx := observe.With(context.Background(), observer)
 	tools, err := client.RefreshTools(ctx)
 	if err != nil {
 		t.Fatal(err)
