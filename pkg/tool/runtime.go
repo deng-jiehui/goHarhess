@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -319,6 +320,13 @@ func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput
 	metadata["tool.file_access"] = spec.FileAccess
 	alertCtx, invocation := callback.Begin(ctx, "tool", spec.Name, metadata)
 	alert := &AbandonedError{ToolName: spec.Name, Abandoned: count, Threshold: r.config.MaxAbandoned, Err: cause}
+	event := observe.EventOf(invocation.WithPhase(observe.PhaseError), observe.KindTool, map[string]any{
+		"tool.abandoned":           true,
+		"tool.abandoned_count":     count,
+		"tool.abandoned_threshold": r.config.MaxAbandoned,
+	})
+	event.Err = alert
+	observe.Emit(alertCtx, event)
 	_ = callback.Dispatch[Callback](alertCtx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
 		return handler.OnToolError(ctx, cloneSpecForCallback(spec), cloneCallInput(input), alert)
 	})

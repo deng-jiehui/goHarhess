@@ -3,10 +3,12 @@ package graph
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 
@@ -147,7 +149,9 @@ type nodeLifecycle struct {
 }
 
 func bindCallbacks(ctx context.Context, run RunInfo, nodes []NodeInfo) context.Context {
-	if _, ok := callback.ManagerFromContext(ctx); !ok {
+	// 旧 Manager 通道或新 observe.Observer 任一存在时都要安装生命周期
+	// 汇聚器：两者共用同一套 span 身份，事件双发。
+	if _, ok := callback.ManagerFromContext(ctx); !ok && !observe.Active(ctx) {
 		return ctx
 	}
 	graphCtx, invocation := callback.Begin(ctx, "graph", run.Name, map[string]any{"graph.revision": run.Revision})
@@ -187,7 +191,10 @@ func (s *lifecycleSink) Publish(ctx context.Context, event Event) {
 	case EventGraphStart:
 		invocation := s.runInvocation
 		s.mu.Unlock()
-		_ = callback.Dispatch[Callback](callback.BindInvocation(ctx, invocation), invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, h Callback) error { return h.OnGraphStart(ctx, s.run) })
+		start := invocation.WithPhase(callback.PhaseStart)
+		bound := callback.BindInvocation(ctx, invocation)
+		observe.Emit(bound, observe.EventOf(start, observe.KindRun, runAttrs(s.run)))
+		_ = callback.Dispatch[Callback](bound, start, func(ctx context.Context, h Callback) error { return h.OnGraphStart(ctx, s.run) })
 	case EventNodeStart:
 		key := graphNodeKey{id: event.NodeID, step: event.Step}
 		node := s.nodes[key]
@@ -198,40 +205,79 @@ func (s *lifecycleSink) Publish(ctx context.Context, event Event) {
 			s.nodes[key] = node
 		}
 		s.mu.Unlock()
-		_ = callback.Dispatch[Callback](node.ctx, node.invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, h Callback) error { return h.OnNodeStart(ctx, node.execution) })
+		start := node.invocation.WithPhase(callback.PhaseStart)
+		observe.Emit(node.ctx, observe.EventOf(start, observe.KindNode, nil))
+		_ = callback.Dispatch[Callback](node.ctx, start, func(ctx context.Context, h Callback) error { return h.OnNodeStart(ctx, node.execution) })
 	case EventNodeOutput:
 		node := s.nodes[graphNodeKey{id: event.NodeID, step: event.Step}]
 		s.mu.Unlock()
-		_ = callback.Dispatch[Callback](node.ctx, node.invocation.WithPhase(callback.PhaseOutput), func(ctx context.Context, h Callback) error { return h.OnNodeOutput(ctx, node.execution) })
+		output := node.invocation.WithPhase(callback.PhaseOutput)
+		observe.Emit(node.ctx, observe.EventOf(output, observe.KindNode, nil))
+		_ = callback.Dispatch[Callback](node.ctx, output, func(ctx context.Context, h Callback) error { return h.OnNodeOutput(ctx, node.execution) })
 	case EventNodeEnd:
 		key := graphNodeKey{id: event.NodeID, step: event.Step}
 		node := s.nodes[key]
 		delete(s.nodes, key)
 		s.mu.Unlock()
 		result := NodeResult{NodeExecution: node.execution, Duration: time.Since(node.invocation.StartedAt), Status: NodeStatusOK}
-		_ = callback.Dispatch[Callback](node.ctx, node.invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, h Callback) error { return h.OnNodeEnd(ctx, result) })
+		end := node.invocation.WithPhase(callback.PhaseEnd)
+		observe.Emit(node.ctx, observe.EventOf(end, observe.KindNode, nil))
+		_ = callback.Dispatch[Callback](node.ctx, end, func(ctx context.Context, h Callback) error { return h.OnNodeEnd(ctx, result) })
 	case EventGraphEnd:
 		invocation := s.runInvocation
 		s.mu.Unlock()
 		result := RunResult{RunInfo: s.run, Steps: event.Step}
-		_ = callback.Dispatch[Callback](callback.BindInvocation(ctx, invocation), invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, h Callback) error { return h.OnGraphEnd(ctx, result) })
+		end := invocation.WithPhase(callback.PhaseEnd)
+		bound := callback.BindInvocation(ctx, invocation)
+		observe.Emit(bound, observe.EventOf(end, observe.KindRun, mergeAttrs(runAttrs(s.run), "graph.step", event.Step)))
+		_ = callback.Dispatch[Callback](bound, end, func(ctx context.Context, h Callback) error { return h.OnGraphEnd(ctx, result) })
 	case EventGraphError:
 		active := make([]nodeLifecycle, 0, len(s.nodes))
 		for _, node := range s.nodes {
 			active = append(active, node)
 		}
+		// 扇出顺序按 step 排序，公共流里节点错误的出现顺序与旧路径一致。
+		sort.Slice(active, func(i, j int) bool { return active[i].execution.Step < active[j].execution.Step })
 		s.nodes = map[graphNodeKey]nodeLifecycle{}
 		invocation := s.runInvocation
 		s.mu.Unlock()
 		for _, node := range active {
 			result := NodeResult{NodeExecution: node.execution, Duration: time.Since(node.invocation.StartedAt), Status: NodeStatusError, Err: event.Err}
-			_ = callback.Dispatch[Callback](node.ctx, node.invocation.WithPhase(callback.PhaseError), func(ctx context.Context, h Callback) error { return h.OnNodeEnd(ctx, result) })
+			failed := node.invocation.WithPhase(callback.PhaseError)
+			nodeEvent := observe.EventOf(failed, observe.KindNode, nil)
+			nodeEvent.Err = event.Err
+			observe.Emit(node.ctx, nodeEvent)
+			_ = callback.Dispatch[Callback](node.ctx, failed, func(ctx context.Context, h Callback) error { return h.OnNodeEnd(ctx, result) })
 		}
 		failure := RunFailure{RunInfo: s.run, Err: event.Err}
-		_ = callback.Dispatch[Callback](callback.BindInvocation(ctx, invocation), invocation.WithPhase(callback.PhaseError), func(ctx context.Context, h Callback) error { return h.OnGraphError(ctx, failure) })
+		failed := invocation.WithPhase(callback.PhaseError)
+		bound := callback.BindInvocation(ctx, invocation)
+		runEvent := observe.EventOf(failed, observe.KindRun, runAttrs(s.run))
+		runEvent.Err = event.Err
+		observe.Emit(bound, runEvent)
+		_ = callback.Dispatch[Callback](bound, failed, func(ctx context.Context, h Callback) error { return h.OnGraphError(ctx, failure) })
 	default:
 		s.mu.Unlock()
 	}
+}
+
+// runAttrs 是 run 级事件补充到 span 元数据上的运行属性。
+func runAttrs(run RunInfo) map[string]any {
+	return map[string]any{
+		"graph.input_type":  run.InputType,
+		"graph.output_type": run.OutputType,
+		"graph.resume_mode": string(run.ResumeMode),
+	}
+}
+
+// mergeAttrs 在 attrs 副本上补充键值，供一次性事件组装使用。
+func mergeAttrs(attrs map[string]any, key string, value any) map[string]any {
+	merged := make(map[string]any, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	merged[key] = value
+	return merged
 }
 
 func (s *lifecycleSink) nodeExecution(event Event) NodeExecution {

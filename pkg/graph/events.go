@@ -2,9 +2,7 @@ package graph
 
 import (
 	"context"
-	"sort"
 	"sync"
-	"time"
 
 	"github.com/goharness/goharness/pkg/stream"
 )
@@ -39,12 +37,6 @@ func (f EventSinkFunc) Publish(ctx context.Context, event Event) {
 
 type eventSinkContextKey struct{}
 type graphExecutionContextKey struct{}
-type publicTimingKey struct{}
-type publicTiming struct {
-	mu    sync.Mutex
-	graph time.Time
-	nodes map[graphNodeKey]time.Time
-}
 
 type graphExecutionScope struct {
 	active bool
@@ -84,9 +76,7 @@ func enterGraphExecution(ctx context.Context, name string) (context.Context, err
 		ctx = context.Background()
 	}
 	ctx = stream.WithNamespace(ctx, name)
-	if stream.Enabled(ctx) {
-		ctx = context.WithValue(ctx, publicTimingKey{}, &publicTiming{nodes: map[graphNodeKey]time.Time{}})
-	}
+	ctx = enableStreamLifecycle(ctx)
 	parent, _ := ctx.Value(graphExecutionContextKey{}).(graphExecutionScope)
 	if parent.active {
 		var child EventSink
@@ -107,82 +97,6 @@ func enterGraphExecution(ctx context.Context, name string) (context.Context, err
 }
 
 func publish(ctx context.Context, event Event) {
-	if event.Type == EventGraphError && event.Err != nil {
-		if timing, ok := ctx.Value(publicTimingKey{}).(*publicTiming); ok {
-			timing.mu.Lock()
-			keys := make([]graphNodeKey, 0, len(timing.nodes))
-			for key := range timing.nodes {
-				keys = append(keys, key)
-			}
-			sort.Slice(keys, func(i, j int) bool {
-				if keys[i].step != keys[j].step {
-					return keys[i].step < keys[j].step
-				}
-				return keys[i].id < keys[j].id
-			})
-			values := make([]stream.Lifecycle, 0, len(keys))
-			for _, key := range keys {
-				values = append(values, stream.Lifecycle{Scope: stream.ScopeNode, Phase: stream.PhaseError, Name: key.id, Step: key.step, Duration: time.Since(timing.nodes[key]), Error: event.Err.Error()})
-				delete(timing.nodes, key)
-			}
-			timing.mu.Unlock()
-			for _, value := range values {
-				_ = stream.PublishLifecycle(stream.WithNode(ctx, value.Name), value)
-			}
-		}
-	}
-	var phase stream.Phase
-	scope := stream.ScopeNode
-	switch event.Type {
-	case EventGraphStart:
-		phase, scope = "start", "graph"
-	case EventGraphEnd:
-		phase, scope = "end", "graph"
-	case EventGraphError:
-		phase, scope = "error", "graph"
-	case EventNodeStart:
-		phase = "start"
-	case EventNodeEnd:
-		phase = "end"
-	}
-	if phase != "" {
-		name := event.NodeID
-		if scope == "graph" {
-			execution, _ := ctx.Value(graphExecutionContextKey{}).(graphExecutionScope)
-			name = execution.name
-		}
-		if name == "" {
-			name = "graph"
-		}
-		value := stream.Lifecycle{Scope: scope, Phase: phase, Name: name, Step: event.Step}
-		if timing, ok := ctx.Value(publicTimingKey{}).(*publicTiming); ok {
-			timing.mu.Lock()
-			if scope == "graph" {
-				if phase == "start" {
-					timing.graph = time.Now()
-				} else if !timing.graph.IsZero() {
-					value.Duration = time.Since(timing.graph)
-				}
-			} else {
-				key := graphNodeKey{id: event.NodeID, step: event.Step}
-				if phase == "start" {
-					timing.nodes[key] = time.Now()
-				} else if start, ok := timing.nodes[key]; ok {
-					value.Duration = time.Since(start)
-					delete(timing.nodes, key)
-				}
-			}
-			timing.mu.Unlock()
-		}
-		if event.Err != nil {
-			value.Error = event.Err.Error()
-		}
-		publicCtx := ctx
-		if scope == stream.ScopeGraph {
-			publicCtx = stream.WithNode(ctx, "")
-		}
-		_ = stream.PublishLifecycle(publicCtx, value)
-	}
 	sink, ok := EventSinkFromContext(ctx)
 	if !ok {
 		return

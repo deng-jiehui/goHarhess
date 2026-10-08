@@ -4,53 +4,24 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/goharness/goharness/pkg/observe"
 )
 
-// Phase identifies a lifecycle boundary.
-type Phase string
+// Trace、Invocation 及其 Phase 已统一为 pkg/observe 类型；本文件以别名
+// 保留旧 API，双发期内与 observe 事件共享同一 span 体系。
+type (
+	Trace      = observe.Trace
+	Invocation = observe.Invocation
+	Phase      = observe.Phase
+)
 
 const (
-	PhaseStart  Phase = "start"
-	PhaseOutput Phase = "output"
-	PhaseEnd    Phase = "end"
-	PhaseError  Phase = "error"
+	PhaseStart  = observe.PhaseStart
+	PhaseOutput = observe.PhaseOutput
+	PhaseEnd    = observe.PhaseEnd
+	PhaseError  = observe.PhaseError
 )
-
-// Trace identifies a root run and one nested operation.
-type Trace struct {
-	TraceID      string `json:"trace_id"`
-	RunID        string `json:"run_id"`
-	SpanID       string `json:"span_id"`
-	ParentSpanID string `json:"parent_span_id,omitempty"`
-}
-
-// Invocation is payload-free lifecycle and tracing metadata.
-type Invocation struct {
-	Component string         `json:"component"`
-	Operation string         `json:"operation"`
-	Phase     Phase          `json:"phase"`
-	Trace     Trace          `json:"trace"`
-	StartedAt time.Time      `json:"started_at"`
-	Timestamp time.Time      `json:"timestamp"`
-	Duration  time.Duration  `json:"duration,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
-}
-
-func (i Invocation) Clone() Invocation {
-	i.Metadata = CloneMetadata(i.Metadata)
-	return i
-}
-
-// WithPhase returns a terminal or progress snapshot of the same operation.
-func (i Invocation) WithPhase(phase Phase) Invocation {
-	now := time.Now()
-	i.Phase = phase
-	i.Timestamp = now
-	if phase == PhaseEnd || phase == PhaseError {
-		i.Duration = now.Sub(i.StartedAt)
-	}
-	return i.Clone()
-}
 
 type PanicError struct {
 	Handler string

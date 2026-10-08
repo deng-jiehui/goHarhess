@@ -1,0 +1,264 @@
+package observe_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/goharness/goharness/pkg/observe"
+)
+
+// collector 记录到达的事件序列。
+type collector struct {
+	events []observe.Event
+}
+
+func (c *collector) OnEvent(_ context.Context, event observe.Event) {
+	c.events = append(c.events, event)
+}
+
+func span(ctx context.Context, kind observe.Kind, name string) (context.Context, observe.Invocation) {
+	return observe.Begin(ctx, string(kind), name, nil)
+}
+
+func TestWithDeliversEventsInRegistrationOrder(t *testing.T) {
+	var order []string
+	first := observe.ObserverFunc(func(context.Context, observe.Event) { order = append(order, "first") })
+	second := observe.ObserverFunc(func(context.Context, observe.Event) { order = append(order, "second") })
+	ctx := observe.With(observe.With(context.Background(), first), second, nil)
+
+	if !observe.Active(ctx) {
+		t.Fatal("Active() = false, want true")
+	}
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	if len(order) != 2 || order[0] != "first" || order[1] != "second" {
+		t.Fatalf("order = %v", order)
+	}
+	if observe.Active(context.Background()) {
+		t.Fatal("Active() = true on empty context")
+	}
+}
+
+func TestEmitFillsTimeAndTraceFromContext(t *testing.T) {
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected)
+	ctx, invocation := span(ctx, observe.KindNode, "search")
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindLLM, Phase: observe.PhaseStart})
+	if len(collected.events) != 1 {
+		t.Fatalf("events = %d", len(collected.events))
+	}
+	event := collected.events[0]
+	if event.Time.IsZero() {
+		t.Fatal("Time not filled")
+	}
+	if event.Trace != invocation.Trace {
+		t.Fatalf("Trace = %+v, want %+v", event.Trace, invocation.Trace)
+	}
+}
+
+func TestObserverPanicIsIsolated(t *testing.T) {
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	panicky := observe.ObserverFunc(func(context.Context, observe.Event) { panic("boom") })
+	collected := &collector{}
+	ctx := observe.With(context.Background(), panicky, collected)
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindTool, Phase: observe.PhaseStart})
+	if len(collected.events) != 1 {
+		t.Fatal("panic in one observer stopped dispatch to the next")
+	}
+	if !strings.Contains(logs.String(), "observer panicked") {
+		t.Fatalf("panic not logged: %q", logs.String())
+	}
+}
+
+func TestCapturePayloadRedactsOnlyWhenRequested(t *testing.T) {
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected)
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM}, "raw-secret")
+	if collected.events[0].Payload != nil {
+		t.Fatalf("Payload = %v, want nil without CapturePayload", collected.events[0].Payload)
+	}
+
+	withPayload := observe.With(ctx, observe.CapturePayload(func(_ observe.Event, raw any) any {
+		return "redacted:" + raw.(string)
+	}))
+	observe.EmitPayload(withPayload, observe.Event{Kind: observe.KindLLM}, "raw-secret")
+	got := collected.events[1].Payload
+	if got != "redacted:raw-secret" {
+		t.Fatalf("Payload = %v", got)
+	}
+}
+
+func TestMultiPreservesOrderAndSkipsNil(t *testing.T) {
+	var order []string
+	multi := observe.Multi(
+		observe.ObserverFunc(func(context.Context, observe.Event) { order = append(order, "a") }),
+		nil,
+		observe.ObserverFunc(func(context.Context, observe.Event) { order = append(order, "b") }),
+	)
+	multi.OnEvent(context.Background(), observe.Event{})
+	if len(order) != 2 || order[0] != "a" || order[1] != "b" {
+		t.Fatalf("order = %v", order)
+	}
+}
+
+func TestEventOfMergesAndOverridesAttrs(t *testing.T) {
+	invocation := observe.Invocation{
+		Operation: "op",
+		Phase:     observe.PhaseEnd,
+		Duration:  time.Second,
+		Metadata:  map[string]any{"a": 1, "b": 2},
+	}
+	event := observe.EventOf(invocation, observe.KindTool, map[string]any{"b": 3, "c": 4})
+	if event.Name != "op" || event.Phase != observe.PhaseEnd || event.Duration != time.Second {
+		t.Fatalf("event = %+v", event)
+	}
+	if event.Attrs["a"] != 1 || event.Attrs["b"] != 3 || event.Attrs["c"] != 4 {
+		t.Fatalf("attrs = %v", event.Attrs)
+	}
+	invocation.Metadata["a"] = 99
+	if event.Attrs["a"] != 1 {
+		t.Fatal("event attrs share the invocation metadata map")
+	}
+}
+
+func TestAsyncDropWhenFullCountsDropped(t *testing.T) {
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	inner := observe.ObserverFunc(func(context.Context, observe.Event) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-gate
+	})
+	async := observe.Async(inner, 1, true)
+	defer async.Close()
+	ctx := observe.With(context.Background(), async)
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	<-entered                                                // 等 drain 取走第一件并阻塞在 inner 里，队列腾空。
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode}) // 入队
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode}) // 队列满 → 丢弃
+	close(gate)
+
+	if dropped := async.Dropped(); dropped != 1 {
+		t.Fatalf("Dropped() = %d, want 1", dropped)
+	}
+}
+
+func TestAsyncBlockingSendUnblocksOnCancelAndStop(t *testing.T) {
+	gate := make(chan struct{})
+	inner := observe.ObserverFunc(func(context.Context, observe.Event) { <-gate })
+	async := observe.Async(inner, 0, false)
+	ctx := observe.With(context.Background(), async)
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	<-time.After(50 * time.Millisecond) // drain 已取走事件并阻塞，队列容量为 0。
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		observe.Emit(canceled, observe.Event{Kind: observe.KindNode})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking Emit did not respect ctx cancellation")
+	}
+
+	done = make(chan struct{})
+	go func() {
+		observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+		close(done)
+	}()
+	closed := make(chan struct{})
+	go func() { async.Close(); close(closed) }()
+	// Close 关闭 stop 后，阻塞的发送应立即返回；drain 仍阻塞在 inner 内。
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking Emit did not return after Close")
+	}
+	close(gate) // inner 放行后 Close 排空结束。
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after drain released")
+	}
+}
+
+func TestAsyncCloseDrainsQueue(t *testing.T) {
+	var handled atomic.Int64
+	gate := make(chan struct{})
+	release := make(chan struct{})
+	inner := observe.ObserverFunc(func(context.Context, observe.Event) {
+		<-gate
+		handled.Add(1)
+		<-release
+	})
+	async := observe.Async(inner, 8, true)
+	ctx := observe.With(context.Background(), async)
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	close(gate) // inner 开始消费
+	close(release)
+	async.Close() // 必须等到两件都处理完
+	if handled.Load() != 2 {
+		t.Fatalf("handled = %d, want 2", handled.Load())
+	}
+	// Close 后的事件直接丢弃，不再入队。
+	observe.Emit(ctx, observe.Event{Kind: observe.KindNode})
+	if handled.Load() != 2 {
+		t.Fatal("event delivered after Close")
+	}
+}
+
+func TestSlogPrintsIndentedTree(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	observer := observe.Slog(logger)
+
+	ctx := observe.With(context.Background(), observer)
+	runCtx, run := observe.Begin(ctx, "graph", "main", nil)
+	nodeCtx, node := observe.Begin(runCtx, "graph.node", "search", nil)
+
+	observe.Emit(nodeCtx, observe.EventOf(node.WithPhase(observe.PhaseStart), observe.KindNode, nil))
+	end := node.WithPhase(observe.PhaseEnd)
+	end.Duration = 42 * time.Millisecond
+	observe.Emit(nodeCtx, observe.EventOf(end, observe.KindNode, nil))
+	observe.Emit(runCtx, observe.EventOf(run.WithPhase(observe.PhaseEnd), observe.KindRun, nil))
+
+	out := logs.String()
+	if !strings.Contains(out, "node start") || !strings.Contains(out, "node end") || !strings.Contains(out, "run end") {
+		t.Fatalf("log output missing spans: %q", out)
+	}
+	if strings.Index(out, "node end") < strings.Index(out, "  node end") {
+		t.Fatalf("node end not indented under run: %q", out)
+	}
+}
+
+func TestErrorEventCarriesErr(t *testing.T) {
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected)
+	boom := errors.New("boom")
+	event := observe.Event{Kind: observe.KindLLM, Phase: observe.PhaseError, Err: boom}
+	observe.Emit(ctx, event)
+	if !errors.Is(collected.events[0].Err, boom) {
+		t.Fatalf("Err = %v", collected.events[0].Err)
+	}
+}

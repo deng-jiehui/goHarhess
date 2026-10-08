@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
@@ -47,6 +48,7 @@ func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Con
 	metadata["tool.read_only"] = spec.IsReadOnly
 	metadata["tool.file_access"] = spec.FileAccess
 	toolCtx, invocation := callback.Begin(ctx, "tool", spec.Name, metadata)
+	observe.EmitPayload(toolCtx, observe.EventOf(invocation.WithPhase(callback.PhaseStart), observe.KindTool, nil), input)
 	_ = callback.Dispatch[Callback](toolCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, handler Callback) error {
 		return handler.OnToolStart(ctx, cloneSpecForCallback(spec), cloneCallInput(input))
 	})
@@ -56,12 +58,18 @@ func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Con
 // EndCallback notifies typed Tool observers of the terminal result.
 func EndCallback(ctx context.Context, invocation callback.Invocation, spec Spec, input CallInput, result Result, callErr error) {
 	if callErr != nil {
-		_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
+		failed := invocation.WithPhase(callback.PhaseError)
+		event := observe.EventOf(failed, observe.KindTool, nil)
+		event.Err = callErr
+		observe.Emit(ctx, event)
+		_ = callback.Dispatch[Callback](ctx, failed, func(ctx context.Context, handler Callback) error {
 			return handler.OnToolError(ctx, cloneSpecForCallback(spec), cloneCallInput(input), callErr)
 		})
 		return
 	}
-	_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, handler Callback) error {
+	end := invocation.WithPhase(callback.PhaseEnd)
+	observe.EmitPayload(ctx, observe.EventOf(end, observe.KindTool, nil), result)
+	_ = callback.Dispatch[Callback](ctx, end, func(ctx context.Context, handler Callback) error {
 		return handler.OnToolEnd(ctx, cloneSpecForCallback(spec), cloneCallInput(input), cloneResult(result))
 	})
 }

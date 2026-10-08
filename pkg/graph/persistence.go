@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/state"
 )
@@ -166,7 +167,7 @@ func (w *checkpointWriter) flush() error {
 func (w *checkpointWriter) write(ctx context.Context, apply func(*state.Checkpoint)) error {
 	record := w.config.record.load().Clone()
 	apply(&record)
-	return writeCheckpoint(ctx, w.config, record)
+	return writeCheckpoint(ctx, w.config, record, w.async)
 }
 
 // CheckpointError 表示与检查点存储交互失败（读写、版本冲突等）。它是运行
@@ -213,14 +214,31 @@ func saveInterruptedCheckpoint(ctx context.Context, config checkpointConfig, c e
 
 // writeCheckpoint 落盘一条记录。短暂存储故障在记录不变的前提下重试若干次；
 // 版本冲突、数据非法和调用方取消等确定性失败立即返回检查点错误。
-func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.Checkpoint) error {
+func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.Checkpoint, async bool) error {
+	// 检查点写入是一个独立子 span：异步模式下它在 drain 协程执行，
+	// Begin 从入队时捕获的 ctx 取父 span，调用树上挂到提交节点之下。
+	durability := DurabilitySync
+	if async {
+		durability = DurabilityAsync
+	}
+	spanCtx, span := observe.Begin(ctx, "checkpoint", "save", map[string]any{
+		"checkpoint.key":        config.Key,
+		"checkpoint.status":     record.Status,
+		"checkpoint.durability": string(durability),
+	})
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), config.Timeout)
 	defer cancel()
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt < 3; attempt++ {
+		attempts++
 		saved, err := config.Store.Save(saveCtx, record)
 		if err == nil {
 			config.record.store(saved)
+			observe.Emit(spanCtx, observe.EventOf(span.WithPhase(observe.PhaseEnd), observe.KindCheckpoint, map[string]any{
+				"checkpoint.attempts": attempts,
+				"checkpoint.version":  saved.Version,
+			}))
 			return nil
 		}
 		lastErr = err
@@ -228,7 +246,13 @@ func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.
 			break
 		}
 	}
-	return &CheckpointError{Key: config.Key, Err: fmt.Errorf("save failed: %w", lastErr)}
+	err := &CheckpointError{Key: config.Key, Err: fmt.Errorf("save failed: %w", lastErr)}
+	event := observe.EventOf(span.WithPhase(observe.PhaseError), observe.KindCheckpoint, map[string]any{
+		"checkpoint.attempts": attempts,
+	})
+	event.Err = err
+	observe.Emit(spanCtx, event)
+	return err
 }
 
 // persistProgress 在节点边界提交进度，返回本次 State 快照供下一节点入口复用。

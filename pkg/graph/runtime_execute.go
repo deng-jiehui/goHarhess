@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/state"
 )
@@ -132,7 +133,22 @@ func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup runSetup
 		return executionProgress{}, resumableErr
 	}
 	config := setup.checkpoint
+	loadCtx, loadSpan := observe.Begin(ctx, "checkpoint", "load", map[string]any{"checkpoint.key": config.Key})
 	record, found, err := config.Store.Load(ctx, config.Key)
+	loadAttrs := map[string]any{"checkpoint.found": found}
+	if record.Status != "" {
+		loadAttrs["checkpoint.status"] = record.Status
+		loadAttrs["checkpoint.version"] = record.Version
+	}
+	loadPhase := observe.PhaseEnd
+	if err != nil {
+		loadPhase = observe.PhaseError
+	}
+	loadEvent := observe.EventOf(loadSpan.WithPhase(loadPhase), observe.KindCheckpoint, loadAttrs)
+	if err != nil {
+		loadEvent.Err = err
+	}
+	observe.Emit(loadCtx, loadEvent)
 	if err != nil {
 		return executionProgress{}, &CheckpointError{Key: config.Key, Err: fmt.Errorf("load failed: %w", err)}
 	}
@@ -376,6 +392,7 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		// 提前返回。
 		if pending := pendingInterruptsTree(&loaded); len(pending) > 0 &&
 			!setup.checkpoint.coord.frameRunnable(&loaded) && !managedRestartable(&loaded) {
+			emitInterruptEvent(ctx, g.Name(), loaded.Point, loaded.Reason, loaded.ResumeNode, loaded.Step, pending)
 			return zero, &InterruptedError{Point: loaded.Point, Reason: loaded.Reason, Checkpoint: setup.checkpoint.record.load().Clone(), interrupts: pending}
 		}
 		// 受管任务在恢复现场重建后立即重新驱动：构建函数与版本必须
@@ -1388,8 +1405,11 @@ func (g *Graph[I, O]) persistInterruption(
 		return err
 	}
 	if coord := checkpoint.coord; coord != nil {
-		return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: coord.pendingOf(coord.root)}
+		pending := coord.pendingOf(coord.root)
+		emitInterruptEvent(ctx, g.Name(), point, request.Reason, resumeNode, step, pending)
+		return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: pending}
 	}
+	emitInterruptEvent(ctx, g.Name(), point, request.Reason, resumeNode, step, pendingInterrupts(progress))
 	return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: pendingInterrupts(progress)}
 }
 

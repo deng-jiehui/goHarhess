@@ -5,7 +5,12 @@ import (
 	"errors"
 
 	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 )
+
+// kindRetrieval 是 retrieval 的观测事件类别：阶段三随包移到 extensions，
+// 保持自定义 Kind 不归入核心枚举。
+const kindRetrieval = observe.Kind("retrieval")
 
 type Operation string
 
@@ -105,6 +110,7 @@ func cloneCallbackValue(value any) any { return callback.CloneValue(value) }
 
 func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, callback.Invocation) {
 	operationCtx, invocation := callback.Begin(ctx, "retrieval", string(input.Operation), nil)
+	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(callback.PhaseStart), kindRetrieval, nil), input)
 	_ = callback.Dispatch[Callback](operationCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, handler Callback) error {
 		return handler.OnRetrieverStart(ctx, input.Clone())
 	})
@@ -114,12 +120,18 @@ func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, c
 func EndCallback(ctx context.Context, invocation callback.Invocation, output CallbackOutput, err error) {
 	if err != nil {
 		failure := CallbackFailure{Input: CallbackInput{Operation: output.Operation}, Err: err}
-		_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
+		failed := invocation.WithPhase(callback.PhaseError)
+		event := observe.EventOf(failed, kindRetrieval, nil)
+		event.Err = err
+		observe.EmitPayload(ctx, event, failure)
+		_ = callback.Dispatch[Callback](ctx, failed, func(ctx context.Context, handler Callback) error {
 			return handler.OnRetrieverError(ctx, failure)
 		})
 		return
 	}
-	_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, handler Callback) error {
+	end := invocation.WithPhase(callback.PhaseEnd)
+	observe.EmitPayload(ctx, observe.EventOf(end, kindRetrieval, nil), output)
+	_ = callback.Dispatch[Callback](ctx, end, func(ctx context.Context, handler Callback) error {
 		return handler.OnRetrieverEnd(ctx, output.Clone())
 	})
 }

@@ -5,8 +5,12 @@ import (
 	"errors"
 
 	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/tool"
 )
+
+// kindMCP 是 MCP 协议层操作的观测事件类别；工具调用本体另有 tool 事件。
+const kindMCP = observe.Kind("mcp")
 
 type Operation string
 
@@ -95,15 +99,23 @@ func (r CallbackResponse) Clone() CallbackResponse { return callback.CloneValue(
 
 func beginCallback(ctx context.Context, request CallbackRequest) (context.Context, callback.Invocation) {
 	operationCtx, invocation := callback.Begin(ctx, "mcp", string(request.Operation), nil)
+	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(callback.PhaseStart), kindMCP, nil), request)
 	_ = callback.Dispatch[Callback](operationCtx, invocation.WithPhase(callback.PhaseStart), func(ctx context.Context, h Callback) error { return h.OnMCPStart(ctx, request.Clone()) })
 	return operationCtx, invocation
 }
 func endCallback(ctx context.Context, invocation callback.Invocation, response CallbackResponse) {
-	_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseEnd), func(ctx context.Context, h Callback) error { return h.OnMCPEnd(ctx, response.Clone()) })
+	end := invocation.WithPhase(callback.PhaseEnd)
+	observe.EmitPayload(ctx, observe.EventOf(end, kindMCP, nil), response)
+	_ = callback.Dispatch[Callback](ctx, end, func(ctx context.Context, h Callback) error { return h.OnMCPEnd(ctx, response.Clone()) })
 }
 func errorCallback(ctx context.Context, invocation callback.Invocation, request CallbackRequest, err error) {
-	_ = callback.Dispatch[Callback](ctx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, h Callback) error {
-		return h.OnMCPError(ctx, CallbackFailure{Request: request.Clone(), Err: err})
+	failed := invocation.WithPhase(callback.PhaseError)
+	failure := CallbackFailure{Request: request.Clone(), Err: err}
+	event := observe.EventOf(failed, kindMCP, nil)
+	event.Err = err
+	observe.EmitPayload(ctx, event, failure)
+	_ = callback.Dispatch[Callback](ctx, failed, func(ctx context.Context, h Callback) error {
+		return h.OnMCPError(ctx, failure)
 	})
 }
 
