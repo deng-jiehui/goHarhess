@@ -13,6 +13,9 @@ import (
 
 // BeginCallback starts one Tool child operation and notifies observers.
 func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Context, observe.Invocation) {
+	if !observe.Active(ctx) {
+		return ctx, observe.Invocation{}
+	}
 	metadata := observe.CloneMetadata(input.Metadata)
 	metadata["tool.read_only"] = spec.IsReadOnly
 	metadata["tool.file_access"] = spec.FileAccess
@@ -23,6 +26,9 @@ func BeginCallback(ctx context.Context, spec Spec, input CallInput) (context.Con
 
 // EndCallback notifies observers of the terminal result.
 func EndCallback(ctx context.Context, invocation observe.Invocation, spec Spec, input CallInput, result Result, callErr error) {
+	if invocation.Component == "" {
+		return
+	}
 	if callErr != nil {
 		failed := invocation.WithPhase(observe.PhaseError)
 		event := observe.EventOf(failed, observe.KindTool, nil)

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )

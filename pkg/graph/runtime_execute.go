@@ -133,22 +133,30 @@ func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup runSetup
 		return executionProgress{}, resumableErr
 	}
 	config := setup.checkpoint
-	loadCtx, loadSpan := observe.Begin(ctx, "checkpoint", "load", map[string]any{"checkpoint.key": config.Key})
+	// 加载 span 只在有观察者时建立：无观察者时 Begin 的分配纯属浪费。
+	observed := observe.Active(ctx)
+	loadCtx := ctx
+	var loadSpan observe.Invocation
+	if observed {
+		loadCtx, loadSpan = observe.Begin(ctx, "checkpoint", "load", map[string]any{"checkpoint.key": config.Key})
+	}
 	record, found, err := config.Store.Load(ctx, config.Key)
-	loadAttrs := map[string]any{"checkpoint.found": found}
-	if record.Status != "" {
-		loadAttrs["checkpoint.status"] = record.Status
-		loadAttrs["checkpoint.version"] = record.Version
+	if observed {
+		loadAttrs := map[string]any{"checkpoint.found": found}
+		if record.Status != "" {
+			loadAttrs["checkpoint.status"] = record.Status
+			loadAttrs["checkpoint.version"] = record.Version
+		}
+		loadPhase := observe.PhaseEnd
+		if err != nil {
+			loadPhase = observe.PhaseError
+		}
+		loadEvent := observe.EventOf(loadSpan.WithPhase(loadPhase), observe.KindCheckpoint, loadAttrs)
+		if err != nil {
+			loadEvent.Err = err
+		}
+		observe.Emit(loadCtx, loadEvent)
 	}
-	loadPhase := observe.PhaseEnd
-	if err != nil {
-		loadPhase = observe.PhaseError
-	}
-	loadEvent := observe.EventOf(loadSpan.WithPhase(loadPhase), observe.KindCheckpoint, loadAttrs)
-	if err != nil {
-		loadEvent.Err = err
-	}
-	observe.Emit(loadCtx, loadEvent)
 	if err != nil {
 		return executionProgress{}, &CheckpointError{Key: config.Key, Err: fmt.Errorf("load failed: %w", err)}
 	}

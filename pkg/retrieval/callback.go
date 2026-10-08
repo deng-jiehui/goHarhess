@@ -76,6 +76,9 @@ func cloneCallbackValue(value any) any { return observe.CloneValue(value) }
 
 // BeginCallback 开启一次检索子操作并发射 kind=retrieval 的 start 事件。
 func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, observe.Invocation) {
+	if !observe.Active(ctx) {
+		return ctx, observe.Invocation{}
+	}
 	operationCtx, invocation := observe.Begin(ctx, "retrieval", string(input.Operation), nil)
 	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(observe.PhaseStart), kindRetrieval, nil), input)
 	return operationCtx, invocation
@@ -83,6 +86,9 @@ func BeginCallback(ctx context.Context, input CallbackInput) (context.Context, o
 
 // EndCallback 收尾检索子操作：失败发 error 事件，成功发 end 事件。
 func EndCallback(ctx context.Context, invocation observe.Invocation, output CallbackOutput, err error) {
+	if invocation.Component == "" {
+		return
+	}
 	if err != nil {
 		failure := CallbackFailure{Input: CallbackInput{Operation: output.Operation}, Err: err}
 		event := observe.EventOf(invocation.WithPhase(observe.PhaseError), kindRetrieval, nil)

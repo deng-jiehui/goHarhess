@@ -64,14 +64,23 @@ func (r CallbackRequest) Clone() CallbackRequest   { return observe.CloneValue(r
 func (r CallbackResponse) Clone() CallbackResponse { return observe.CloneValue(r).(CallbackResponse) }
 
 func beginCallback(ctx context.Context, request CallbackRequest) (context.Context, observe.Invocation) {
+	if !observe.Active(ctx) {
+		return ctx, observe.Invocation{}
+	}
 	operationCtx, invocation := observe.Begin(ctx, "mcp", string(request.Operation), nil)
 	observe.EmitPayload(operationCtx, observe.EventOf(invocation.WithPhase(observe.PhaseStart), kindMCP, nil), request)
 	return operationCtx, invocation
 }
 func endCallback(ctx context.Context, invocation observe.Invocation, response CallbackResponse) {
+	if invocation.Component == "" {
+		return
+	}
 	observe.EmitPayload(ctx, observe.EventOf(invocation.WithPhase(observe.PhaseEnd), kindMCP, nil), response)
 }
 func errorCallback(ctx context.Context, invocation observe.Invocation, request CallbackRequest, err error) {
+	if invocation.Component == "" {
+		return
+	}
 	failure := CallbackFailure{Request: request.Clone(), Err: err}
 	event := observe.EventOf(invocation.WithPhase(observe.PhaseError), kindMCP, nil)
 	event.Err = err

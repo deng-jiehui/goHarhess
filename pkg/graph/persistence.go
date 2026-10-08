@@ -217,15 +217,21 @@ func saveInterruptedCheckpoint(ctx context.Context, config checkpointConfig, c e
 func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.Checkpoint, async bool) error {
 	// 检查点写入是一个独立子 span：异步模式下它在 drain 协程执行，
 	// Begin 从入队时捕获的 ctx 取父 span，调用树上挂到提交节点之下。
-	durability := DurabilitySync
-	if async {
-		durability = DurabilityAsync
+	// 无观察者时跳过 span 与事件组装，这条路径在每次节点边界都会走。
+	observed := observe.Active(ctx)
+	spanCtx := ctx
+	var span observe.Invocation
+	if observed {
+		durability := DurabilitySync
+		if async {
+			durability = DurabilityAsync
+		}
+		spanCtx, span = observe.Begin(ctx, "checkpoint", "save", map[string]any{
+			"checkpoint.key":        config.Key,
+			"checkpoint.status":     record.Status,
+			"checkpoint.durability": string(durability),
+		})
 	}
-	spanCtx, span := observe.Begin(ctx, "checkpoint", "save", map[string]any{
-		"checkpoint.key":        config.Key,
-		"checkpoint.status":     record.Status,
-		"checkpoint.durability": string(durability),
-	})
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), config.Timeout)
 	defer cancel()
 	var lastErr error
@@ -235,10 +241,12 @@ func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.
 		saved, err := config.Store.Save(saveCtx, record)
 		if err == nil {
 			config.record.store(saved)
-			observe.Emit(spanCtx, observe.EventOf(span.WithPhase(observe.PhaseEnd), observe.KindCheckpoint, map[string]any{
-				"checkpoint.attempts": attempts,
-				"checkpoint.version":  saved.Version,
-			}))
+			if observed {
+				observe.Emit(spanCtx, observe.EventOf(span.WithPhase(observe.PhaseEnd), observe.KindCheckpoint, map[string]any{
+					"checkpoint.attempts": attempts,
+					"checkpoint.version":  saved.Version,
+				}))
+			}
 			return nil
 		}
 		lastErr = err
@@ -247,11 +255,13 @@ func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.
 		}
 	}
 	err := &CheckpointError{Key: config.Key, Err: fmt.Errorf("save failed: %w", lastErr)}
-	event := observe.EventOf(span.WithPhase(observe.PhaseError), observe.KindCheckpoint, map[string]any{
-		"checkpoint.attempts": attempts,
-	})
-	event.Err = err
-	observe.Emit(spanCtx, event)
+	if observed {
+		event := observe.EventOf(span.WithPhase(observe.PhaseError), observe.KindCheckpoint, map[string]any{
+			"checkpoint.attempts": attempts,
+		})
+		event.Err = err
+		observe.Emit(spanCtx, event)
+	}
 	return err
 }
 
