@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestStatePackageOwnsOnlyConversationState(t *testing.T) {
+func TestStatePackageKeepsGraphSpecificTypesInGraph(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve state package directory")

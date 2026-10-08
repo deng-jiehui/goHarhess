@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/httpclient"
 )
 
 const DefaultHTTPTimeout = 30 * time.Second

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 const (
@@ -80,18 +80,6 @@ func typeName(value reflect.Type) string {
 		return "<nil>"
 	}
 	return value.String()
-}
-
-func nodeScopedOptions(options []runnable.Option) []runnable.Option {
-	scoped := make([]runnable.Option, len(options))
-	for index, option := range options {
-		if runnable.ScopeOf(option) == runnable.OptionScopeNode {
-			scoped[index] = option
-		} else {
-			scoped[index] = runnable.NodeOption(option)
-		}
-	}
-	return scoped
 }
 
 func walkReverse(start string, reverse map[string][]string) map[string]bool {

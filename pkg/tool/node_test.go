@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestToolsNodeDispatchesLifecycleCallbacksWithoutChangingResult(t *testing.T) {
@@ -122,16 +122,24 @@ func TestToolsNodeCallExtraReachesMetadataWithoutLegacyCorrelationOverride(t *te
 		return tool.TextResult("ok"), nil
 	})
 	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{echo}})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	call := schema.NewFunctionToolCallBlock("call-1", "echo", `{}`)
 	call.FunctionToolCall.Extra = map[string]any{"trace": "abc"}
 	message := schema.NewMessage(schema.RoleAssistant, call)
 	message.Extra = map[string]any{"function_id": "wrong-id", "name": "wrong-name", "legacy": true}
 	output, err := node.Invoke(context.Background(), []schema.Message{message})
-	if err != nil { t.Fatal(err) }
-	if received.Metadata["trace"] != "abc" { t.Fatalf("metadata = %#v", received.Metadata) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.Metadata["trace"] != "abc" {
+		t.Fatalf("metadata = %#v", received.Metadata)
+	}
 	results := output[0].FunctionToolResults()
-	if len(results) != 1 || results[0].CallID != "call-1" || results[0].Name != "echo" { t.Fatalf("results = %#v", results) }
+	if len(results) != 1 || results[0].CallID != "call-1" || results[0].Name != "echo" {
+		t.Fatalf("results = %#v", results)
+	}
 }
 
 func TestToolsNodeCallbackFailureDoesNotChangeBusinessResult(t *testing.T) {
@@ -421,30 +429,23 @@ func TestToolsNodeConvertsErrorsToAppendOnlyToolMessages(t *testing.T) {
 	}
 }
 
-func TestToolsNodeDeepClonesMessagesForConcurrentCalls(t *testing.T) {
-	firstSet := make(chan struct{})
-	secondSet := make(chan struct{})
-	first := tool.NewFunctionTool(tool.Spec{Name: "first", Concurrency: tool.ConcurrencyPolicy{Group: "first", MaxParallel: 1}}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
-		nested := input.Messages[0].Extra["nested"].(map[string]any)
-		nested["owner"] = "first"
-		close(firstSet)
-		<-secondSet
-		if nested["owner"] != "first" {
-			return tool.Result{}, fmt.Errorf("first tool observed shared owner %#v", nested["owner"])
-		}
-		return tool.TextResult("first"), nil
+func TestToolsNodeInjectsMessagesOnlyForNeedsMessages(t *testing.T) {
+	var sawMessages []schema.Message
+	seen := make(chan struct{})
+	reader := tool.NewFunctionTool(tool.Spec{Name: "reader", NeedsMessages: true, Concurrency: tool.ConcurrencyPolicy{Group: "reader", MaxParallel: 1}}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		sawMessages = input.Messages
+		// 只读视图：替换本调用持有的元素不得污染调用方的历史 slice。
+		input.Messages[0] = schema.UserMessage("rewritten")
+		close(seen)
+		return tool.TextResult("reader"), nil
 	})
-	second := tool.NewFunctionTool(tool.Spec{Name: "second", Concurrency: tool.ConcurrencyPolicy{Group: "second", MaxParallel: 1}}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
-		<-firstSet
-		nested := input.Messages[0].Extra["nested"].(map[string]any)
-		nested["owner"] = "second"
-		close(secondSet)
-		if nested["owner"] != "second" {
-			return tool.Result{}, fmt.Errorf("second tool observed shared owner %#v", nested["owner"])
+	blind := tool.NewFunctionTool(tool.Spec{Name: "blind", Concurrency: tool.ConcurrencyPolicy{Group: "blind", MaxParallel: 1}}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		if input.Messages != nil {
+			return tool.Result{}, fmt.Errorf("undeclared tool received %d messages", len(input.Messages))
 		}
-		return tool.TextResult("second"), nil
+		return tool.TextResult("blind"), nil
 	})
-	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{first, second}, MaxConcurrency: 2})
+	node, err := tool.NewToolsNode(tool.ToolNodeConfig{Tools: []tool.Tool{reader, blind}, MaxConcurrency: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,18 +453,22 @@ func TestToolsNodeDeepClonesMessagesForConcurrentCalls(t *testing.T) {
 	contextMessage.Extra = map[string]any{"nested": map[string]any{"owner": "original"}}
 	messages := []schema.Message{
 		contextMessage,
-		toolCallMessage("first", `{}`, "id-1"),
-		toolCallMessage("second", `{}`, "id-2"),
+		toolCallMessage("reader", `{}`, "id-1"),
+		toolCallMessage("blind", `{}`, "id-2"),
 	}
 	output, err := node.Invoke(context.Background(), messages)
 	if err != nil {
 		t.Fatal(err)
 	}
+	<-seen
 	if len(output) != 2 || toolResultIsError(output[0]) || toolResultIsError(output[1]) {
 		t.Fatalf("tool output = %#v", output)
 	}
-	if messages[0].Extra["nested"].(map[string]any)["owner"] != "original" {
-		t.Fatalf("source messages were mutated: %#v", messages[0].Extra)
+	if len(sawMessages) != len(messages) || sawMessages[1].FunctionToolCalls()[0].Name != "reader" {
+		t.Fatalf("declared tool messages = %#v", sawMessages)
+	}
+	if messages[0].Role != schema.RoleUser {
+		t.Fatalf("caller message slice was mutated: %#v", messages[0])
 	}
 }
 

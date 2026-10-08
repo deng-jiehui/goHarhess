@@ -15,3 +15,9 @@ Thumbs.db
 
 # Local isolated worktrees.
 .worktrees/
+
+# Benchmark artifacts and Go build cache; baselines live in docs/benchmarks/.
+.bench/
+
+# Local scratch directory.
+.tmp/

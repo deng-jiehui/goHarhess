@@ -8,18 +8,19 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/contextengine"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/state"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/contextengine"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
 )
 
 func TestConversationCheckpointPreservesCallerSystemMessage(t *testing.T) {
 	store := state.NewMemoryStore()
 	var calls [][]schema.Message
-	model := llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-		calls = append(calls, schema.CloneMessages(messages))
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		calls = append(calls, schema.CloneMessages(request.Messages))
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
 	})
 	value, err := agent.NewBasicAgent(agent.BaseConfig{SystemMessage: "agent policy", Model: model, CheckpointStore: store})
@@ -73,9 +74,9 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var calls [][]schema.Message
-	model := llm.NewHandlerModel(func(ctx context.Context, messages []schema.Message, opts llm.ChatOptions) ([]schema.Message, error) {
+	model := llm.NewHandlerModel(func(ctx context.Context, request llm.Request, opts llm.Options) ([]schema.Message, error) {
 		mu.Lock()
-		calls = append(calls, schema.CloneMessages(messages))
+		calls = append(calls, schema.CloneMessages(request.Messages))
 		call := len(calls)
 		mu.Unlock()
 		values := state.ValuesFromContext(ctx)
@@ -133,13 +134,90 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("Load found=%t err=%v", found, err)
 	}
-	if checkpoint.Version != 2 || len(checkpoint.Messages) != 4 {
+	if checkpoint.Version != 6 || len(checkpoint.Messages) != 4 {
 		t.Fatalf("checkpoint = %#v", checkpoint)
 	}
 	if checkpoint.Messages[0].JoinedText("") != "first" || checkpoint.Messages[3].JoinedText("") != "answer-2" {
 		t.Fatalf("checkpoint messages = %#v", checkpoint.Messages)
 	}
 	if checkpoint.Values["tenant"] != "tenant-a" || checkpoint.Values["turn"] != 2.0 && checkpoint.Values["turn"] != 2 {
+		t.Fatalf("checkpoint values = %#v", checkpoint.Values)
+	}
+}
+
+// 会话加载后 conversation_id 与 checkpoint_version 经派生 ctx 元数据下发到
+// 组件；调用方在 ctx 上的追踪标签同样继承。这些追踪信息不进入持久化
+// State values——跨轮保存的数据必须显式走 WithStateValue。
+func TestConversationMetadataFlowsThroughContextNotState(t *testing.T) {
+	store := state.NewMemoryStore()
+	var mu sync.Mutex
+	var observed []map[string]any
+	var observedValues []map[string]any
+	model := llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		mu.Lock()
+		observed = append(observed, callback.MetadataFromContext(ctx))
+		observedValues = append(observedValues, state.ValuesFromContext(ctx))
+		mu.Unlock()
+		return []schema.Message{schema.AssistantMessage("ok")}, nil
+	})
+	value, err := agent.NewBasicAgent(agent.BaseConfig{
+		Model: model, CheckpointStore: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx := callback.WithMetadata(context.Background(), map[string]any{"source": "web"})
+	invoke := func() {
+		_, err := value.Invoke(runCtx, []schema.Message{schema.UserMessage("hi")},
+			agent.WithConversationID("ctx-meta"),
+			agent.WithStateValue("tenant", "tenant-a"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	invoke()
+	invoke()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observed) != 2 {
+		t.Fatalf("model calls = %d", len(observed))
+	}
+	for index, metadata := range observed {
+		if metadata["conversation_id"] != "ctx-meta" {
+			t.Fatalf("call %d metadata = %#v", index, metadata)
+		}
+		if metadata["source"] != "web" {
+			t.Fatalf("call %d lost caller ctx metadata: %#v", index, metadata)
+		}
+		if _, exists := metadata["checkpoint_version"]; !exists {
+			t.Fatalf("call %d missing checkpoint_version: %#v", index, metadata)
+		}
+	}
+	// 第二轮加载到已保存的检查点，version 应反映持久化进度。
+	if observed[1]["checkpoint_version"] == observed[0]["checkpoint_version"] {
+		t.Fatalf("checkpoint_version did not advance: %#v / %#v", observed[0], observed[1])
+	}
+	for index, values := range observedValues {
+		if _, exists := values["conversation_id"]; exists {
+			t.Fatalf("call %d leaked metadata into state values: %#v", index, values)
+		}
+		if _, exists := values["checkpoint_version"]; exists {
+			t.Fatalf("call %d leaked checkpoint_version into state values: %#v", index, values)
+		}
+		if values["tenant"] != "tenant-a" {
+			t.Fatalf("call %d lost durable state value: %#v", index, values)
+		}
+	}
+	checkpoint, found, err := store.Load(context.Background(), "ctx-meta")
+	if err != nil || !found {
+		t.Fatalf("checkpoint found=%t err=%v", found, err)
+	}
+	if _, exists := checkpoint.Values["conversation_id"]; exists {
+		t.Fatalf("checkpoint values contain metadata: %#v", checkpoint.Values)
+	}
+	if checkpoint.Values["tenant"] != "tenant-a" {
 		t.Fatalf("checkpoint values = %#v", checkpoint.Values)
 	}
 }
@@ -178,4 +256,11 @@ func TestCheckpointWriteIsBoundedAfterSuccessfulRun(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("checkpoint write returned after %s", elapsed)
 	}
+}
+
+func (blockingCheckpointStore) Get(context.Context, string, string) (state.Checkpoint, bool, error) {
+	return state.Checkpoint{}, false, nil
+}
+func (blockingCheckpointStore) List(context.Context, string, state.ListOptions) ([]state.Checkpoint, error) {
+	return nil, nil
 }

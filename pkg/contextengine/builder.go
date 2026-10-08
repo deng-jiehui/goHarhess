@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 // ConversationBuilder constructs and validates provider-neutral messages.

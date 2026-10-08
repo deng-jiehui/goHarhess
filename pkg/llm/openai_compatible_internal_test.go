@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestOpenAIResponseKeepsParallelCallsInOneMessage(t *testing.T) {

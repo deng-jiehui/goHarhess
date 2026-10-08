@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestSubjectContextUsesTypedImmutableValue(t *testing.T) {

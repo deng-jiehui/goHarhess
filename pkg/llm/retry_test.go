@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type retryModel struct {

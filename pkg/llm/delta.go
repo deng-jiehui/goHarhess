@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
+// DeltaAccumulator is the legacy ambiguous delta/snapshot compatibility reducer.
+// Deprecated: use schema.MessageAccumulator with explicit MessageDelta operations.
+// Provider and public run streams do not use this reducer.
 type DeltaAccumulator struct {
 	mergeDeltas bool
 	messages    []schema.Message

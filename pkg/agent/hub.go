@@ -7,9 +7,9 @@ import (
 	"math/rand"
 	"reflect"
 
-	"goharness/internal/agentrecipe"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/agentrecipe"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type Hub struct {
@@ -178,8 +178,14 @@ func NewGroupChat(cfg GroupChatConfig, opts ...Option) (*GroupChat, error) {
 	return g, nil
 }
 
-func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
-	runOpts := resolveRunOptions(g.limits, opts...)
+func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	runOpts, err := resolveRunOptions(g.limits, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.dispatchRunOptions(&runOpts); err != nil {
+		return nil, err
+	}
 	runOpts.agentKind = AgentKindGroupChat
 	loaded, session, err := g.loadConversation(ctx, messages, &runOpts)
 	if err != nil {
@@ -191,17 +197,15 @@ func (g *GroupChat) stream(ctx context.Context, messages []schema.Message, opts 
 	if err != nil {
 		return nil, err
 	}
-	lifecycle.session = session
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
-	runCtx = withRecipeCompletion(runCtx, session)
-	runCtx = agentrecipe.WithGroupRunConfig(runCtx, agentrecipe.GroupRunConfig{Input: conversationInput(session, messages)})
+	recipeConfig := recipeRunConfig(session, messages, 0)
 	var stream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
-		stream, err = g.recipe.ResumeStream(runCtx, graphNodeOptions(runOpts)...)
+		stream, err = g.recipe.ResumeStream(runCtx, recipeConfig, runOpts.forwarded...)
 	} else {
-		stream, err = g.recipe.Stream(runCtx, prepared, graphNodeOptions(runOpts)...)
+		stream, err = g.recipe.Stream(runCtx, prepared, recipeConfig, runOpts.forwarded...)
 	}
 	if err != nil {
 		lifecycle.fail(err)

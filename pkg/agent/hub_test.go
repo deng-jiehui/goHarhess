@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type recordingAgent struct {

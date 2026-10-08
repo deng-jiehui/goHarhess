@@ -12,7 +12,29 @@ type valueCloneable interface {
 	Clone() any
 }
 
-func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) {
+// CloneUnsupportedError 报告结构克隆无法安全隔离、未实现 Clone() 的
+// 可变类型。调用方可据此决定是否采用 JSON 往返等保底策略；它与
+// Clone() panic、返回类型错误等实现失败区分，errors.As 可判定。
+type CloneUnsupportedError struct {
+	Path string
+	Type string
+}
+
+func (e *CloneUnsupportedError) Error() string {
+	return fmt.Sprintf("%s has unsupported mutable type %s; implement Clone() any", e.Path, e.Type)
+}
+
+// CloneFallbackFunc 在保底模式下替换结构克隆无法安全隔离的值
+// （CloneUnsupportedError 场景），供持久化等边界注入 JSON 往返等
+// 保底转换；fallback 返回错误直接上抛给调用方。
+type CloneFallbackFunc func(path string, value any) (any, error)
+
+// CloneValueStrict 严格克隆单个值：克隆失败返回错误，不做宽松回退。
+func CloneValueStrict(value any) (any, error) {
+	return cloneAnyValue(value, true, "value", 0, nil)
+}
+
+func cloneAnyValue(value any, strict bool, path string, depth int, fallback CloneFallbackFunc) (any, error) {
 	if value == nil {
 		return nil, nil
 	}
@@ -26,11 +48,30 @@ func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) 
 	if cloneKindCanBeNil(rv.Kind()) && rv.IsNil() {
 		return value, nil
 	}
+	// unsupported 只在结构克隆无法安全隔离的值处触发：保底模式由
+	// 调用方生成替代副本；严格模式返回类型化错误；宽松模式保留原引用。
+	unsupported := func(errType string) (any, error) {
+		if !strict {
+			return value, nil
+		}
+		if fallback != nil {
+			return fallback(path, value)
+		}
+		return nil, &CloneUnsupportedError{Path: path, Type: errType}
+	}
 	if cloneable, ok := value.(valueCloneable); ok {
 		cloned, err := callValueClone(cloneable)
 		if err != nil {
 			if strict {
 				return nil, fmt.Errorf("clone %s: %w", path, err)
+			}
+			return value, nil
+		}
+		// Clone() 契约要求返回相同具体类型的独立副本；
+		// 返回类型不符视为克隆实现失败，严格模式上报。
+		if clonedType := reflect.TypeOf(cloned); clonedType != rv.Type() {
+			if strict {
+				return nil, fmt.Errorf("clone %s returned %v, want %v", path, clonedType, rv.Type())
 			}
 			return value, nil
 		}
@@ -43,21 +84,22 @@ func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) 
 	switch rv.Kind() {
 	case reflect.Map:
 		if cloneTypeHasReference(rv.Type().Key(), map[reflect.Type]bool{}) {
-			if strict {
-				return nil, fmt.Errorf("%s has mutable map key type %s", path, rv.Type().Key())
-			}
-			return value, nil
+			return unsupported(rv.Type().Key().String())
 		}
 		cloned := reflect.MakeMapWithSize(rv.Type(), rv.Len())
 		iterator := rv.MapRange()
 		for iterator.Next() {
 			itemPath := fmt.Sprintf("%s[%v]", path, iterator.Key().Interface())
-			item, err := cloneAnyValue(iterator.Value().Interface(), strict, itemPath, depth+1)
+			item, err := cloneAnyValue(iterator.Value().Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
 			}
 			mapped, ok := cloneValueForType(item, rv.Type().Elem())
 			if !ok {
+				// 保底结果放不进强类型容器：扩大到整个容器由调用方处理。
+				if fallback != nil {
+					return unsupported(rv.Type().String())
+				}
 				if strict {
 					return nil, fmt.Errorf("clone %s returned %T, want %s", itemPath, item, rv.Type().Elem())
 				}
@@ -70,12 +112,15 @@ func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) 
 		cloned := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for index := 0; index < rv.Len(); index++ {
 			itemPath := fmt.Sprintf("%s[%d]", path, index)
-			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1)
+			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
 			}
 			mapped, ok := cloneValueForType(item, rv.Type().Elem())
 			if !ok {
+				if fallback != nil {
+					return unsupported(rv.Type().String())
+				}
 				if strict {
 					return nil, fmt.Errorf("clone %s returned %T, want %s", itemPath, item, rv.Type().Elem())
 				}
@@ -88,12 +133,15 @@ func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) 
 		cloned := reflect.New(rv.Type()).Elem()
 		for index := 0; index < rv.Len(); index++ {
 			itemPath := fmt.Sprintf("%s[%d]", path, index)
-			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1)
+			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
 			}
 			mapped, ok := cloneValueForType(item, rv.Type().Elem())
 			if !ok {
+				if fallback != nil {
+					return unsupported(rv.Type().String())
+				}
 				if strict {
 					return nil, fmt.Errorf("clone %s returned %T, want %s", itemPath, item, rv.Type().Elem())
 				}
@@ -103,12 +151,10 @@ func cloneAnyValue(value any, strict bool, path string, depth int) (any, error) 
 		}
 		return cloned.Interface(), nil
 	case reflect.Pointer, reflect.Chan, reflect.Func, reflect.UnsafePointer:
-		if strict {
-			return nil, fmt.Errorf("%s has mutable type %T; implement Clone() any", path, value)
-		}
+		return unsupported(fmt.Sprintf("%T", value))
 	case reflect.Struct:
-		if cloneTypeHasReference(rv.Type(), map[reflect.Type]bool{}) && strict {
-			return nil, fmt.Errorf("%s has reference-bearing type %T; implement Clone() any", path, value)
+		if cloneTypeHasReference(rv.Type(), map[reflect.Type]bool{}) {
+			return unsupported(fmt.Sprintf("%T", value))
 		}
 	}
 	return value, nil

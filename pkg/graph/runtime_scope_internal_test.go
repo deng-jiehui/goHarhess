@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type runtimeScopeState struct{ Value string }
@@ -42,23 +42,30 @@ func TestRuntimeStateTravelsThroughPrivateContextScope(t *testing.T) {
 	}
 }
 
-type reentrantScopeOption struct{ onScope func() }
+type boundConfig struct{ Value string }
 
-func (reentrantScopeOption) Apply(*runnable.OptionSet) error { return nil }
-func (o reentrantScopeOption) OptionScope() runnable.OptionScope {
-	o.onScope()
-	return runnable.OptionScopeNode
-}
-
-func TestSetNodeOptionsResolvesUserScopeOutsideGraphLock(t *testing.T) {
-	g := NewGraph[string, string]("reentrant-options")
-	node := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
+// SetNodeOptions 只登记不透明的选项值，不在建图时执行任何设置函数；
+// 绑定选项在运行入口分发给节点，由节点解析。
+func TestSetNodeOptionsDoesNotExecuteOptionCode(t *testing.T) {
+	g := NewGraph[string, string]("lazy-node-options")
+	applied := 0
+	option := runnable.WrapOption(func(c *boundConfig) { applied++; c.Value = "bound" })
+	node := runnable.Func[string, string](func(_ context.Context, input string, options ...runnable.Option) (string, error) {
+		resolved, remaining, err := runnable.ResolveComponentOptions(boundConfig{}, options...)
+		if err != nil {
+			return "", err
+		}
+		if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+			return "", err
+		}
+		return input + resolved.Value, nil
+	})
 	if err := g.AddNode("node", node); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- g.SetNodeOptions("node", reentrantScopeOption{onScope: func() { _ = g.Snapshot() }})
+		done <- g.SetNodeOptions("node", option)
 	}()
 	select {
 	case err := <-done:
@@ -66,7 +73,23 @@ func TestSetNodeOptionsResolvesUserScopeOutsideGraphLock(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("SetNodeOptions called OptionScope while holding the Graph lock")
+		t.Fatal("SetNodeOptions blocked on the Graph lock")
+	}
+	if applied != 0 {
+		t.Fatalf("option applied at registration: %d", applied)
+	}
+	_ = g.AddEdge(Start, "node")
+	_ = g.AddEdge("node", End)
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := compiled.Invoke(context.Background(), "in-")
+	if err != nil || out != "in-bound" {
+		t.Fatalf("Invoke() = %q, %v", out, err)
+	}
+	if applied != 1 {
+		t.Fatalf("option applied %d times, want 1", applied)
 	}
 }
 

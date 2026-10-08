@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type wireEventKind string
@@ -45,7 +45,7 @@ func responseReaderFromWire(ctx context.Context, events <-chan wireEvent, cancel
 			}
 			_ = writer.Close()
 		}()
-		accumulator := NewDeltaAccumulator(true)
+		accumulator := newWireAccumulator(ctx)
 		response := Response{}
 		var responseID, model string
 		for {
@@ -78,17 +78,28 @@ func responseReaderFromWire(ctx context.Context, events <-chan wireEvent, cancel
 				}
 				switch event.kind {
 				case wireEventDelta:
-					messages, err := accumulator.Apply(Response{Messages: event.messages})
+					callback.NotifyStream[Response](ctx)
+					err := accumulator.apply(event.messages)
 					if err != nil {
 						_ = writer.CloseWithError(err)
 						return
 					}
-					response.Messages = messages
-					callback.EmitStream(ctx, response.Clone())
+					if callback.HasStreamCallbacks[Response](ctx) {
+						response.Messages = accumulator.messages()
+						callback.EmitStream(ctx, response.Clone())
+					}
 				case wireEventUsage:
-					callback.EmitStream(ctx, response.Clone())
+					if callback.HasStreamCallbacks[Response](ctx) {
+						response.Messages = accumulator.messages()
+						callback.EmitStream(ctx, response.Clone())
+					}
 				case wireEventDone:
-					response.Messages = attachResponseMeta(response.Messages, responseID, model, response.FinishReason, response.Usage)
+					var err error
+					response.Messages, err = accumulator.finish(&schema.ResponseMeta{ID: responseID, Model: model, FinishReason: response.FinishReason, Usage: response.Usage})
+					if err != nil {
+						_ = writer.CloseWithError(err)
+						return
+					}
 					for i := range response.Messages {
 						if err := response.Messages[i].Validate(); err != nil {
 							_ = writer.CloseWithError(fmt.Errorf("final response message %d: %w", i, err))

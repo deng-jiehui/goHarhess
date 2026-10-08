@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/callback"
 )
 
 type Operation string

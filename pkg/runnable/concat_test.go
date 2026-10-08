@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestConcatUsesDefaultStrategies(t *testing.T) {

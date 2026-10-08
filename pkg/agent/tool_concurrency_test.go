@@ -10,13 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/callback"
-	"goharness/pkg/control"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 type agentRunResult struct {
@@ -132,15 +133,20 @@ func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("before-batch hook did not run")
 	}
-	deadline := time.Now().Add(time.Second)
-	for store.saveCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	// 读到流终止错误时后台写入已 flush，落盘次数是确定的。
+	for {
+		if _, err := stream.Recv(); err != nil {
+			if !errors.Is(err, graph.ErrInterrupted) {
+				t.Fatalf("stream error=%v", err)
+			}
+			break
+		}
 	}
 	_ = stream.Close()
 	if hookCalls != 1 || calls.Load() != 0 {
 		t.Fatalf("hook calls=%d tool calls=%d", hookCalls, calls.Load())
 	}
-	if store.saveCount() != 1 {
+	if store.saveCount() != 3 {
 		t.Fatalf("checkpoint saves=%d", store.saveCount())
 	}
 }
@@ -182,7 +188,7 @@ func TestReactAgentToolTimeoutJoinsAsObservation(t *testing.T) {
 	if len(last) != 3 {
 		t.Fatalf("messages = %#v", last)
 	}
-	if !strings.Contains(toolResultText(last[1]), "context deadline exceeded") || last[1].FunctionToolResults()[0].CallID != "slow-1" {
+	if !strings.Contains(toolResultText(last[1]), `tool "slow" timed out`) || last[1].FunctionToolResults()[0].CallID != "slow-1" {
 		t.Fatalf("timeout observation = %#v", last[1])
 	}
 	if last[2].JoinedText("") != "continued" {
@@ -390,7 +396,7 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 			}
 			middlewareChecked.Store(true)
 			if !spec.IsReadOnly && subject.HasRole("viewer") {
-				return tool.Result{}, tool.Deny(errors.New("viewer cannot call mutating tools"))
+				return tool.Result{}, tool.Deny(tool.ModelVisible(errors.New("viewer cannot call mutating tools")))
 			}
 			return next(ctx, input)
 		},
@@ -467,7 +473,8 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("messages = %#v", messages)
 	}
-	if !strings.Contains(toolResultText(messages[1]), `tool "delete" permission denied by middleware "rbac": viewer cannot call mutating tools`) {
+	// 中间件名是内部诊断不进模型文本；Deny 理由经 ModelVisible 显式可见。
+	if !strings.Contains(toolResultText(messages[1]), `tool "delete" permission denied: viewer cannot call mutating tools`) {
 		t.Fatalf("permission observation = %q", toolResultText(messages[1]))
 	}
 	if messages[1].FunctionToolResults()[0].CallID != "delete-1" || messages[2].JoinedText("") != "denied safely" {
@@ -509,7 +516,8 @@ func TestReactAgentIsolatesNestedToolMetadata(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("run")}, agent.WithMaxParallelTools(2), agent.WithMetadata("nested", metadata["nested"]))
+		runCtx := callback.WithMetadata(context.Background(), map[string]any{"nested": metadata["nested"]})
+		_, runErr := value.Invoke(runCtx, []schema.Message{schema.UserMessage("run")}, agent.WithMaxParallelTools(2))
 		done <- runErr
 	}()
 	for range 2 {
@@ -608,7 +616,11 @@ func (m *earlyStartModel) Invoke(ctx context.Context, request llm.Request, optio
 	return stream.Collect(ctx)
 }
 
-func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	resolved, _, err := runnable.ResolveComponentOptions(llm.Options{}, options...)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	m.calls++
 	call := m.calls
@@ -628,7 +640,7 @@ func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, _ ...
 
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
+		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
 		send := func(response llm.Response) bool {
 			messages, err := accumulator.Apply(response)
 			if err != nil {

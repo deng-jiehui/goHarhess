@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type describedNode struct{}

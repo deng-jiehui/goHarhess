@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type GenerateConfig map[string]any
@@ -24,23 +24,24 @@ type Config struct {
 	Raw            map[string]any
 }
 
-type ChatOptions struct {
-	Functions           []schema.FunctionDefinition
-	DeltaStream         bool
-	ExtraGenerateConfig GenerateConfig
-}
-
-// Request is the provider-neutral model invocation envelope.
+// Request is the provider-neutral model invocation envelope carrying only
+// business inputs. Runtime configuration travels as typed Runnable options
+// (llm.Options and provider extension types), never on the Request itself.
 type Request struct {
-	Messages []schema.Message
-	Options  ChatOptions
+	Messages  []schema.Message
+	Functions []schema.FunctionDefinition
 }
 
 func (r Request) Clone() Request {
 	r.Messages = schema.CloneMessages(r.Messages)
-	r.Options.Functions = cloneFunctionDefinitions(r.Options.Functions)
-	r.Options.ExtraGenerateConfig = GenerateConfig(cloneAnyMap(r.Options.ExtraGenerateConfig))
+	r.Functions = cloneFunctionDefinitions(r.Functions)
 	return r
+}
+
+// Clone 返回配置的独立副本，防止调用方在解析后修改共享 map。
+func (o Options) Clone() Options {
+	o.ExtraGenerateConfig = GenerateConfig(cloneAnyMap(o.ExtraGenerateConfig))
+	return o
 }
 
 // Response is the fully reduced result of one model invocation.
@@ -53,6 +54,25 @@ type Response struct {
 // ErrStreamTruncated reports a model Reader that ended before producing a
 // complete Response.
 var ErrStreamTruncated = errors.New("model response stream ended without a result")
+
+// ErrResponseTooLarge identifies a non-streaming response body that exceeded
+// the provider's configured byte limit. It is a call failure: truncated bytes
+// must never be treated as a complete response.
+var ErrResponseTooLarge = errors.New("model response exceeds the configured byte limit")
+
+// ResponseTooLargeError reports the byte limit that was exceeded.
+type ResponseTooLargeError struct {
+	Provider string
+	Limit    int64
+}
+
+func (e *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("%s model response exceeds the configured byte limit: %d bytes", e.Provider, e.Limit)
+}
+
+func (e *ResponseTooLargeError) Is(target error) bool {
+	return target == ErrResponseTooLarge
+}
 
 func (r Response) Clone() Response {
 	r.Messages = schema.CloneMessages(r.Messages)

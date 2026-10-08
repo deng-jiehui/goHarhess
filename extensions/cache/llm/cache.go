@@ -7,20 +7,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	corellm "goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	corellm "github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/stream"
 )
 
 const (
 	DefaultCacheTTL       = 5 * time.Minute
 	DefaultCacheNamespace = "llm"
-	cacheKeyVersion       = "v3"
+	cacheKeyVersion       = "v4"
 )
 
 type CacheEntry struct {
@@ -38,7 +42,8 @@ type CacheStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
-type SensitiveDetector func(ctx context.Context, messages []schema.Message, opts corellm.ChatOptions) bool
+// SensitiveDetector 用解析后的模型配置判断是否跳过缓存。
+type SensitiveDetector func(ctx context.Context, messages []schema.Message, opts corellm.Options) bool
 
 type CacheConfig struct {
 	Store              CacheStore
@@ -132,18 +137,46 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 		return nil, errors.New("cached model context cannot be nil")
 	}
 	request = cloneRequest(request)
-	if m.shouldBypass(ctx, request.Messages, request.Options) {
+	// 缓存边界冻结全部组件配置：每种类型解析一次，解析值进入缓存身份，
+	// 上游调用只应用冻结结果；扩展 Provider 配置同样计入缓存键，无法稳定
+	// 编码为缓存身份时直接绕过而不是命中错误结果。
+	specs, err := runnable.FlattenOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	// 带剩余路径的选项不属于本组件可确定身份的参数，缓存一律绕过。
+	for _, spec := range specs {
+		if len(spec.Path) > 0 {
+			m.stats.bypasses.Add(1)
+			return m.next.Stream(ctx, request, options...)
+		}
+	}
+	frozenSpecs, values, err := runnable.FreezeSpecs(specs)
+	if err != nil {
+		return nil, err
+	}
+	// 冻结后仍存在的原始 spec 是不可观测写入的透传（如显式赋零），
+	// 效果取决于组件真实解析基底，无法纳入缓存身份，一律绕过。
+	for _, spec := range frozenSpecs {
+		if spec.ConfigType != nil && !spec.Frozen {
+			m.stats.bypasses.Add(1)
+			return m.next.Stream(ctx, request, runnable.OptionsFromSpecs(frozenSpecs)...)
+		}
+	}
+	resolved, _ := values[runnable.OptionType[corellm.Options]()].(corellm.Options)
+	upstreamOptions := runnable.OptionsFromSpecs(frozenSpecs)
+	if m.shouldBypass(ctx, request, resolved) {
 		m.stats.bypasses.Add(1)
-		return m.next.Stream(ctx, request, options...)
+		return m.next.Stream(ctx, request, upstreamOptions...)
 	}
 
-	key, err := m.cacheKey(ctx, request)
+	key, err := m.cacheKey(ctx, request, values)
 	if err != nil {
 		if m.strictStoreErrors {
 			return nil, fmt.Errorf("build LLM cache key: %w", err)
 		}
 		m.stats.bypasses.Add(1)
-		return m.next.Stream(ctx, request, options...)
+		return m.next.Stream(ctx, request, upstreamOptions...)
 	}
 	entry, found, err := m.store.Get(ctx, key)
 	if err != nil {
@@ -152,13 +185,23 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 			return nil, fmt.Errorf("read LLM cache: %w", err)
 		}
 		m.stats.bypasses.Add(1)
-		return m.next.Stream(ctx, request, options...)
+		return m.next.Stream(ctx, request, upstreamOptions...)
 	}
 	if found {
 		m.stats.hits.Add(1)
+		entry = entry.Clone()
+		for i := range entry.Response.Messages {
+			entry.Response.Messages[i].ID = stream.NewID()
+		}
+		if err := stream.PublishSnapshots(ctx, entry.Response.Messages); err != nil {
+			return nil, err
+		}
 		return responseReader(ctx, entry.Response), nil
 	}
 	m.stats.misses.Add(1)
+	if stream.Enabled(ctx) {
+		return m.streamPublicMiss(ctx, key, request, upstreamOptions...)
+	}
 
 	m.mu.Lock()
 	if flight := m.flights[key]; flight != nil && flight.active() {
@@ -172,7 +215,7 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 	leader := flight.subscribe(ctx)
 	m.mu.Unlock()
 
-	upstream, err := m.next.Stream(flight.ctx, request, options...)
+	upstream, err := m.next.Stream(flight.ctx, request, upstreamOptions...)
 	if err != nil {
 		flight.complete(corellm.Response{}, err)
 		m.removeFlight(key, flight)
@@ -190,6 +233,65 @@ func (m *CachedModel) Stream(ctx context.Context, request corellm.Request, optio
 	return leader, nil
 }
 
+// Live callers own their producer and backpressure. They still use completed
+// cache entries, but do not join in-flight requests with another run's Context.
+func (m *CachedModel) streamPublicMiss(ctx context.Context, key string, request corellm.Request, options ...runnable.Option) (*runnable.StreamReader[corellm.Response], error) {
+	execution, cancel := context.WithCancel(ctx)
+	execution, seen := stream.TrackMessages(execution)
+	upstream, err := m.next.Stream(execution, request, options...)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if upstream == nil {
+		cancel()
+		return nil, errors.New("underlying model returned a nil stream")
+	}
+	reader, writer := runnable.Pipe[corellm.Response](context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-reader.Context().Done():
+			cancel()
+			_ = upstream.Close()
+		case <-done:
+		}
+	}()
+	go func() {
+		defer close(done)
+		defer cancel()
+		defer upstream.Close()
+		defer writer.Close()
+		response, err := corellm.CollectResponse(execution, upstream)
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		if m.cacheFunctionCalls || !containsFunctionCall(response.Messages) {
+			err = m.store.Set(execution, key, CacheEntry{Response: response.Clone(), CreatedAt: time.Now().UTC()}, m.ttl)
+			if err != nil {
+				m.stats.storeErrors.Add(1)
+				if m.strictStoreErrors {
+					_ = writer.CloseWithError(err)
+					return
+				}
+			} else {
+				m.stats.writes.Add(1)
+			}
+		} else {
+			m.stats.skippedWrites.Add(1)
+		}
+		if !seen.Load() {
+			if err := stream.PublishSnapshots(execution, response.Messages); err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+		}
+		_ = writer.Send(response)
+	}()
+	return reader, nil
+}
+
 func (m *CachedModel) Collect(ctx context.Context, input *runnable.StreamReader[corellm.Request], options ...runnable.Option) (corellm.Response, error) {
 	return runnable.CollectFromInvoke(ctx, input, m.Invoke, options...)
 }
@@ -199,6 +301,18 @@ func (m *CachedModel) Transform(ctx context.Context, input *runnable.StreamReade
 }
 
 func (m *CachedModel) Capabilities() corellm.Capabilities { return m.next.Capabilities() }
+
+// OptionTypes 透传下游模型声明的扩展配置类型，让 Provider 专属选项能穿过
+// 缓存包装层参与按类型分发；解析值已纳入缓存身份。
+func (m *CachedModel) OptionTypes() []reflect.Type {
+	if m == nil {
+		return nil
+	}
+	if provider, ok := m.next.(interface{ OptionTypes() []reflect.Type }); ok && provider != nil {
+		return provider.OptionTypes()
+	}
+	return nil
+}
 
 func (m *CachedModel) ModelInfo() corellm.ModelInfo {
 	info := corellm.DescribeModel(m.next)
@@ -239,29 +353,48 @@ func WithSensitiveRequest(ctx context.Context) context.Context {
 	return context.WithValue(ctx, cacheSensitiveKey, true)
 }
 
-func (m *CachedModel) shouldBypass(ctx context.Context, messages []schema.Message, opts corellm.ChatOptions) bool {
+func (m *CachedModel) shouldBypass(ctx context.Context, request corellm.Request, opts corellm.Options) bool {
 	if bypass, _ := ctx.Value(cacheBypassKey).(bool); bypass {
 		return true
 	}
 	if sensitive, _ := ctx.Value(cacheSensitiveKey).(bool); sensitive {
 		return true
 	}
-	if m.sensitiveDetector != nil && m.sensitiveDetector(ctx, schema.CloneMessages(messages), cloneChatOptions(opts)) {
+	if m.sensitiveDetector != nil && m.sensitiveDetector(ctx, schema.CloneMessages(request.Messages), cloneModelOptions(opts)) {
 		return true
 	}
-	return len(opts.Functions) > 0 && !m.cacheFunctionCalls
+	return len(request.Functions) > 0 && !m.cacheFunctionCalls
 }
 
-func (m *CachedModel) cacheKey(ctx context.Context, request corellm.Request) (string, error) {
+// cacheKey 的缓存身份包含请求业务输入与全部组件配置的解析值（按类型名分
+// 组）。配置值经确定性结构指纹进入键身份：递归覆盖导出与未导出字段，
+// 浮点按位比较（区分 NaN 载荷），指针按指向内容而非地址，GoStringer/
+// Formatter 无法劫持输出；func、chan、unsafe.Pointer 等无法稳定表示
+// 的种类报错，宽松模式绕过缓存、严格模式报错。
+func (m *CachedModel) cacheKey(ctx context.Context, request corellm.Request, values map[reflect.Type]any) (string, error) {
+	request = cloneRequest(request)
+	// Framework message identity is transport metadata, not model input semantics.
+	for i := range request.Messages {
+		request.Messages[i].ID = ""
+	}
 	tenant, _ := ctx.Value(cacheTenantKey).(string)
 	if tenant == "" {
 		tenant = "default"
 	}
+	encoded := make(map[string]string, len(values))
+	for configType, value := range values {
+		fingerprint, err := configFingerprint(value)
+		if err != nil {
+			return "", fmt.Errorf("option value for %s has no stable cache identity: %w", configType, err)
+		}
+		encoded[configType.String()] = fingerprint
+	}
 	payload := struct {
-		Version string          `json:"version"`
-		ModelID string          `json:"model_id"`
-		Request corellm.Request `json:"request"`
-	}{Version: cacheKeyVersion, ModelID: m.modelID, Request: cloneRequest(request)}
+		Version string            `json:"version"`
+		ModelID string            `json:"model_id"`
+		Request corellm.Request   `json:"request"`
+		Options map[string]string `json:"options"`
+	}{Version: cacheKeyVersion, ModelID: m.modelID, Request: cloneRequest(request), Options: encoded}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -269,6 +402,144 @@ func (m *CachedModel) cacheKey(ctx context.Context, request corellm.Request) (st
 	tenantHash := sha256.Sum256([]byte(tenant))
 	requestHash := sha256.Sum256(data)
 	return fmt.Sprintf("%s:%s:%s:%s", m.namespace, cacheKeyVersion, hex.EncodeToString(tenantHash[:8]), hex.EncodeToString(requestHash[:])), nil
+}
+
+// configFingerprint 生成配置值的确定性结构指纹，用作缓存身份的一部分。
+// 与 %#v 不同：不输出指针地址、不受 GoString/Format 方法影响、覆盖未
+// 导出字段，无法安全表示的种类返回错误而不是生成可能碰撞的键。
+func configFingerprint(value any) (string, error) {
+	var out strings.Builder
+	seen := map[fingerprintVisit]bool{}
+	if err := writeFingerprint(reflect.ValueOf(value), &out, seen, 0); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+type fingerprintVisit struct {
+	typ reflect.Type
+	ptr uintptr
+}
+
+const maxFingerprintDepth = 64
+
+func writeFingerprint(v reflect.Value, out *strings.Builder, seen map[fingerprintVisit]bool, depth int) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unreadable value: %v", r)
+		}
+	}()
+	if depth > maxFingerprintDepth {
+		return errors.New("fingerprint exceeds max depth")
+	}
+	if !v.IsValid() {
+		out.WriteString("~")
+		return nil
+	}
+	// 标量一律输出 v.Type() 而非 Kind：接口字段中底层类型相同但命名
+	// 不同的具体类型（如 type Celsius float64 与 float64）必须区分。
+	switch v.Kind() {
+	case reflect.Bool:
+		fmt.Fprintf(out, "%s:%v;", v.Type(), v.Bool())
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		fmt.Fprintf(out, "%s:%d;", v.Type(), v.Int())
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		fmt.Fprintf(out, "%s:%d;", v.Type(), v.Uint())
+	case reflect.Float32:
+		fmt.Fprintf(out, "%s:%x;", v.Type(), math.Float32bits(float32(v.Float())))
+	case reflect.Float64:
+		fmt.Fprintf(out, "%s:%x;", v.Type(), math.Float64bits(v.Float()))
+	case reflect.Complex64, reflect.Complex128:
+		c := v.Complex()
+		fmt.Fprintf(out, "%s:%x:%x;", v.Type(), math.Float64bits(real(c)), math.Float64bits(imag(c)))
+	case reflect.String:
+		fmt.Fprintf(out, "%s:%q;", v.Type(), v.String())
+	case reflect.Interface:
+		if v.IsNil() {
+			out.WriteString("inil;")
+			return nil
+		}
+		return writeFingerprint(v.Elem(), out, seen, depth+1)
+	case reflect.Pointer:
+		if v.IsNil() {
+			fmt.Fprintf(out, "%s:nil;", v.Type())
+			return nil
+		}
+		visit := fingerprintVisit{typ: v.Type(), ptr: v.Pointer()}
+		if seen[visit] {
+			out.WriteString("cyc;")
+			return nil
+		}
+		seen[visit] = true
+		fmt.Fprintf(out, "%s*", v.Type().Elem())
+		return writeFingerprint(v.Elem(), out, seen, depth+1)
+	case reflect.Map:
+		if v.IsNil() {
+			fmt.Fprintf(out, "%s:nil;", v.Type())
+			return nil
+		}
+		keys := v.MapKeys()
+		pairs := make([]string, 0, len(keys))
+		for _, key := range keys {
+			var pair strings.Builder
+			if err := writeFingerprint(key, &pair, seen, depth+1); err != nil {
+				return err
+			}
+			pair.WriteByte('=')
+			if err := writeFingerprint(v.MapIndex(key), &pair, seen, depth+1); err != nil {
+				return err
+			}
+			pairs = append(pairs, pair.String())
+		}
+		sort.Strings(pairs)
+		fmt.Fprintf(out, "%s{", v.Type())
+		for _, pair := range pairs {
+			out.WriteString(pair)
+		}
+		out.WriteByte('}')
+	case reflect.Slice:
+		if v.IsNil() {
+			fmt.Fprintf(out, "%s:nil;", v.Type())
+			return nil
+		}
+		fallthrough
+	case reflect.Array:
+		fmt.Fprintf(out, "%s[", v.Type())
+		for i := 0; i < v.Len(); i++ {
+			if err := writeFingerprint(v.Index(i), out, seen, depth+1); err != nil {
+				return err
+			}
+		}
+		out.WriteByte(']')
+	case reflect.Struct:
+		typ := v.Type()
+		fmt.Fprintf(out, "%s{", typ)
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			fmt.Fprintf(out, "%s=", field.Name)
+			fv := v.Field(i)
+			if field.PkgPath != "" {
+				// 未导出字段只能取标量访问器；复合值无法可靠读取时
+				// 放弃指纹而不是生成可能碰撞的键。
+				switch fv.Kind() {
+				case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+					reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+					reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.String:
+				default:
+					return fmt.Errorf("unexported field %s.%s of kind %s cannot be fingerprinted", typ, field.Name, fv.Kind())
+				}
+			}
+			if err := writeFingerprint(fv, out, seen, depth+1); err != nil {
+				return err
+			}
+		}
+		out.WriteByte('}')
+	case reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return fmt.Errorf("kind %s has no stable fingerprint", v.Kind())
+	default:
+		return fmt.Errorf("kind %s has no stable fingerprint", v.Kind())
+	}
+	return nil
 }
 
 func (m *CachedModel) consumeFlight(key string, flight *cacheFlight, upstream *runnable.StreamReader[corellm.Response]) {
@@ -401,15 +672,13 @@ func responseReader(ctx context.Context, response corellm.Response) *runnable.St
 
 func cloneRequest(request corellm.Request) corellm.Request {
 	request.Messages = schema.CloneMessages(request.Messages)
-	request.Options = cloneChatOptions(request.Options)
+	request.Functions = append([]schema.FunctionDefinition(nil), request.Functions...)
 	return request
 }
 
-func cloneChatOptions(opts corellm.ChatOptions) corellm.ChatOptions {
-	functions := make([]schema.FunctionDefinition, len(opts.Functions))
-	copy(functions, opts.Functions)
-	return corellm.ChatOptions{
-		Functions: functions, DeltaStream: opts.DeltaStream,
+func cloneModelOptions(opts corellm.Options) corellm.Options {
+	return corellm.Options{
+		DeltaStream:         opts.DeltaStream,
 		ExtraGenerateConfig: corellm.MergeGenerateConfig(opts.ExtraGenerateConfig, nil),
 	}
 }

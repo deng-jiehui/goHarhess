@@ -17,6 +17,8 @@ model, err := llm.New(llm.Config{
 
 任何 OpenAI-compatible 服务都可以使用 `ModelType: "openai-compatible"`，并将 `ModelServer` 设置为其 API 基础 URL。多个模型需要共享同一连接池时，可以提供共享的 `Config.HTTPClient`。
 
+非流式响应体受 `OpenAICompatibleConfig.MaxResponseBytes`（或配置键 `max_response_bytes`）限制，默认 `llm.DefaultMaxResponseBytes`（32 MiB）。超限立即返回 `*llm.ResponseTooLargeError`（`errors.Is(err, llm.ErrResponseTooLarge)`），属调用失败——截断字节不会被当作完整响应解析。流式 SSE 按事件帧处理，不受此限。
+
 未注入客户端时，模型 Provider 使用 `pkg/httpclient.DefaultPool`。同一 Transport 也用于检索和推理 REST 服务；零超时 LLM 客户端仍适合长时间 SSE 流。
 
 ## 规范化流
@@ -34,3 +36,5 @@ Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `
 重试默认关闭，可以使用 `llm.NewRetryingModel` 包装任意模型。该装饰器只重试可重试的请求失败，以及首个数据事件前到达的流错误；部分流绝不会重放。
 
 `llm.NewRateLimitedModel` 提供可选的并发限制和最小请求启动间隔。这些装饰器可按任意顺序与应用自己的熔断策略组合。
+
+Agent 初始化配置也可以直接启用两者：`agent.WithModelRetry(llm.RetryConfig{MaxAttempts: 3})` 与 `agent.WithModelRateLimit(llm.RateLimitConfig{...})` 会在构造时包装模型，且始终保证重试在外层、限流在内层（每次真实请求重新占用配额）。框架会检查模型外层的内置策略链：同类策略层重复时拒绝构造；模型已手工包装重试而只配置限流时，会按原重试配置重组为正确顺序，重试层不在最外层则明确拒绝。隔着自定义包装层的策略无法识别，混用时请保持内置策略层连续靠外。需要跨 Agent 实例共享限流配额时，包装同一个底层模型再分发给各 Agent。

@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type FusionStrategy string

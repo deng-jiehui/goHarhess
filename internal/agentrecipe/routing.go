@@ -2,82 +2,55 @@ package agentrecipe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/graph"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/streamcompat"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/stream"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
-type RoutingRunConfig struct {
-	MaxSteps      int
-	ReturnControl bool
-	Input         []schema.Message
-	Steps         int
-	Response      []schema.Message
+// RoutingState 是 Routing 配方的运行状态。
+type RoutingState struct {
+	baseState
+	Steps         int              `json:"steps,omitempty"`
+	Pending       []Call           `json:"pending,omitempty"`
+	DispatchInput []schema.Message `json:"dispatch_input,omitempty"`
+	ContinueRun   bool             `json:"continue_run,omitempty"`
 }
 
-type routingRunState struct {
-	maxSteps      int
-	returnControl bool
-	steps         int
-	response      []schema.Message
-	pending       []Call
-	dispatchInput []schema.Message
-	continueRun   bool
-	input         []schema.Message
+type routingStateWire struct {
+	baseStateWire
+	Steps         int              `json:"steps,omitempty"`
+	Pending       []Call           `json:"pending,omitempty"`
+	DispatchInput []schema.Message `json:"dispatch_input,omitempty"`
+	ContinueRun   bool             `json:"continue_run,omitempty"`
 }
 
-type routingRunContextKey struct{}
-
-func WithRoutingRunConfig(ctx context.Context, cfg RoutingRunConfig) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, routingRunContextKey{}, &routingRunState{
-		maxSteps: cfg.MaxSteps, returnControl: cfg.ReturnControl, steps: cfg.Steps,
-		response: schema.CloneMessages(cfg.Response), input: schema.CloneMessages(cfg.Input),
+func (s *RoutingState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(routingStateWire{
+		baseStateWire: s.baseState.wire(),
+		Steps:         s.Steps,
+		Pending:       s.Pending,
+		DispatchInput: s.DispatchInput,
+		ContinueRun:   s.ContinueRun,
 	})
 }
 
-func hydrateRoutingRun(ctx context.Context, state *RecipeState) error {
-	run, err := routingStateFromContext(ctx)
-	if err != nil {
+func (s *RoutingState) UnmarshalJSON(data []byte) error {
+	var wire routingStateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	run.input = schema.CloneMessages(state.Input)
-	run.steps = state.RoutingSteps
-	run.response = schema.CloneMessages(state.Response)
-	run.pending = cloneCalls(state.Pending)
-	run.dispatchInput = schema.CloneMessages(state.DispatchInput)
-	run.continueRun = state.ContinueRun
+	s.baseState = wire.baseStateWire.toState()
+	s.Steps, s.Pending, s.DispatchInput, s.ContinueRun = wire.Steps, wire.Pending, wire.DispatchInput, wire.ContinueRun
 	return nil
-}
-
-func syncRoutingState(state *RecipeState, run *routingRunState) {
-	state.Response = schema.CloneMessages(run.response)
-	state.RoutingSteps = run.steps
-	state.Pending = cloneCalls(run.pending)
-	state.DispatchInput = schema.CloneMessages(run.dispatchInput)
-	state.ContinueRun = run.continueRun
-}
-
-func routingStateFromContext(ctx context.Context) (*routingRunState, error) {
-	if ctx == nil {
-		return nil, errors.New("routing recipe context is nil")
-	}
-	value, ok := ctx.Value(routingRunContextKey{}).(*routingRunState)
-	if !ok || value == nil {
-		return nil, errors.New("routing recipe run config is missing")
-	}
-	if value.maxSteps < 1 || value.steps < 0 {
-		return nil, errors.New("routing recipe has invalid step limits")
-	}
-	return value, nil
 }
 
 type RoutedResult struct {
@@ -92,13 +65,15 @@ type RoutedAgent struct {
 }
 
 type RoutingHooks struct {
-	MaxSteps     int
-	Model        runnable.Runnable[llm.Request, llm.Response]
-	PrepareModel func(context.Context, []schema.Message) (llm.Request, error)
-	Agents       []RoutedAgent
-	DetectCalls  func([]schema.Message) []Call
-	Observation  func(RoutedResult) schema.Message
-	NameMessages func([]schema.Message) []schema.Message
+	MaxSteps int
+	// ReturnControl 为 true 时是 Supervisor 模式：子 Agent 结果作为观察交还给决策模型。
+	ReturnControl bool
+	Model         runnable.Runnable[llm.Request, llm.Response]
+	PrepareModel  func(context.Context, []schema.Message) (llm.Request, error)
+	Agents        []RoutedAgent
+	DetectCalls   func([]schema.Message) []Call
+	Observation   func(RoutedResult) schema.Message
+	NameMessages  func([]schema.Message) []schema.Message
 }
 
 func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
@@ -107,6 +82,9 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	}
 	if hooks.Model == nil || hooks.PrepareModel == nil || hooks.DetectCalls == nil {
 		return nil, errors.New("routing recipe requires a model node, model input handler, and call detector")
+	}
+	if hooks.ReturnControl && hooks.Observation == nil {
+		return nil, errors.New("routing recipe observation hook is missing")
 	}
 	agents := make(map[string]RoutedAgent, len(hooks.Agents))
 	for index, candidate := range hooks.Agents {
@@ -120,150 +98,110 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 		agents[candidate.Name] = candidate
 	}
 
-	g, err := newRecipeGraph(name)
+	r := &Recipe{}
+	g, err := newRecipeGraph(name, func(ctx context.Context, input []schema.Message) (*RoutingState, error) {
+		return &RoutingState{baseState: newBaseState(input, r.config(ctx))}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	if err := g.AddNode("decide", hooks.Model,
-		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) (llm.Request, error) {
-			if err := hydrateRoutingRun(ctx, state); err != nil {
-				return llm.Request{}, err
-			}
-			return hooks.PrepareModel(ctx, schema.CloneMessages(state.Messages))
+		graph.WithPreHandler(func(ctx context.Context, state *RoutingState) (llm.Request, error) {
+			return hooks.PrepareModel(ctx, state.Messages)
 		}),
-		graph.WithPostHandler(func(ctx context.Context, state *RecipeState, response llm.Response) error {
-			run, err := routingStateFromContext(ctx)
-			if err != nil {
-				return err
-			}
-			output := schema.CloneMessages(response.Messages)
-			run.steps++
-			run.dispatchInput = schema.CloneMessages(state.Messages)
-			state.Messages = appendMessages(state.Messages, output)
+		graph.WithPostHandler(func(_ context.Context, state *RoutingState, response llm.Response) error {
+			output := response.Messages
+			state.Steps++
+			// DispatchInput 是派发前的只读视图，共享不可变元素即可。
+			state.DispatchInput = append([]schema.Message(nil), state.Messages...)
+			state.Messages = append(state.Messages, output...)
 			calls := hooks.DetectCalls(output)
-			if !run.returnControl && len(calls) > 1 {
+			if !hooks.ReturnControl && len(calls) > 1 {
 				calls = calls[:1]
 			}
-			run.pending = cloneCalls(calls)
+			state.Pending = cloneCalls(calls)
 			if len(calls) == 0 {
-				run.response = append(run.response, output...)
-				run.dispatchInput = nil
-				run.continueRun = false
+				state.Response = append(state.Response, output...)
+				state.DispatchInput = nil
+				state.ContinueRun = false
 			} else {
-				run.continueRun = true
+				state.ContinueRun = true
 			}
-			syncRoutingState(state, run)
 			return nil
 		}),
 	); err != nil {
 		return nil, err
 	}
 
-	postAgent := func(ctx context.Context, state *RecipeState, outcome runnable.Outcome[[]schema.Message]) error {
-		run, err := routingStateFromContext(ctx)
-		if err != nil {
-			return err
-		}
-		if len(run.pending) == 0 {
+	postAgent := func(ctx context.Context, state *RoutingState, outcome runnable.Outcome[[]schema.Message]) error {
+		if len(state.Pending) == 0 {
 			return errors.New("routing agent completed without a pending call")
 		}
-		call := run.pending[0]
+		call := state.Pending[0]
 		result := RoutedResult{Call: call, Messages: withSpeaker(outcome.Value, call.Name), Err: outcome.Err}
-		if result.Err != nil && !run.returnControl {
+		if result.Err != nil && !hooks.ReturnControl {
 			return fmt.Errorf("routed agent %q: %w", call.Name, result.Err)
 		}
-		run.pending = cloneCalls(run.pending[1:])
-		if !run.returnControl {
-			output := schema.CloneMessages(result.Messages)
-			state.Messages = appendMessages(state.Messages, output)
-			run.response = output
-			run.pending = nil
-			run.dispatchInput = nil
-			run.continueRun = false
-			emitRoutingSnapshot(ctx, hooks, run.response)
-			syncRoutingState(state, run)
-			return nil
-		}
-		if hooks.Observation == nil {
-			return errors.New("routing recipe observation hook is missing")
+		state.Pending = cloneCalls(state.Pending[1:])
+		if !hooks.ReturnControl {
+			// result.Messages 已由 withSpeaker 克隆并标记来源，直接接管。
+			state.Messages = append(state.Messages, result.Messages...)
+			state.Response = result.Messages
+			state.Pending = nil
+			state.DispatchInput = nil
+			state.ContinueRun = false
+			return emitRoutingSnapshot(ctx, hooks, state.Response)
 		}
 		observation := hooks.Observation(result)
-		state.Messages = appendMessages(state.Messages, []schema.Message{observation})
-		run.response = append(run.response, observation)
-		if len(run.pending) == 0 {
-			run.dispatchInput = nil
+		state.Messages = append(state.Messages, observation)
+		state.Response = append(state.Response, observation)
+		if len(state.Pending) == 0 {
+			state.DispatchInput = nil
 		}
-		run.continueRun = len(run.pending) > 0 || run.steps < run.maxSteps
-		emitRoutingSnapshot(ctx, hooks, run.response)
-		syncRoutingState(state, run)
-		return nil
+		state.ContinueRun = len(state.Pending) > 0 || state.Steps < hooks.MaxSteps
+		return emitRoutingSnapshot(ctx, hooks, state.Response)
 	}
-
+	dispatchInput := func(_ context.Context, state *RoutingState) ([]schema.Message, error) {
+		return schema.CloneMessages(state.DispatchInput), nil
+	}
 	for _, candidate := range hooks.Agents {
-		nodeID := routedAgentNodeID(candidate.Name)
-		if err := g.AddNode(nodeID, candidate.Node,
-			graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
-				if err := hydrateRoutingRun(ctx, state); err != nil {
-					return nil, err
-				}
-				return schema.CloneMessages(state.DispatchInput), nil
-			}),
+		if err := g.AddNode(routedAgentNodeID(candidate.Name), candidate.Node,
+			graph.WithPreHandler(dispatchInput),
 			graph.WithPostHandler(postAgent),
 		); err != nil {
 			return nil, err
 		}
 	}
 
-	unroutable := runnable.Func[[]schema.Message, runnable.Outcome[[]schema.Message]](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) (runnable.Outcome[[]schema.Message], error) {
-		run, err := routingStateFromContext(ctx)
-		if err != nil {
-			return runnable.Outcome[[]schema.Message]{}, err
-		}
-		if len(run.pending) == 0 {
-			return runnable.Outcome[[]schema.Message]{}, errors.New("routing call is missing")
-		}
-		name := run.pending[0].Name
-		return runnable.Outcome[[]schema.Message]{Err: fmt.Errorf("routing model selected unregistered sub-agent %q", name)}, nil
+	unroutable := runnable.Func[Call, runnable.Outcome[[]schema.Message]](func(_ context.Context, call Call, _ ...runnable.Option) (runnable.Outcome[[]schema.Message], error) {
+		// 未注册的子代理名是模型可自纠的反馈，标记为模型可见。
+		return runnable.Outcome[[]schema.Message]{Err: tool.ModelVisible(fmt.Errorf("routing model selected unregistered sub-agent %q", call.Name))}, nil
 	})
 	if err := g.AddNode("unroutable", unroutable,
-		graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
-			if err := hydrateRoutingRun(ctx, state); err != nil {
-				return nil, err
+		graph.WithPreHandler(func(_ context.Context, state *RoutingState) (Call, error) {
+			if len(state.Pending) == 0 {
+				return Call{}, errors.New("routing call is missing")
 			}
-			return schema.CloneMessages(state.DispatchInput), nil
+			return state.Pending[0], nil
 		}),
 		graph.WithPostHandler(postAgent),
 	); err != nil {
 		return nil, err
 	}
 
-	finish := runnable.Func[[]schema.Message, []schema.Message](func(ctx context.Context, _ []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
-		run, err := routingStateFromContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		response := schema.CloneMessages(run.response)
+	if err := addFinishNode(g, func(ctx context.Context, state *RoutingState) []schema.Message {
+		response := state.Response
 		if hooks.NameMessages != nil {
 			response = hooks.NameMessages(response)
 		}
-		return response, nil
-	})
-	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(ctx context.Context, state *RecipeState) ([]schema.Message, error) {
-		if err := hydrateRoutingRun(ctx, state); err != nil {
-			return nil, err
-		}
-		notifyCompletion(ctx, state)
-		return schema.CloneMessages(state.Messages), nil
-	})); err != nil {
+		state.Response = response
+		return response
+	}); err != nil {
 		return nil, err
 	}
 
-	if err := g.AddBranch(graph.Start, "finish", "step_limit", func(ctx context.Context, state *RecipeState) (bool, error) {
-		if err := hydrateRoutingRun(ctx, state); err != nil {
-			return false, err
-		}
-		run, err := routingStateFromContext(ctx)
-		return err == nil && run.steps >= run.maxSteps, err
+	if err := graph.AddBranch(g, graph.Start, "finish", "step_limit", func(_ context.Context, state *RoutingState) (bool, error) {
+		return state.Steps >= hooks.MaxSteps, nil
 	}); err != nil {
 		return nil, err
 	}
@@ -281,9 +219,6 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	if err := addRoutingEdges(g, "unroutable", hooks.Agents); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge("finish", graph.End); err != nil {
-		return nil, err
-	}
 	if err := g.SetMaxSteps(hooks.MaxSteps*(len(hooks.Agents)+2) + 2); err != nil {
 		return nil, err
 	}
@@ -291,25 +226,26 @@ func NewRoutingRecipe(name string, hooks RoutingHooks) (*Recipe, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Recipe{graph: compiled}, nil
+	r.graph = compiled
+	return r, nil
 }
 
 func addRoutingEdges(g *graph.Graph[[]schema.Message, []schema.Message], from string, agents []RoutedAgent) error {
 	for _, candidate := range agents {
 		name := candidate.Name
-		if err := g.AddBranch(from, routedAgentNodeID(name), "route:"+name, func(_ context.Context, state *RecipeState) (bool, error) {
+		if err := graph.AddBranch(g, from, routedAgentNodeID(name), "route:"+name, func(_ context.Context, state *RoutingState) (bool, error) {
 			return len(state.Pending) > 0 && state.Pending[0].Name == name, nil
 		}); err != nil {
 			return err
 		}
 	}
-	if err := g.AddBranch(from, "unroutable", "unregistered", func(_ context.Context, state *RecipeState) (bool, error) {
+	if err := graph.AddBranch(g, from, "unroutable", "unregistered", func(_ context.Context, state *RoutingState) (bool, error) {
 		return len(state.Pending) > 0, nil
 	}); err != nil {
 		return err
 	}
 	if from != "decide" {
-		if err := g.AddBranch(from, "decide", "continue", func(_ context.Context, state *RecipeState) (bool, error) {
+		if err := graph.AddBranch(g, from, "decide", "continue", func(_ context.Context, state *RoutingState) (bool, error) {
 			return state.ContinueRun, nil
 		}); err != nil {
 			return err
@@ -318,12 +254,16 @@ func addRoutingEdges(g *graph.Graph[[]schema.Message, []schema.Message], from st
 	return g.AddEdge(from, "finish")
 }
 
-func emitRoutingSnapshot(ctx context.Context, hooks RoutingHooks, response []schema.Message) {
-	emitted := schema.CloneMessages(response)
+func emitRoutingSnapshot(ctx context.Context, hooks RoutingHooks, response []schema.Message) error {
+	stream.EnsureMessageIDs(response)
+	// NameMessages 返回新视图；发布层（Snapshot/PublishSnapshots）各自
+	// 在订阅边界克隆，这里不预克隆。
+	emitted := response
 	if hooks.NameMessages != nil {
 		emitted = hooks.NameMessages(emitted)
 	}
-	callback.EmitStream(ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: emitted})
+	streamcompat.Snapshot(ctx, emitted)
+	return stream.PublishSnapshots(ctx, emitted)
 }
 
 func routedAgentNodeID(name string) string { return "agent:" + name }

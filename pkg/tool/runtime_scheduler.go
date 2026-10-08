@@ -68,7 +68,10 @@ func (s *scheduler) execute(
 	}
 	policy = policy.Normalize()
 	state := stateFromContext(ctx)
-	if err := detectDeadlock(state.heldGroups, policy.Group); err != nil {
+	// 死锁序只在本调度器的信号量域内成立：同一 Runtime 的调用链持有
+	// 组必须严格递增；跨 Runtime（嵌套 Graph 内的其他 ToolsNode）池子
+	// 独立，不构成等待环。
+	if err := detectDeadlock(state.heldFor(s), policy.Group); err != nil {
 		return Result{}, err
 	}
 	limiter, err := s.limiter(policy)
@@ -79,7 +82,7 @@ func (s *scheduler) execute(
 		return Result{}, err
 	}
 	defer release(limiter.semaphore)
-	return call(withHeldGroup(ctx, policy.Group))
+	return call(withHeldGroup(ctx, s, policy.Group))
 }
 
 func (s *scheduler) limiter(policy ConcurrencyPolicy) (*groupLimiter, error) {

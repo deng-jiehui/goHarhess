@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 // Spec describes a tool to models, authorization policies and the scheduler.
@@ -18,6 +17,10 @@ type Spec struct {
 	Description string
 	Parameters  map[string]any
 	FileAccess  bool
+	// NeedsMessages 声明工具需要读取会话历史：为 true 时 CallInput.Messages
+	// 注入调用时的历史视图，否则为 nil——历史包含 system prompt 与其他
+	// 工具输出，默认不暴露给工具，也省去逐调用拷贝历史的开销。
+	NeedsMessages bool
 	// IsReadOnly defaults to false so undeclared tools are treated as mutating.
 	IsReadOnly bool
 	// Concurrency's zero value serializes the tool with other undeclared tools.
@@ -62,12 +65,15 @@ func EmptyParameters() map[string]any {
 type CallInput struct {
 	RawArgs string
 	Args    map[string]any
-	// HTTPClient is populated by the internal runtime for every managed call.
-	// It shares the framework Transport unless the run context overrides it.
-	HTTPClient *http.Client
-	Messages   []schema.Message
-	Files      []string
-	Metadata   map[string]any
+	// Messages 仅当 Spec.NeedsMessages 为 true 时注入：会话历史的只读
+	// 视图，与同批其他声明了历史需求的调用共享底层内容。工具不得修改
+	// 其中的消息或内容块，否则会影响同批调用与调用方的历史视图。
+	Messages []schema.Message
+	Files    []string
+	Metadata map[string]any
+	// IdempotencyKey 是本次调用的稳定去重键：恢复重放同一调用时取值不变，
+	// 有副作用的工具可把它传给下游幂等接口防止重复执行。
+	IdempotencyKey string
 }
 
 // Result contains either model-facing content blocks or structured Data.
@@ -206,10 +212,10 @@ func ParseArgsStrict(raw string) (map[string]any, error) {
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, fmt.Errorf("decode tool arguments: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrMalformedArgs, err)
 	}
 	if args == nil {
-		return nil, errors.New("tool arguments must be a JSON object")
+		return nil, fmt.Errorf("%w: arguments must be a JSON object", ErrMalformedArgs)
 	}
 	return args, nil
 }

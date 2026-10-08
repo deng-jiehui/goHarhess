@@ -12,9 +12,9 @@ import (
 	"runtime"
 	"testing"
 
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type streamState struct {
@@ -190,12 +190,12 @@ func TestRecoveryArchitectureBoundaries(t *testing.T) {
 
 	assertPackageImportsNoProjectPackage(t, filepath.Join(root, "pkg", "control"))
 	for _, forbidden := range []string{
-		"goharness/pkg/agent",
-		"goharness/pkg/llm",
-		"goharness/pkg/retrieval",
-		"goharness/pkg/schema",
-		"goharness/pkg/tool",
-		"goharness/extensions/mcp",
+		"github.com/goharness/goharness/pkg/agent",
+		"github.com/goharness/goharness/pkg/llm",
+		"github.com/goharness/goharness/pkg/retrieval",
+		"github.com/goharness/goharness/pkg/schema",
+		"github.com/goharness/goharness/pkg/tool",
+		"github.com/goharness/goharness/extensions/mcp",
 	} {
 		assertPackageDoesNotImport(t, filepath.Join(root, "pkg", "graph"), forbidden)
 	}
@@ -213,7 +213,7 @@ func repositoryRoot(t *testing.T) string {
 func assertPackageImportsNoProjectPackage(t *testing.T, directory string) {
 	t.Helper()
 	assertImports(t, directory, func(path string) bool {
-		return len(path) >= len("goharness/") && path[:len("goharness/")] == "goharness/"
+		return len(path) >= len("github.com/goharness/goharness/") && path[:len("github.com/goharness/goharness/")] == "github.com/goharness/goharness/"
 	})
 }
 

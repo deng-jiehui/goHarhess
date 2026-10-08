@@ -230,13 +230,13 @@ func validateMedia(media *MediaContent) error {
 	return nil
 }
 
-func cloneContentBlocks(blocks []ContentBlock, strict bool, path string) ([]ContentBlock, error) {
+func cloneContentBlocks(blocks []ContentBlock, strict bool, path string, fallback CloneFallbackFunc) ([]ContentBlock, error) {
 	if blocks == nil {
 		return nil, nil
 	}
 	cloned := make([]ContentBlock, len(blocks))
 	for i, block := range blocks {
-		item, err := cloneContentBlock(block, strict, fmt.Sprintf("%s[%d]", path, i))
+		item, err := cloneContentBlock(block, strict, fmt.Sprintf("%s[%d]", path, i), fallback)
 		if err != nil {
 			return nil, err
 		}
@@ -245,44 +245,44 @@ func cloneContentBlocks(blocks []ContentBlock, strict bool, path string) ([]Cont
 	return cloned, nil
 }
 
-func cloneContentBlock(block ContentBlock, strict bool, path string) (ContentBlock, error) {
+func cloneContentBlock(block ContentBlock, strict bool, path string, fallback CloneFallbackFunc) (ContentBlock, error) {
 	cloned := ContentBlock{Type: block.Type}
 	var err error
 	if block.Text != nil {
 		payload := *block.Text
-		payload.Extra, err = cloneExtra(block.Text.Extra, strict, path+".text.extra")
+		payload.Extra, err = cloneExtra(block.Text.Extra, strict, path+".text.extra", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
 		cloned.Text = &payload
 	}
 	if block.Image != nil {
-		cloned.Image, err = cloneMediaContent(block.Image, strict, path+".image")
+		cloned.Image, err = cloneMediaContent(block.Image, strict, path+".image", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
 	}
 	if block.File != nil {
-		cloned.File, err = cloneMediaContent(block.File, strict, path+".file")
+		cloned.File, err = cloneMediaContent(block.File, strict, path+".file", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
 	}
 	if block.Audio != nil {
-		cloned.Audio, err = cloneMediaContent(block.Audio, strict, path+".audio")
+		cloned.Audio, err = cloneMediaContent(block.Audio, strict, path+".audio", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
 	}
 	if block.Video != nil {
-		cloned.Video, err = cloneMediaContent(block.Video, strict, path+".video")
+		cloned.Video, err = cloneMediaContent(block.Video, strict, path+".video", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
 	}
 	if block.Reasoning != nil {
 		payload := *block.Reasoning
-		payload.Extra, err = cloneExtra(block.Reasoning.Extra, strict, path+".reasoning.extra")
+		payload.Extra, err = cloneExtra(block.Reasoning.Extra, strict, path+".reasoning.extra", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
@@ -290,7 +290,7 @@ func cloneContentBlock(block ContentBlock, strict bool, path string) (ContentBlo
 	}
 	if block.FunctionToolCall != nil {
 		payload := *block.FunctionToolCall
-		payload.Extra, err = cloneExtra(block.FunctionToolCall.Extra, strict, path+".function_tool_call.extra")
+		payload.Extra, err = cloneExtra(block.FunctionToolCall.Extra, strict, path+".function_tool_call.extra", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
@@ -299,12 +299,12 @@ func cloneContentBlock(block ContentBlock, strict bool, path string) (ContentBlo
 	if block.FunctionToolResult != nil {
 		payload := *block.FunctionToolResult
 		payload.ContentBlocks, err = cloneContentBlocks(
-			block.FunctionToolResult.ContentBlocks, strict, path+".function_tool_result.content_blocks",
+			block.FunctionToolResult.ContentBlocks, strict, path+".function_tool_result.content_blocks", fallback,
 		)
 		if err != nil {
 			return ContentBlock{}, err
 		}
-		payload.Extra, err = cloneExtra(block.FunctionToolResult.Extra, strict, path+".function_tool_result.extra")
+		payload.Extra, err = cloneExtra(block.FunctionToolResult.Extra, strict, path+".function_tool_result.extra", fallback)
 		if err != nil {
 			return ContentBlock{}, err
 		}
@@ -318,10 +318,10 @@ func cloneContentBlock(block ContentBlock, strict bool, path string) (ContentBlo
 	return cloned, nil
 }
 
-func cloneMediaContent(media *MediaContent, strict bool, path string) (*MediaContent, error) {
+func cloneMediaContent(media *MediaContent, strict bool, path string, fallback CloneFallbackFunc) (*MediaContent, error) {
 	cloned := *media
 	cloned.Data = append(json.RawMessage(nil), media.Data...)
-	extra, err := cloneExtra(media.Extra, strict, path+".extra")
+	extra, err := cloneExtra(media.Extra, strict, path+".extra", fallback)
 	if err != nil {
 		return nil, err
 	}
@@ -329,13 +329,13 @@ func cloneMediaContent(media *MediaContent, strict bool, path string) (*MediaCon
 	return &cloned, nil
 }
 
-func cloneExtra(extra map[string]any, strict bool, path string) (map[string]any, error) {
+func cloneExtra(extra map[string]any, strict bool, path string, fallback CloneFallbackFunc) (map[string]any, error) {
 	if extra == nil {
 		return nil, nil
 	}
 	cloned := make(map[string]any, len(extra))
 	for key, value := range extra {
-		item, err := cloneAnyValue(value, strict, fmt.Sprintf("%s[%q]", path, key), 0)
+		item, err := cloneAnyValue(value, strict, fmt.Sprintf("%s[%q]", path, key), 0, fallback)
 		if err != nil {
 			return nil, err
 		}

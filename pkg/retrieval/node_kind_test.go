@@ -3,8 +3,8 @@ package retrieval_test
 import (
 	"testing"
 
-	"goharness/pkg/retrieval"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestRetrievalRunnablesDeclareRetrieverNodeKind(t *testing.T) {

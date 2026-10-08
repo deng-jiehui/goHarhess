@@ -18,11 +18,11 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/httpclient"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 type Transport string

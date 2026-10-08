@@ -9,7 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 const (
@@ -28,6 +30,10 @@ type RuntimeConfig struct {
 	MaxConcurrency int
 	MaxRetries     int
 	RetryBackoff   time.Duration
+	// MaxAbandoned 是单个工具未归还执行的熔断阈值：Execute 已超时返回但工具
+	// 仍未退出时计一次未归还，达到阈值后新调用直接拒绝，防止不响应 ctx 的
+	// 工具耗尽共享 worker 池。0 关闭熔断，上限为全局 worker 数。
+	MaxAbandoned int
 }
 
 func defaultRuntimeConfig() RuntimeConfig {
@@ -36,6 +42,7 @@ func defaultRuntimeConfig() RuntimeConfig {
 		Timeout:        30 * time.Second,
 		MaxConcurrency: 8,
 		RetryBackoff:   100 * time.Millisecond,
+		MaxAbandoned:   8,
 	}
 }
 
@@ -55,6 +62,9 @@ func validateRuntimeConfig(config RuntimeConfig) error {
 	if config.RetryBackoff < 0 || config.RetryBackoff > maxRetryBackoff {
 		return fmt.Errorf("tool runtime retry backoff must be between zero and %s: %s", maxRetryBackoff, config.RetryBackoff)
 	}
+	if config.MaxAbandoned < 0 || config.MaxAbandoned > maxRuntimeWorkers {
+		return fmt.Errorf("tool runtime max abandoned must be between 0 and %d: %d", maxRuntimeWorkers, config.MaxAbandoned)
+	}
 	return nil
 }
 
@@ -67,14 +77,16 @@ type middlewareEntry struct {
 type Binding struct {
 	value Tool
 	spec  Spec
+	// validator 是注册期预编译的参数 schema；nil 表示声明缺失校验规则。
+	validator *jsonschema.Resolved
 }
 
-// Spec returns the validated registration snapshot.
+// Spec returns a deep copy of the validated registration snapshot.
 func (b *Binding) Spec() Spec {
 	if b == nil {
 		return Spec{}
 	}
-	return b.spec
+	return cloneSpec(b.spec)
 }
 
 // Runtime is exported only inside Go's internal boundary for use by Agent.
@@ -83,6 +95,10 @@ type Runtime struct {
 	middlewares []middlewareEntry
 	workers     chan struct{}
 	config      RuntimeConfig
+	// abandoned 记录每个工具已放弃但尚未归还的执行数：Execute 因超时或取消
+	// 先返回时计数，后台 worker 真正退出时归还，计数回落自动解除熔断。
+	abandonedMu sync.Mutex
+	abandoned   map[string]int
 }
 
 // NewRuntime validates extensions and creates the guarded tool executor.
@@ -98,6 +114,7 @@ func NewRuntime(middlewares []Middleware, configs ...RuntimeConfig) (*Runtime, e
 		scheduler: newScheduler(),
 		workers:   make(chan struct{}, maxRuntimeWorkers),
 		config:    config,
+		abandoned: map[string]int{},
 	}
 	for index, middleware := range middlewares {
 		if middleware == nil {
@@ -127,13 +144,20 @@ func (r *Runtime) Register(value Tool) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 深拷贝为注册快照：后续声明校验、schema 编译和导出的模型定义
+	// 都作用在这份快照上，调用方再改原参数表不会影响已注册工具。
+	spec = cloneSpec(spec)
 	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	validator, err := compileParamsSchema(spec)
+	if err != nil {
 		return nil, err
 	}
 	if err := r.scheduler.register(spec.Concurrency); err != nil {
 		return nil, err
 	}
-	return &Binding{value: value, spec: spec}, nil
+	return &Binding{value: value, spec: spec, validator: validator}, nil
 }
 
 // NewScope creates the fixed Promise.all resource pool for one tool batch.
@@ -174,28 +198,32 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	plan, err := runnable.NewOptionPlan(options...)
+	// 解析属于执行限制的选项；其余选项继续透传给中间件与工具本体。
+	limits, remaining, err := runnable.ResolveComponentOptions(ExecutionLimits{}, options...)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve tool options: %w", err)
 	}
-	nodeOptions := plan.ForwardOptionsFor(runnable.OptionScopeNode)
-	nodePlan, err := runnable.NewOptionPlan(nodeOptions...)
-	if err != nil {
-		return Result{}, fmt.Errorf("isolate tool options: %w", err)
-	}
-	ctx = runnable.WithOptionPlan(ctx, nodePlan)
-	options = nodePlan.ForwardOptionsFor(runnable.OptionScopeNode)
-	requested := nodeExecutionOptionsFromPlan(nodePlan)
+	options = remaining
 	timeout := s.defaultTimeout
 	contextLimits := executionLimitsFromContext(ctx)
 	if contextLimits.Timeout > 0 && contextLimits.Timeout < timeout {
 		timeout = contextLimits.Timeout
 	}
-	if requested.Timeout > 0 && requested.Timeout < timeout {
-		timeout = requested.Timeout
+	if limits.Timeout > 0 && limits.Timeout < timeout {
+		timeout = limits.Timeout
 	}
 	if binding == nil || binding.value == nil {
 		return Result{}, errors.New("tool binding is not configured")
+	}
+	// 熔断：该工具未归还的执行达到阈值时直接拒绝，不再占用新的 worker。
+	if threshold := s.runtime.config.MaxAbandoned; threshold > 0 {
+		if count := s.runtime.abandonedCount(binding.spec.Name); count >= threshold {
+			return Result{}, &UnavailableError{ToolName: binding.spec.Name, Abandoned: count, Threshold: threshold}
+		}
+	}
+	// 按注册期编译的 schema 校验参数：先于中间件与工具本体，不占用 worker 槽位。
+	if err := binding.validateArgs(input.Args); err != nil {
+		return Result{}, err
 	}
 	httpOptions, configured := HTTPOptionsFromContext(ctx)
 	if !configured {
@@ -204,23 +232,96 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 	ctx = WithHTTPOptions(ctx, httpOptions)
 	control, cancel := context.WithTimeout(ctx, effectiveTimeout(timeout))
 	defer cancel()
-	input.HTTPClient = HTTPClient(control)
 	if err := acquire(control, s.runtime.workers); err != nil {
 		return Result{}, err
 	}
 
+	// 放弃告警引用的是执行前制备的输入快照：工具与中间件可能在后台继续
+	// 修改 Args、Metadata 等可变载荷，超时后再克隆会与它们并发读写。
+	// 没有回调管理者时告警无人接收，不制备快照。
+	var alertInput CallInput
+	hasObserver := false
+	if _, ok := callback.ManagerFromContext(ctx); ok {
+		alertInput = cloneCallInput(input)
+		hasObserver = true
+	}
+
+	// track 串行化「执行完成」与「登记放弃」的判定：后台 worker 完成时在同一
+	// 临界区确认是否已登记，未登记则不归还；取消路径在同一临界区确认执行尚
+	// 未完成才登记。每次执行最多登记一次、归还一次。
+	var track struct {
+		mu        sync.Mutex
+		finished  bool
+		abandoned bool
+	}
 	completed := make(chan executionResult, 1)
 	go func() {
 		defer release(s.runtime.workers)
 		result, err := s.runtime.invoke(control, s.semaphore, binding, input, options)
+		track.mu.Lock()
+		track.finished = true
+		wasAbandoned := track.abandoned
 		completed <- executionResult{result: result, err: err}
+		track.mu.Unlock()
+		if wasAbandoned {
+			s.runtime.settleAbandoned(binding.spec.Name)
+		}
 	}()
 	select {
 	case <-control.Done():
+		track.mu.Lock()
+		if track.finished {
+			track.mu.Unlock()
+			res := <-completed
+			return res.result, res.err
+		}
+		track.abandoned = true
+		count := s.runtime.markAbandoned(binding.spec.Name)
+		track.mu.Unlock()
+		if hasObserver {
+			s.runtime.alertAbandoned(ctx, binding.spec, alertInput, count, control.Err())
+		}
 		return Result{}, control.Err()
 	case completed := <-completed:
 		return completed.result, completed.err
 	}
+}
+
+// abandonedCount 返回该工具当前未归还的执行数。
+func (r *Runtime) abandonedCount(name string) int {
+	r.abandonedMu.Lock()
+	defer r.abandonedMu.Unlock()
+	return r.abandoned[name]
+}
+
+func (r *Runtime) markAbandoned(name string) int {
+	r.abandonedMu.Lock()
+	defer r.abandonedMu.Unlock()
+	r.abandoned[name]++
+	return r.abandoned[name]
+}
+
+func (r *Runtime) settleAbandoned(name string) {
+	r.abandonedMu.Lock()
+	defer r.abandonedMu.Unlock()
+	if r.abandoned[name] <= 1 {
+		delete(r.abandoned, name)
+		return
+	}
+	r.abandoned[name]--
+}
+
+// alertAbandoned 把放弃事件报告给工具级观察者：载荷携带该工具当前的
+// 未归还数与熔断阈值。调用方 ctx 可能已取消，告警仍在原调用上下文派发。
+func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput, count int, cause error) {
+	metadata := callback.CloneMetadata(input.Metadata)
+	metadata["tool.read_only"] = spec.IsReadOnly
+	metadata["tool.file_access"] = spec.FileAccess
+	alertCtx, invocation := callback.Begin(ctx, "tool", spec.Name, metadata)
+	alert := &AbandonedError{ToolName: spec.Name, Abandoned: count, Threshold: r.config.MaxAbandoned, Err: cause}
+	_ = callback.Dispatch[Callback](alertCtx, invocation.WithPhase(callback.PhaseError), func(ctx context.Context, handler Callback) error {
+		return handler.OnToolError(ctx, cloneSpecForCallback(spec), cloneCallInput(input), alert)
+	})
 }
 
 func effectiveTimeout(configured time.Duration) time.Duration {
@@ -255,7 +356,18 @@ func (r *Runtime) invoke(
 	ctx, invocation := BeginCallback(ctx, spec, input)
 	defer func() { EndCallback(ctx, invocation, spec, input, result, err) }()
 	defer recoverPanic("user extension zone", &result, &err)
-	return r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
+	result, err = r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
+	if err != nil {
+		return result, err
+	}
+	// 结果转 ContentBlocks 属同一次调用的收尾：转换失败按调用失败处理，
+	// 走错误回调，EndCallback 不会先报成功再补报失败。
+	blocks, convErr := result.ToContentBlocks()
+	if convErr != nil {
+		return Result{}, fmt.Errorf("convert tool %q result: %w", spec.Name, convErr)
+	}
+	result.ContentBlocks = blocks
+	return result, nil
 }
 
 func (r *Runtime) invokeMiddleware(
@@ -410,7 +522,6 @@ func (r *Runtime) invokeToolAttempt(
 	defer cleanup()
 	defer recoverPanic(fmt.Sprintf("tool %q", spec.Name), &result, &err)
 	return r.scheduler.execute(boundCtx, spec.Concurrency, func(callCtx context.Context) (Result, error) {
-		input.HTTPClient = HTTPClient(callCtx)
 		return value.Invoke(callCtx, input, options...)
 	})
 }

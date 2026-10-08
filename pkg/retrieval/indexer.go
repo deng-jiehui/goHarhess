@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 const (

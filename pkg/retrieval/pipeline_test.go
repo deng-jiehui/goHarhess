@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/retrieval"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestHybridSearcherDispatchesLifecycleCallbacksWithoutChangingResults(t *testing.T) {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"goharness/internal/agentrecipe"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/agentrecipe"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type BasicAgent struct {
@@ -40,8 +40,14 @@ func NewBasicAgent(cfg BaseConfig, opts ...Option) (*BasicAgent, error) {
 	return a, nil
 }
 
-func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
-	runOpts := resolveRunOptions(a.limits, opts...)
+func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	runOpts, err := resolveRunOptions(a.limits, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.dispatchRunOptions(&runOpts); err != nil {
+		return nil, err
+	}
 	runOpts.agentKind = AgentKindBasic
 	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
 	if err != nil {
@@ -53,20 +59,16 @@ func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, opts
 	if err != nil {
 		return nil, err
 	}
-	lifecycle.session = session
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
 	runCtx = a.bindModelStream(runCtx)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
-	runCtx = withRecipeCompletion(runCtx, session)
-	runCtx = agentrecipe.WithRunConfig(runCtx, agentrecipe.RunConfig{
-		MaxLLMCalls: 1, Input: conversationInput(session, messages),
-	})
+	recipeConfig := recipeRunConfig(session, messages, 1)
 	var dataStream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
-		dataStream, err = a.recipe.ResumeStream(runCtx, graphNodeOptions(runOpts)...)
+		dataStream, err = a.recipe.ResumeStream(runCtx, recipeConfig, runOpts.forwarded...)
 	} else {
-		dataStream, err = a.recipe.Stream(runCtx, prepared, graphNodeOptions(runOpts)...)
+		dataStream, err = a.recipe.Stream(runCtx, prepared, recipeConfig, runOpts.forwarded...)
 	}
 	if err != nil {
 		lifecycle.fail(err)

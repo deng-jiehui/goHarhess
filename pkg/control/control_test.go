@@ -1,12 +1,11 @@
 package control_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
 
-	"goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/control"
 )
 
 func TestInterruptRequestSurvivesWrappingAndClonesMetadata(t *testing.T) {
@@ -49,33 +48,5 @@ func TestAsInterruptRejectsOrdinaryErrors(t *testing.T) {
 	request, ok := control.AsInterrupt(errors.New("ordinary"))
 	if ok || request.Reason != "" || request.Metadata != nil {
 		t.Fatalf("request=%#v ok=%t", request, ok)
-	}
-}
-
-type memoryStore struct{ data map[string][]byte }
-
-func (s *memoryStore) Save(_ context.Context, key string, data []byte) error {
-	if s.data == nil {
-		s.data = map[string][]byte{}
-	}
-	s.data[key] = append([]byte(nil), data...)
-	return nil
-}
-
-func (s *memoryStore) Load(_ context.Context, key string) ([]byte, bool, error) {
-	data, ok := s.data[key]
-	return append([]byte(nil), data...), ok, nil
-}
-
-func TestCheckpointStoreContractOwnsBytes(t *testing.T) {
-	var store control.CheckpointStore = &memoryStore{}
-	source := []byte("checkpoint")
-	if err := store.Save(context.Background(), "run", source); err != nil {
-		t.Fatal(err)
-	}
-	source[0] = 'X'
-	loaded, found, err := store.Load(context.Background(), "run")
-	if err != nil || !found || string(loaded) != "checkpoint" {
-		t.Fatalf("loaded=%q found=%t err=%v", loaded, found, err)
 	}
 }

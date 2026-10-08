@@ -15,12 +15,12 @@ Context Engine
   provider-neutral LLM payload
 ```
 
-`pkg/state` 只负责完整会话状态，不负责决定本次模型窗口保留哪些消息；`pkg/contextengine` 只负责生成一次 LLM 请求，不修改持久化的完整历史。
+`pkg/state` 统一保存完整会话与执行进度，不负责决定本次模型窗口保留哪些消息；`pkg/contextengine` 只负责生成一次 LLM 请求，不修改持久化的完整历史。
 
 ## Checkpoint Store
 
-核心模块只依赖 `state.Store`。Redis 持久化由可选的 `goharness/extensions` 模块提供；需要时以
-`redisstore "goharness/extensions/state/redis"` 导入。
+核心模块只依赖 `state.Store`。Redis 持久化由可选的 `github.com/goharness/goharness/extensions` 模块提供；需要时以
+`redisstore "github.com/goharness/github.com/goharness/goharness/extensions/state/redis"` 导入。
 
 内存 Store 适合单进程应用和测试：
 
@@ -48,32 +48,15 @@ checkpoint.Messages = append(checkpoint.Messages, newMessages...)
 saved, err := store.Save(ctx, checkpoint)
 ```
 
-所有 Store 都会克隆消息与 Values，调用方修改返回值不会污染已保存状态。
+所有 Store 都会克隆消息、Values 和执行数据，调用方修改返回值不会污染已保存状态。`Load` 读取最新记录，`Get` 读取指定检查点，`List` 按新到旧分页，`Delete` 删除会话及其全部历史。每次 `Save` 都增加版本，因此版本不再表示对话轮数。详细契约见 [统一检查点](checkpoints.md)。
 
 ## Graph Interrupt 与 Resume
 
-会话历史与执行恢复是两个独立契约：
+会话历史和执行进度共用 `state.Store`，按同一个会话 ID 保存。检查点包含完整消息、Values、运行 ID、执行 State、恢复位置、状态与最终结果，并通过 ID 和 ParentID 串起历史。Graph 的具体执行数据仍由 `pkg/graph` 编解码，存储层只保留 JSON，不保存 goroutine、context、client 或函数。
 
-| 用途 | 接口 | key | 内容 |
-| --- | --- | --- | --- |
-| 跨轮会话 | `state.Store` | `conversation_id` | 已完成消息、Values、乐观版本 |
-| 执行恢复 | `control.CheckpointStore` | 应用自定义 run key | Graph Continuation 字节 |
+配置持久化后，初始入口、节点完成、人工中断和运行结束均会同步保存。普通取消、超时或错误不产生新的中断记录，但仍可从最近成功保存的位置恢复。新的节点只有在上一边界保存成功后才启动。
 
-`state.Checkpoint` 不包含执行状态、status 或 continuation。Graph Continuation 保存 State
-快照、下一节点、步骤/访问计数、cursor、Graph revision 和中断元数据；不保存 goroutine、
-`context.Context`、HTTP/Redis client、Callback、模型、API Key 或函数。
-
-执行 Store 只需实现两个字节方法：
-
-```go
-type CheckpointStore interface {
-    Save(ctx context.Context, key string, data []byte) error
-    Load(ctx context.Context, key string) ([]byte, bool, error)
-}
-```
-
-外部暂停由应用持有取消权。只有 typed `control.InterruptRequest` 会请求持久化；普通
-`context.Canceled` 和 deadline 只结束运行，不会生成 Continuation：
+外部暂停由应用持有取消权：
 
 ```go
 runCtx, cancel := context.WithCancelCause(ctx)
@@ -85,11 +68,11 @@ go func() {
 }()
 
 output, err := assistant.Invoke(runCtx, input,
-    agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+    agent.WithCheckpoint(store, "tenant-a:task-42"),
 )
 if errors.Is(err, graph.ErrInterrupted) {
     output, err = agent.Resume(context.Background(), assistant,
-        agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+        agent.WithCheckpoint(store, "tenant-a:task-42"),
     )
 }
 ```
@@ -105,8 +88,7 @@ Graph 只在成功保存后返回可由 `errors.Is(err, graph.ErrInterrupted)` �
 或 API Key 可以变化；Graph revision 或 Codec 不兼容会在任何用户节点运行前被拒绝。
 
 恢复语义是 at-least-once。中断时正在运行的节点、以及并行节点的全部分支可能重新执行；
-有副作用的节点和 Tool 必须由应用保证幂等。框架不提供 Lease、Redis 锁、fencing、CAS
-消费或 exactly-once。多副本应用应在 Gateway、任务队列或数据库事务中自行串行化同一 key
+有副作用的节点和 Tool 必须由应用保证幂等。存储用版本与检查点 ID 防止并发覆盖，但这不是执行锁，也不能撤销已经发出的工具调用。框架不提供 Lease 或 exactly-once。多副本应用应在 Gateway、任务队列或数据库事务中自行串行化同一会话
 的 Resume，例如在进入框架前使用 Redis SETNX。
 
 ## Context Engine

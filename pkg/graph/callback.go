@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type ResumeMode string

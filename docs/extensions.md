@@ -12,8 +12,8 @@ Agent 和 RAG 管道：
 
 ```go
 import (
-    llmcache "goharness/extensions/cache/llm"
-    retrievalcache "goharness/extensions/cache/retrieval"
+    llmcache "github.com/goharness/goharness/extensions/cache/llm"
+    retrievalcache "github.com/goharness/goharness/extensions/cache/retrieval"
 )
 
 cachedModel, err := llmcache.NewCachedModel(model, llmcache.CacheConfig{
@@ -36,7 +36,7 @@ cachedStore, err := retrievalcache.NewCachedVectorStore(vectorStore,
 Redis Checkpoint 持久化同样是可选适配器：
 
 ```go
-import redisstore "goharness/extensions/state/redis"
+import redisstore "github.com/goharness/goharness/extensions/state/redis"
 
 store, err := redisstore.NewRedisStore(redisstore.RedisStoreConfig{
     Client: redisClient,

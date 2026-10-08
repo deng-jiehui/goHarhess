@@ -3,8 +3,8 @@ package tool
 import (
 	"context"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type Callback interface {

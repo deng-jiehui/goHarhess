@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/graph"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestAgentRecipesKeepControlStateOutOfGraphValues(t *testing.T) {

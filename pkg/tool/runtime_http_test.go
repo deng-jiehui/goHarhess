@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/httpclient"
 )
 
-func TestRuntimeInjectsPooledHTTPClientIntoEveryToolCall(t *testing.T) {
+func TestRuntimeResolvesPooledHTTPClientFromToolContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = writer.Write([]byte("ok"))
 	}))
@@ -30,13 +30,11 @@ func TestRuntimeInjectsPooledHTTPClientIntoEveryToolCall(t *testing.T) {
 	ctx := WithHTTPOptions(context.Background(), HTTPOptions{Pool: pool, Timeout: time.Second})
 	runtime := mustRuntime(t, nil)
 	value := NewFunctionTool(Spec{Name: "http", IsReadOnly: true}, func(ctx context.Context, input CallInput) (Result, error) {
-		if input.HTTPClient == nil {
-			t.Fatal("runtime did not populate CallInput.HTTPClient")
+		client := HTTPClient(ctx)
+		if client == nil {
+			t.Fatal("HTTPClient(ctx) returned nil inside a managed call")
 		}
-		if input.HTTPClient != HTTPClient(ctx) {
-			t.Fatal("CallInput and context resolved different clients")
-		}
-		response, err := input.HTTPClient.Get(server.URL)
+		response, err := client.Get(server.URL)
 		if err != nil {
 			return Result{}, err
 		}

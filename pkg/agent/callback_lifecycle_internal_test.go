@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func lifecycleStream(t *testing.T, values []schema.Message, terminal error) *runnable.StreamReader[[]schema.Message] {

@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type typedState struct {
@@ -129,7 +130,8 @@ func TestResumeRequiresStatePreHandler(t *testing.T) {
 	}
 	ctx := graph.WithCursorStack(context.Background(), graph.CursorStack{{Graph: "resume-mismatch", Node: "second", Step: 1}})
 	_, err := mustCompile(t, g).Invoke(ctx, "hello")
-	if err == nil || !strings.Contains(err.Error(), "graph.resume.type_mismatch") {
+	// 无 Pre 且无持久化输入的节点仍不能作为恢复点。
+	if err == nil || !strings.Contains(err.Error(), "graph.resume.input") {
 		t.Fatalf("Invoke error=%v", err)
 	}
 }
@@ -155,28 +157,44 @@ func TestStateBranchLoopUsesPointerState(t *testing.T) {
 	}
 }
 
-func TestGraphForwardsOnlyNodeOptionsAndKeepsCompiledSnapshot(t *testing.T) {
+type nodeRunConfig struct{ Mode string }
+
+// 组件选项按类型定向分发；元数据选项进入执行 ctx 的回调元数据；
+// 绑定选项只流向所属节点。
+func TestGraphDispatchesOptionsByTargetAndKeepsCompiledSnapshot(t *testing.T) {
 	applications := 0
-	global := runnable.GlobalOption(runnable.WithMetadata("tenant", "global"))
-	nodeOption := runnable.NodeOption(runnable.OptionFunc(func(set *runnable.OptionSet) { applications++; set.Metadata["mode"] = "parent" }))
-	var observed runnable.OptionSet
+	targeted := runnable.ForNode("node", runnable.WrapOption(func(c *nodeRunConfig) { applications++; c.Mode = "parent" }))
+	var observed nodeRunConfig
+	var metadata map[string]any
 	g := graph.NewGraph[string, string]("options")
-	node := runnable.Func[string, string](func(_ context.Context, value string, opts ...runnable.Option) (string, error) {
-		var err error
-		observed, err = runnable.ResolveOptions(opts...)
-		return value, err
+	node := runnable.Func[string, string](func(ctx context.Context, value string, opts ...runnable.Option) (string, error) {
+		resolved, remaining, err := runnable.ResolveComponentOptions(nodeRunConfig{}, opts...)
+		if err != nil {
+			return "", err
+		}
+		if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+			return "", err
+		}
+		observed = resolved
+		metadata = callback.MetadataFromContext(ctx)
+		return value, nil
 	})
-	if err := g.AddNode("node", node, graph.WithNodeOptions(runnable.WithMetadata("mode", "local"))); err != nil {
+	if err := g.AddNode("node", node); err != nil {
 		t.Fatal(err)
 	}
 	_ = g.AddEdge(graph.Start, "node")
 	_ = g.AddEdge("node", graph.End)
 	compiled := mustCompile(t, g)
-	if _, err := compiled.Invoke(context.Background(), "ok", global, nodeOption); err != nil {
+	// 追踪元数据经 ctx 传入，沿调用链继承到节点作用域。
+	runCtx := callback.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
+	if _, err := compiled.Invoke(runCtx, "ok", targeted); err != nil {
 		t.Fatal(err)
 	}
-	if applications != 1 || observed.Metadata["tenant"] != nil || observed.Metadata["mode"] != "local" {
-		t.Fatalf("applications=%d options=%#v", applications, observed)
+	if applications != 1 || observed.Mode != "parent" {
+		t.Fatalf("applications=%d config=%#v", applications, observed)
+	}
+	if metadata["tenant"] != "global" {
+		t.Fatalf("metadata=%#v", metadata)
 	}
 	if err := g.AddNode("late", node); err != nil {
 		t.Fatalf("late AddNode error=%v", err)

@@ -1,5 +1,7 @@
 # goHarness
 
+统一消费消息增量、查询进度和最终结果：[公共运行事件流](docs/public-stream.md)。本地示例：`go run ./examples/stream`。
+
 goHarness 是一个以强类型 Graph 为核心的 Go Agent 编排框架。开发者可以把 ChatModel、
 ToolNode、MCP、Retriever 等 Runnable 节点快速组装成 Agent；标准场景也可直接使用
 Basic、ReAct、Routing 和 GroupChat 预置图配方。
@@ -14,7 +16,7 @@ Basic、ReAct、Routing 和 GroupChat 预置图配方。
 - 本地 Tool、独立 ToolsNode、MCP 动态工具发现与统一函数调用消息协议
 - 工具参数校验、并发调度、Middleware、身份信息和托管 HTTP 客户端
 - Token 裁切、Prompt Cache 对齐和上下文构建
-- Graph Continuation、整批工具审批和独立的会话历史持久化
+- 统一检查点、逐节点恢复、历史查询和整批工具审批
 - 分块、批量索引、混合检索和重排
 - Callback 生命周期和运行时错误隔离
 
@@ -91,22 +93,23 @@ toolResult := schema.NewMessage(schema.RoleTool,
 `CacheReadTokens` 和 `CacheWriteTokens`（另含 `Extra`）。
 `Opaque`/`NewOpaqueBlock` 用于保留 Provider 专属 JSON。任何访问器都不会隐式展平或重排内容。
 
-需要暂停/审批后释放执行栈时，为本次运行提供独立的执行 Checkpoint key。只有 typed
-`control.InterruptRequest` 会落盘，恢复使用相同 key：
+为运行配置统一 `state.Store` 和会话 ID 后，框架会在初始入口、节点完成、中断和结束时同步保存。
+普通失败可从最近保存的进度恢复，人工中断还会保存交互信息；恢复使用相同 ID：
 
 ```go
 messages, err = assistant.Invoke(ctx, input,
-    agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+    agent.WithCheckpoint(store, "tenant-a:task-42"),
 )
 if errors.Is(err, graph.ErrInterrupted) {
     messages, err = agent.Resume(context.Background(), assistant,
-        agent.WithCheckpoint(executionStore, "tenant-a:task-42"),
+        agent.WithCheckpoint(store, "tenant-a:task-42"),
     )
 }
 ```
 
 恢复是 at-least-once。框架不提供 Lease 或分布式锁；多副本应用在进入 Resume 前自行
-串行化同一 key。
+串行化同一会话。完成后的 Resume 直接读取已保存结果，不再重跑节点。
+使用方式与旧格式边界见 [统一检查点](docs/checkpoints.md)。
 
 需要审批、检索分支、并行任务或领域状态时，使用 `graph.NewGraph[I, O]` 直接组合
 ChatModelNode、ToolsNode、MCP 节点或其他 Runnable。Provider 模型通过
@@ -126,7 +129,7 @@ ChatModelNode、ToolsNode、MCP 节点或其他 Runnable。Provider 模型通过
 | `pkg/tool` | 工具接口、公开 Runtime、Middleware、并发策略和 ToolsNode |
 | `pkg/callback` | Context 注册、同步生命周期分发和实时 EventStream |
 | `pkg/contextengine` | Token 预算、上下文裁切和 Prompt Cache 对齐 |
-| `pkg/control` | typed 挂起请求与最小字节 CheckpointStore 契约 |
+| `pkg/control` | typed 挂起请求与人工交互协议 |
 | `pkg/state` | 会话历史 Checkpoint 和乐观版本控制 |
 | `pkg/retrieval` | 分块、索引、检索和重排 |
 | `extensions` | Cache、Redis、MCP 等可选实现，单独维护 Go module |

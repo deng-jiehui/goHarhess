@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 // CompiledGraph is an immutable, concurrently reusable Graph execution
@@ -27,6 +27,18 @@ func (g *CompiledGraph[I, O]) Description() string {
 	}
 	return g.runtime.Description()
 }
+
+// Recoverable 报告图是否具备开启持久化时恢复所需的契约；不具备时返回原因。
+// 受管子任务的构建方在登记前据此拒绝无法恢复的自建图，而不是等任务挂起后
+// 才发现无法重建。
+func (g *CompiledGraph[I, O]) Recoverable() error {
+	if g == nil || g.runtime == nil {
+		return errors.New("compiled graph is nil")
+	}
+	_, err := g.runtime.recoveryMetadata()
+	return err
+}
+
 func (g *CompiledGraph[I, O]) Snapshot() Snapshot {
 	if g == nil || g.runtime == nil {
 		return Snapshot{}
@@ -82,33 +94,7 @@ func (g *CompiledGraph[I, O]) ResumeStream(ctx context.Context, options ...runna
 	if g == nil || g.runtime == nil {
 		return nil, errors.New("compiled graph is nil")
 	}
-	if ctx == nil {
-		return nil, errors.New("graph context cannot be nil")
-	}
-	reader, writer := runnable.Pipe[O](context.WithoutCancel(ctx))
-	go func() {
-		executionCtx, cancel := context.WithCancelCause(ctx)
-		defer cancel(nil)
-		done := make(chan struct{})
-		go func() {
-			select {
-			case <-reader.Context().Done():
-				cancel(reader.Context().Err())
-			case <-done:
-			}
-		}()
-		defer close(done)
-		output, err := g.runtime.resumeRuntime(executionCtx, options...)
-		if err != nil {
-			_ = writer.CloseWithError(err)
-			return
-		}
-		if err := writer.Send(output); err != nil {
-			return
-		}
-		_ = writer.Close()
-	}()
-	return reader, nil
+	return g.runtime.resumeStreamRuntime(ctx, options...)
 }
 
 func (*CompiledGraph[I, O]) graphComponent() {}

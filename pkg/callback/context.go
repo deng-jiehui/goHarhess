@@ -80,6 +80,22 @@ func WithMetadata(ctx context.Context, metadata map[string]any) context.Context 
 	return context.WithValue(ctx, metadataContextKey{}, merged)
 }
 
+// WithoutMetadata 删除指定的元数据键，返回新的派生上下文；删除不存在的键
+// 为无操作。父调用与其他分支的上下文不受影响。
+func WithoutMetadata(ctx context.Context, keys ...string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(keys) == 0 {
+		return ctx
+	}
+	merged := MetadataFromContext(ctx)
+	for _, key := range keys {
+		delete(merged, key)
+	}
+	return context.WithValue(ctx, metadataContextKey{}, merged)
+}
+
 // MetadataFromContext returns an independent metadata snapshot.
 func MetadataFromContext(ctx context.Context) map[string]any {
 	if ctx == nil {

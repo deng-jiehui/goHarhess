@@ -5,9 +5,13 @@ import (
 	"time"
 )
 
+// executionState 的 held 按调度器分域：持有组序只约束共享同一信号量池的
+// 调用（同一 Runtime 的 Scope.Execute 链）。嵌套 Graph / 其他 Runtime 的
+// ToolsNode 拥有独立 worker 池，不产生等待环，不参与本域的组序检查。
+// MaxDepth 保持全局计数，跨 runtime 的嵌套调用仍受总深度限制。
 type executionState struct {
-	depth      int
-	heldGroups []string
+	depth int
+	held  map[*scheduler][]string
 }
 
 type executionStateKey struct{}
@@ -17,8 +21,15 @@ func stateFromContext(ctx context.Context) executionState {
 		return executionState{}
 	}
 	state, _ := ctx.Value(executionStateKey{}).(executionState)
-	state.heldGroups = append([]string(nil), state.heldGroups...)
 	return state
+}
+
+// heldFor 返回当前状态下指定调度器的持有组。
+func (s executionState) heldFor(owner *scheduler) []string {
+	if len(s.held) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.held[owner]...)
 }
 
 type controlledContext struct {
@@ -50,9 +61,7 @@ func (c *controlledContext) Err() error {
 
 func (c *controlledContext) Value(key any) any {
 	if _, ok := key.(executionStateKey); ok {
-		state := c.state
-		state.heldGroups = append([]string(nil), state.heldGroups...)
-		return state
+		return c.state
 	}
 	if value := c.values.Value(key); value != nil {
 		return value
@@ -73,8 +82,15 @@ func bindContext(control context.Context, values context.Context, state executio
 	return bound, cleanup
 }
 
-func withHeldGroup(ctx context.Context, group string) context.Context {
+// withHeldGroup 记录本次调用持有的组：写时复制 held map，兄弟调用互不
+// 可见，同链路的下游调用能看到完整持有序。
+func withHeldGroup(ctx context.Context, owner *scheduler, group string) context.Context {
 	state := stateFromContext(ctx)
-	state.heldGroups = append(state.heldGroups, group)
+	held := make(map[*scheduler][]string, len(state.held)+1)
+	for k, v := range state.held {
+		held[k] = v
+	}
+	held[owner] = append(append([]string(nil), held[owner]...), group)
+	state.held = held
 	return context.WithValue(ctx, executionStateKey{}, state)
 }

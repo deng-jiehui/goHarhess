@@ -2,14 +2,17 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
-type Handler func(ctx context.Context, messages []schema.Message, opts ChatOptions) ([]schema.Message, error)
+// Handler 是测试模型的响应回调：收到业务 Request 与本次调用解析后的
+// llm.Options；其余调用选项不会进入测试处理器。
+type Handler func(ctx context.Context, request Request, opts Options) ([]schema.Message, error)
 
 type ScriptedModel struct {
 	mu        sync.Mutex
@@ -25,8 +28,15 @@ func NewHandlerModel(handler Handler) *ScriptedModel {
 	return &ScriptedModel{handler: handler}
 }
 
-func (m *ScriptedModel) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Response, error) {
-	messages, err := m.nextResponse(ctx, request.Messages, request.Options)
+func (m *ScriptedModel) Invoke(ctx context.Context, request Request, options ...runnable.Option) (Response, error) {
+	resolved, remaining, err := resolveModelOptions(options)
+	if err != nil {
+		return Response{}, fmt.Errorf("resolve model options: %w", err)
+	}
+	if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+		return Response{}, fmt.Errorf("resolve model options: %w", err)
+	}
+	messages, err := m.nextResponse(ctx, request, resolved)
 	if err != nil {
 		return Response{}, err
 	}
@@ -35,8 +45,8 @@ func (m *ScriptedModel) Invoke(ctx context.Context, request Request, _ ...runnab
 
 var _ ChatModel = (*ScriptedModel)(nil)
 
-func (m *ScriptedModel) Stream(ctx context.Context, request Request, _ ...runnable.Option) (*runnable.StreamReader[Response], error) {
-	response, err := m.Invoke(ctx, request)
+func (m *ScriptedModel) Stream(ctx context.Context, request Request, options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	response, err := m.Invoke(ctx, request, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -74,12 +84,12 @@ func (m *ScriptedModel) ModelInfo() ModelInfo {
 	return ModelInfo{Name: "scripted", Provider: "test", ModelType: "scripted"}
 }
 
-func (m *ScriptedModel) nextResponse(ctx context.Context, messages []schema.Message, opts ChatOptions) ([]schema.Message, error) {
+func (m *ScriptedModel) nextResponse(ctx context.Context, request Request, opts Options) ([]schema.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.handler != nil {
-		return m.handler(ctx, schema.CloneMessages(messages), opts)
+		return m.handler(ctx, request.Clone(), opts)
 	}
 	if len(m.responses) > 0 {
 		response := m.responses[0]
@@ -87,8 +97,8 @@ func (m *ScriptedModel) nextResponse(ctx context.Context, messages []schema.Mess
 		return schema.CloneMessages(response), nil
 	}
 
-	if len(messages) == 0 {
+	if len(request.Messages) == 0 {
 		return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock(""))}, nil
 	}
-	return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock(messages[len(messages)-1].JoinedText("")))}, nil
+	return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewTextBlock(request.Messages[len(request.Messages)-1].JoinedText("")))}, nil
 }

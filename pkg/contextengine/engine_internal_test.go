@@ -3,7 +3,7 @@ package contextengine
 import (
 	"testing"
 
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestTruncateBlocksPreservesNilAndEmptySlices(t *testing.T) {

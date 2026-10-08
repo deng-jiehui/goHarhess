@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestAgentStreamPublishesLiveOutputBeforeFinalResultIsConsumed(t *testing.T) {
@@ -70,11 +70,15 @@ func (m *burstModel) Invoke(ctx context.Context, request llm.Request, options ..
 	return stream.Collect(ctx)
 }
 
-func (m *burstModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+func (m *burstModel) Stream(ctx context.Context, request llm.Request, options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	resolved, _, err := runnable.ResolveComponentOptions(llm.Options{}, options...)
+	if err != nil {
+		return nil, err
+	}
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
 		defer close(m.produced)
-		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
+		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
 		for index := range 8 {
 			messages, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.AssistantMessage(fmt.Sprint(index))}})
 			if err != nil {

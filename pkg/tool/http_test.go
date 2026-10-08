@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/httpclient"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestNewHTTPServiceUsesToolContextPoolAndTimeout(t *testing.T) {

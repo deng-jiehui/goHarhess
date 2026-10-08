@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestMessageContentBlocksRoundTripInOrder(t *testing.T) {

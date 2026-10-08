@@ -47,10 +47,10 @@ HTTP 适配器应使用 `httpclient.NewService` 或 `httpclient.NewClient`。
 ## 向量查询缓存扩展
 
 缓存有意放在框架模块之外。导入可选的
-`goharness/extensions` 模块，并使用其中的缓存装饰器：
+`github.com/goharness/goharness/extensions` 模块，并使用其中的缓存装饰器：
 
 ```go
-import retrievalcache "goharness/extensions/cache/retrieval"
+import retrievalcache "github.com/goharness/github.com/goharness/goharness/extensions/cache/retrieval"
 
 cache, err := retrievalcache.NewMemoryVectorCache(retrievalcache.MemoryVectorCacheConfig{
     Capacity: 10_000,

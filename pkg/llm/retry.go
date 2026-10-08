@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"sync/atomic"
 	"time"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/stream"
 )
 
 type RetryConfig struct {
@@ -46,6 +48,16 @@ func NewRetryingModel(model ChatModel, config RetryConfig) (*RetryingModel, erro
 }
 
 func (m *RetryingModel) Capabilities() Capabilities { return m.model.Capabilities() }
+
+// UnwrapModel 返回被包装的下层模型，供策略链检查与重组使用。
+func (m *RetryingModel) UnwrapModel() ChatModel { return m.model }
+
+// Policy 返回生效中的重试配置，Retryable 回填为实际使用的判定函数。
+func (m *RetryingModel) Policy() RetryConfig {
+	config := m.config
+	config.Retryable = m.retryable
+	return config
+}
 func (m *RetryingModel) ModelInfo() ModelInfo {
 	info := DescribeModel(m.model)
 	if info.Attributes == nil {
@@ -56,12 +68,16 @@ func (m *RetryingModel) ModelInfo() ModelInfo {
 }
 
 func (m *RetryingModel) Invoke(ctx context.Context, request Request, options ...runnable.Option) (Response, error) {
+	forward, err := m.forwardOptions(options)
+	if err != nil {
+		return Response{}, err
+	}
 	var last error
 	for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return Response{}, err
 		}
-		response, err := m.model.Invoke(ctx, request, options...)
+		response, err := m.model.Invoke(ctx, request, forward...)
 		if err == nil {
 			return response, nil
 		}
@@ -80,6 +96,10 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 	if ctx == nil {
 		return nil, errors.New("retrying model context cannot be nil")
 	}
+	forward, err := m.forwardOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	reader, writer := runnable.Pipe[Response](context.WithoutCancel(ctx))
 	executionCtx, cancel := context.WithCancel(ctx)
 	go func() {
@@ -94,11 +114,11 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 		defer writer.Close()
 		for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
 			var started atomic.Bool
-			attemptCtx := callback.WithStreamCallbacks(executionCtx, callback.StreamCallbackOf[Response]("retry-start", func(context.Context, Response) error {
+			attemptCtx := callback.WithStreamSignal[Response](executionCtx, func() {
 				started.Store(true)
-				return nil
-			}))
-			upstream, err := m.model.Stream(attemptCtx, request, options...)
+			})
+			attemptCtx, published := stream.TrackMessages(attemptCtx)
+			upstream, err := m.model.Stream(attemptCtx, request, forward...)
 			if err == nil && upstream != nil {
 				value, recvErr := upstream.Recv()
 				if recvErr == nil {
@@ -122,7 +142,7 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 			} else if err == nil {
 				err = errors.New("model returned a nil stream")
 			}
-			if started.Load() || attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
+			if started.Load() || published.Load() || attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
 				_ = writer.CloseWithError(err)
 				return
 			}
@@ -148,6 +168,24 @@ func (m *RetryingModel) Transform(ctx context.Context, input *runnable.StreamRea
 		return nil, err
 	}
 	return m.Stream(ctx, value, options...)
+}
+
+// forwardOptions 在进入重试循环时冻结整份有效配置：每种组件配置类型只
+// 解析一次并包装为快照选项，重试与下游收到的都是冻结结果，原始设置函数
+// 不会因重放或转发重复执行。
+func (m *RetryingModel) forwardOptions(options []runnable.Option) ([]runnable.Option, error) {
+	return runnable.FreezeOptions(options)
+}
+
+// OptionTypes 透传下游模型声明的扩展配置类型。
+func (m *RetryingModel) OptionTypes() []reflect.Type {
+	if m == nil {
+		return nil
+	}
+	if provider, ok := m.model.(optionTypesProvider); ok && provider != nil {
+		return provider.OptionTypes()
+	}
+	return nil
 }
 
 func retryDelay(config RetryConfig, attempt int) time.Duration {

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestReactAgentCallsToolAndContinues(t *testing.T) {

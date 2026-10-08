@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestPipePreservesOrderAndEndsWithEOF(t *testing.T) {

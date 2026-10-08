@@ -21,6 +21,9 @@ type FunctionDefinition struct {
 }
 
 type Message struct {
+	// ID identifies this logical message across deltas, snapshots and final results.
+	// It is independent of the provider response ID in ResponseMeta.
+	ID            string         `json:"id,omitempty"`
 	Role          Role           `json:"role"`
 	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
 	ResponseMeta  *ResponseMeta  `json:"response_meta,omitempty"`
@@ -70,7 +73,7 @@ func (m Message) TextBlocks() []Text {
 		if block.Type != ContentBlockTypeText || block.Text == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
 		texts = append(texts, *cloned.Text)
 	}
 	return texts
@@ -91,7 +94,7 @@ func (m Message) ReasoningBlocks() []Reasoning {
 		if block.Type != ContentBlockTypeReasoning || block.Reasoning == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
 		reasoning = append(reasoning, *cloned.Reasoning)
 	}
 	return reasoning
@@ -103,7 +106,7 @@ func (m Message) FunctionToolCalls() []FunctionToolCall {
 		if block.Type != ContentBlockTypeFunctionToolCall || block.FunctionToolCall == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
 		calls = append(calls, *cloned.FunctionToolCall)
 	}
 	return calls
@@ -115,33 +118,42 @@ func (m Message) FunctionToolResults() []FunctionToolResult {
 		if block.Type != ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i))
+		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
 		results = append(results, *cloned.FunctionToolResult)
 	}
 	return results
 }
 
 func CloneMessages(messages []Message) []Message {
-	cloned, _ := cloneMessages(messages, false)
+	cloned, _ := cloneMessages(messages, false, nil)
 	return cloned
 }
 
 // CloneMessagesStrict returns fully isolated messages or rejects an unknown
 // mutable value in Extra or multimodal content.
 func CloneMessagesStrict(messages []Message) ([]Message, error) {
-	return cloneMessages(messages, true)
+	return cloneMessages(messages, true, nil)
 }
 
-func cloneMessages(messages []Message, strict bool) ([]Message, error) {
+// CloneMessagesFallback 严格克隆消息；仅当某个值无法被结构克隆安全隔离
+// （CloneUnsupportedError）时才调用 fallback 生成替代副本——通用 map/slice
+// 就地容纳替代值并保留旁边的普通值与 Clone 类型，只有强类型容器装不下
+// 替代结果时才扩大到该容器整体。Clone() panic、返回类型错误及 fallback
+// 本身的错误都直接上抛，不被保底掩盖。
+func CloneMessagesFallback(messages []Message, fallback CloneFallbackFunc) ([]Message, error) {
+	return cloneMessages(messages, true, fallback)
+}
+
+func cloneMessages(messages []Message, strict bool, fallback CloneFallbackFunc) ([]Message, error) {
 	copied := make([]Message, len(messages))
 	for i, msg := range messages {
 		copied[i] = msg
-		blocks, err := cloneContentBlocks(msg.ContentBlocks, strict, fmt.Sprintf("messages[%d].content_blocks", i))
+		blocks, err := cloneContentBlocks(msg.ContentBlocks, strict, fmt.Sprintf("messages[%d].content_blocks", i), fallback)
 		if err != nil {
 			return nil, err
 		}
 		copied[i].ContentBlocks = blocks
-		meta, err := cloneResponseMeta(msg.ResponseMeta, strict, fmt.Sprintf("messages[%d].response_meta", i))
+		meta, err := cloneResponseMeta(msg.ResponseMeta, strict, fmt.Sprintf("messages[%d].response_meta", i), fallback)
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +161,7 @@ func cloneMessages(messages []Message, strict bool) ([]Message, error) {
 		if msg.Extra != nil {
 			copied[i].Extra = make(map[string]any, len(msg.Extra))
 			for k, v := range msg.Extra {
-				cloned, err := cloneAnyValue(v, strict, fmt.Sprintf("messages[%d].extra[%q]", i, k), 0)
+				cloned, err := cloneAnyValue(v, strict, fmt.Sprintf("messages[%d].extra[%q]", i, k), 0, fallback)
 				if err != nil {
 					return nil, err
 				}

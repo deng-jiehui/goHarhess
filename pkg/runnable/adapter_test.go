@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type invokeNative struct{}

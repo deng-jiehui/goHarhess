@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"goharness/pkg/contextengine"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/contextengine"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestConversationAndContextBuilders(t *testing.T) {

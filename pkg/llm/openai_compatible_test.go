@@ -3,14 +3,15 @@ package llm_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.T) {
@@ -52,8 +53,7 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 	}
 	stream, err := model.Stream(context.Background(), llm.Request{
 		Messages: []schema.Message{schema.UserMessage("hello")},
-		Options:  llm.ChatOptions{DeltaStream: true},
-	})
+	}, llm.WithDeltaStream(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestOpenAICompatibleStreamingPreservesSparseToolCallIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := model.Stream(context.Background(), llm.Request{Options: llm.ChatOptions{DeltaStream: true}})
+	stream, err := model.Stream(context.Background(), llm.Request{}, llm.WithDeltaStream(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestOpenAICompatibleStreamingRejectsEOFBeforeDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := model.Stream(context.Background(), llm.Request{Options: llm.ChatOptions{DeltaStream: true}})
+	stream, err := model.Stream(context.Background(), llm.Request{}, llm.WithDeltaStream(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestOpenAICompatibleRejectsInvalidToolCallIndexes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stream, err := model.Stream(context.Background(), llm.Request{Options: llm.ChatOptions{DeltaStream: true}})
+			stream, err := model.Stream(context.Background(), llm.Request{}, llm.WithDeltaStream(true))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -260,5 +260,70 @@ func TestOpenAICompatibleRejectsInvalidToolCallIndexes(t *testing.T) {
 				t.Fatalf("stream error=%v", streamErr)
 			}
 		})
+	}
+}
+
+// 非流式响应超过配置的字节上限时停止读取，返回明确的过大错误，
+// 截断内容不会被当作完整响应解析。
+func TestOpenAICompatibleRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		// 有效 JSON 前缀 + 超长填充：即使截断后仍可被解码的内容也绝不能进入解析。
+		_, _ = writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"`))
+		_, _ = writer.Write([]byte(strings.Repeat("x", 4096)))
+		_, _ = writer.Write([]byte(`"}}]}`))
+	}))
+	defer server.Close()
+
+	model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+		Model: "test-model", BaseURL: server.URL, Client: server.Client(),
+		MaxResponseBytes: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = model.Invoke(context.Background(), llm.Request{})
+	var tooLarge *llm.ResponseTooLargeError
+	if !errors.As(err, &tooLarge) || !errors.Is(err, llm.ErrResponseTooLarge) {
+		t.Fatalf("err=%v", err)
+	}
+	if tooLarge.Limit != 64 {
+		t.Fatalf("limit=%d", tooLarge.Limit)
+	}
+	if !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("error lacks size hint: %v", err)
+	}
+}
+
+// 上限边界：恰好等于上限通过，超过一字节即失败；上限可配置。
+func TestOpenAICompatibleResponseLimitBoundary(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(body)
+	}))
+	defer server.Close()
+
+	build := func(limit int64) *llm.OpenAICompatibleModel {
+		model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+			Model: "test-model", BaseURL: server.URL, Client: server.Client(),
+			MaxResponseBytes: limit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return model
+	}
+	response, err := build(int64(len(body))).Invoke(context.Background(), llm.Request{})
+	if err != nil || len(response.Messages) != 1 {
+		t.Fatalf("at-limit response failed: %v", err)
+	}
+	if _, err := build(int64(len(body))-1).Invoke(context.Background(), llm.Request{}); !errors.Is(err, llm.ErrResponseTooLarge) {
+		t.Fatalf("over-limit err=%v", err)
+	}
+	// 零值回落默认上限，正常响应不受影响。
+	response, err = build(0).Invoke(context.Background(), llm.Request{})
+	if err != nil || response.Messages[0].JoinedText("") != "ok" {
+		t.Fatalf("default-limit response failed: %v", err)
 	}
 }

@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"time"
 
-	"goharness/pkg/contextengine"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/state"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/contextengine"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/state"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 const (
@@ -79,7 +80,7 @@ func WithContextBuilder(value runnable.Runnable[contextengine.Request, contexten
 	return func(config *BaseConfig) { config.ContextBuilder = value }
 }
 
-// WithCheckpointStore enables durable conversation state for runs with an ID.
+// WithCheckpointStore 为指定会话 ID 的运行配置统一检查点存储。
 func WithCheckpointStore(value state.Store) Option {
 	return func(config *BaseConfig) { config.CheckpointStore = value }
 }
@@ -88,6 +89,11 @@ func WithCheckpointStore(value state.Store) Option {
 // from request cancellation so a completed turn can still be persisted.
 func WithCheckpointTimeout(value time.Duration) Option {
 	return func(config *BaseConfig) { config.CheckpointTimeout = value }
+}
+
+// WithCheckpointDurability 设置检查点持久化模式的默认值（async 或 sync）。
+func WithCheckpointDurability(value graph.Durability) Option {
+	return func(config *BaseConfig) { config.CheckpointDurability = value }
 }
 
 func WithExtraGenerateConfig(value llm.GenerateConfig) Option {
@@ -112,13 +118,39 @@ func WithMaxConcurrency(value int) Option {
 }
 
 // WithMaxRetries sets retries for failed read-only tools.
+// Deprecated: 该选项只作用于工具重试，请改用 WithToolRetries。
 func WithMaxRetries(value int) Option {
-	return func(config *BaseConfig) { config.MaxRetries = value }
+	return func(config *BaseConfig) { config.MaxRetries = value; config.legacyRetriesSet = true }
 }
 
 // WithRetryBackoff sets the delay between automatic retries.
+// Deprecated: 该选项只作用于工具重试，请改用 WithToolRetryBackoff。
 func WithRetryBackoff(value time.Duration) Option {
-	return func(config *BaseConfig) { config.RetryBackoff = value }
+	return func(config *BaseConfig) { config.RetryBackoff = value; config.legacyBackoffSet = true }
+}
+
+// WithToolRetries sets retries for failed read-only tools.
+func WithToolRetries(value int) Option {
+	return func(config *BaseConfig) { config.ToolRetries = value; config.toolRetriesSet = true }
+}
+
+// WithToolRetryBackoff sets the delay between automatic tool retries.
+func WithToolRetryBackoff(value time.Duration) Option {
+	return func(config *BaseConfig) { config.ToolRetryBackoff = value; config.toolRetryBackoffSet = true }
+}
+
+// WithModelRetry wraps the configured model with llm.NewRetryingModel.
+// MaxAttempts must be at least 2 to enable retrying; retryable errors and
+// stream semantics follow the llm decorator.
+func WithModelRetry(value llm.RetryConfig) Option {
+	return func(config *BaseConfig) { config.ModelRetry = value }
+}
+
+// WithModelRateLimit wraps the configured model with llm.NewRateLimitedModel.
+// The limit applies per Agent instance; wrap the underlying model manually to
+// share one quota across instances.
+func WithModelRateLimit(value llm.RateLimitConfig) Option {
+	return func(config *BaseConfig) { config.ModelRateLimit = value }
 }
 
 // WithMaxTokens sets the model-facing max_tokens generation limit.
@@ -135,8 +167,6 @@ type agentLimits struct {
 	maxDepth       int
 	timeout        time.Duration
 	maxConcurrency int
-	maxRetries     int
-	retryBackoff   time.Duration
 	maxTokens      int
 	maxLLMCalls    int
 }
@@ -148,10 +178,40 @@ func resolveBaseConfig(config BaseConfig, opts ...Option) (BaseConfig, error) {
 			opt(&config)
 		}
 	}
+	if err := resolveRetryAliases(&config); err != nil {
+		return BaseConfig{}, err
+	}
 	if err := validateBaseConfig(config); err != nil {
 		return BaseConfig{}, err
 	}
 	return config, nil
+}
+
+// resolveRetryAliases 合并废弃字段与规范字段。存在性规则对两侧一致：
+// 对应 With* 选项被调用过或字段值非零都算「已提供」；两边提供不同值
+// （含显式零值与非零值）在初始化时拒绝，单侧提供时采用该值。退避默认值
+// 只在两侧都未提供时填充，显式零值保留为「无重试间隔」。
+func resolveRetryAliases(config *BaseConfig) error {
+	newRetries := config.toolRetriesSet || config.ToolRetries != 0
+	oldRetries := config.legacyRetriesSet || config.MaxRetries != 0
+	switch {
+	case newRetries && oldRetries && config.ToolRetries != config.MaxRetries:
+		return fmt.Errorf("agent tool retries configured twice with different values: ToolRetries=%d, MaxRetries=%d", config.ToolRetries, config.MaxRetries)
+	case !newRetries && oldRetries:
+		config.ToolRetries = config.MaxRetries
+	}
+	newBackoff := config.toolRetryBackoffSet || config.ToolRetryBackoff != 0
+	oldBackoff := config.legacyBackoffSet || config.RetryBackoff != 0
+	switch {
+	case newBackoff && oldBackoff && config.ToolRetryBackoff != config.RetryBackoff:
+		return fmt.Errorf("agent tool retry backoff configured twice with different values: ToolRetryBackoff=%s, RetryBackoff=%s", config.ToolRetryBackoff, config.RetryBackoff)
+	case !newBackoff && oldBackoff:
+		config.ToolRetryBackoff = config.RetryBackoff
+	}
+	if !newBackoff && !oldBackoff {
+		config.ToolRetryBackoff = DefaultRetryBackoff
+	}
+	return nil
 }
 
 func applyConfigDefaults(config *BaseConfig) {
@@ -163,9 +223,6 @@ func applyConfigDefaults(config *BaseConfig) {
 	}
 	if config.MaxConcurrency == 0 {
 		config.MaxConcurrency = DefaultMaxConcurrency
-	}
-	if config.RetryBackoff == 0 {
-		config.RetryBackoff = DefaultRetryBackoff
 	}
 	if config.MaxTokens == 0 {
 		config.MaxTokens = DefaultMaxTokens
@@ -187,7 +244,7 @@ func validateBaseConfig(config BaseConfig) error {
 	}{
 		{name: "max depth", value: config.MaxDepth, min: 1, max: hardMaxDepth},
 		{name: "max concurrency", value: config.MaxConcurrency, min: 1, max: hardMaxConcurrency},
-		{name: "max retries", value: config.MaxRetries, min: 0, max: hardMaxRetries},
+		{name: "tool retries", value: config.ToolRetries, min: 0, max: hardMaxRetries},
 		{name: "max tokens", value: config.MaxTokens, min: 1, max: hardMaxTokens},
 		{name: "max LLM calls", value: config.MaxLLMCalls, min: 1, max: hardMaxLLMCalls},
 	}
@@ -199,13 +256,29 @@ func validateBaseConfig(config BaseConfig) error {
 	if config.Timeout <= 0 || config.Timeout > hardMaxTimeout {
 		return fmt.Errorf("agent timeout must be greater than zero and at most %s: %s", hardMaxTimeout, config.Timeout)
 	}
-	if config.RetryBackoff < 0 || config.RetryBackoff > hardMaxRetryBackoff {
-		return fmt.Errorf("agent retry backoff must be between zero and %s: %s", hardMaxRetryBackoff, config.RetryBackoff)
+	if config.ToolRetryBackoff < 0 || config.ToolRetryBackoff > hardMaxRetryBackoff {
+		return fmt.Errorf("agent tool retry backoff must be between zero and %s: %s", hardMaxRetryBackoff, config.ToolRetryBackoff)
+	}
+	if err := validateModelPolicy(config.ModelRetry, config.ModelRateLimit); err != nil {
+		return err
 	}
 	if config.CheckpointTimeout <= 0 || config.CheckpointTimeout > hardMaxCheckpointTimeout {
 		return fmt.Errorf("agent checkpoint timeout must be greater than zero and at most %s: %s", hardMaxCheckpointTimeout, config.CheckpointTimeout)
 	}
+	if err := validateDurability(config.CheckpointDurability); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateDurability 校验持久化模式；零值表示沿用默认的 async。
+func validateDurability(value graph.Durability) error {
+	switch value {
+	case "", graph.DurabilityAsync, graph.DurabilitySync:
+		return nil
+	default:
+		return fmt.Errorf("unsupported agent checkpoint durability %q", value)
+	}
 }
 
 func limitsFromConfig(config BaseConfig) agentLimits {
@@ -213,8 +286,6 @@ func limitsFromConfig(config BaseConfig) agentLimits {
 		maxDepth:       config.MaxDepth,
 		timeout:        config.Timeout,
 		maxConcurrency: config.MaxConcurrency,
-		maxRetries:     config.MaxRetries,
-		retryBackoff:   config.RetryBackoff,
 		maxTokens:      config.MaxTokens,
 		maxLLMCalls:    config.MaxLLMCalls,
 	}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestChatModelCallbackReceivesIsolatedRequest(t *testing.T) {

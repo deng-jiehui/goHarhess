@@ -4,27 +4,26 @@ import (
 	"context"
 	"errors"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/streamcompat"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/stream"
 )
 
-// runLifecycle owns conversation commit. Agent execution lifecycle is the
-// lifecycle of its compiled Graph.
+// runLifecycle 转发 Graph 已完成持久化的输出。
 type runLifecycle struct {
-	ctx     context.Context
-	session *conversationSession
+	ctx context.Context
 }
 
 type modelStreamOwnerKey struct{}
 
-func (b *base) beginRun(ctx context.Context, _ []schema.Message, opts RunOptions) (context.Context, *runLifecycle, error) {
+func (b *base) beginRun(ctx context.Context, _ []schema.Message, _ RunOptions) (context.Context, *runLifecycle, error) {
 	if ctx == nil {
 		return nil, nil, errors.New("agent run context cannot be nil")
 	}
 	ctx, _ = callback.EnterScope(ctx)
-	ctx = callback.WithMetadata(ctx, opts.Metadata)
 	return ctx, &runLifecycle{ctx: ctx}, nil
 }
 
@@ -45,11 +44,9 @@ func (l *runLifecycle) wrap(upstream *runnable.StreamReader[[]schema.Message]) (
 			return
 		}
 		output = schema.CloneMessages(output)
-		if err := l.session.commit(l.ctx, output); err != nil {
-			_ = writer.CloseWithError(err)
-			return
-		}
-		callback.EmitStream(l.ctx, schema.MessageEvent{Kind: schema.MessageEventSnapshot, Messages: output})
+		stream.EnsureMessageIDs(output)
+
+		streamcompat.Snapshot(l.ctx, output)
 		if err := writer.Send(output); err != nil {
 			return
 		}
@@ -66,15 +63,17 @@ func (l *runLifecycle) wrap(upstream *runnable.StreamReader[[]schema.Message]) (
 }
 
 func (b *base) bindModelStream(ctx context.Context) context.Context {
+	// Public run streams receive canonical model deltas directly. Keep legacy
+	// snapshot forwarding only when an application explicitly subscribed to it.
+	if !callback.HasStreamCallbacks[schema.MessageEvent](ctx) {
+		return ctx
+	}
 	ctx = context.WithValue(ctx, modelStreamOwnerKey{}, b)
 	return callback.WithStreamCallbacks(ctx, callback.StreamCallbackOf[llm.Response]("agent-llm", func(dataCtx context.Context, response llm.Response) error {
 		if owner, _ := dataCtx.Value(modelStreamOwnerKey{}).(*base); owner != b {
 			return nil
 		}
-		callback.EmitStream(dataCtx, schema.MessageEvent{
-			Kind:     schema.MessageEventSnapshot,
-			Messages: b.withAgentName(response.Messages),
-		})
+		streamcompat.Snapshot(dataCtx, b.withAgentName(response.Messages))
 		return nil
 	}))
 }

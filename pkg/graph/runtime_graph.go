@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 var (
@@ -21,24 +21,30 @@ var (
 // Graph is the public graph boundary. Node and State types are captured when
 // components are registered and validated by Compile.
 type Graph[I, O any] struct {
-	mu           sync.RWMutex
-	name         string
-	description  string
-	inputType    reflect.Type
-	outputType   reflect.Type
-	stateType    reflect.Type
-	stateFactory func(context.Context, I) (any, error)
-	codec        StateCodec
-	codecID      string
-	codecVersion int
-	codecType    reflect.Type
-	nodes        map[string]runtimeNode
-	nodeOrder    []string
-	edges        []runtimeEdge
-	maxSteps     int
-	built        bool
-	revision     string
-	resumableErr error
+	mu             sync.RWMutex
+	name           string
+	description    string
+	inputType      reflect.Type
+	outputType     reflect.Type
+	stateType      reflect.Type
+	stateFactory   func(context.Context, I) (any, error)
+	codec          StateCodec
+	codecID        string
+	codecVersion   int
+	codecType      reflect.Type
+	nodes          map[string]runtimeNode
+	nodeOrder      []string
+	edges          []runtimeEdge
+	maxSteps       int
+	forks          map[string]forkSpec
+	dispatches     map[string]*dispatchSpec
+	parallelGroups map[string]*runtimeParallelNode
+	stepMerger     *runtimeStepMerger
+	maxConcurrency int
+	built          bool
+	revision       string
+	contract       *revisionContract
+	resumableErr   error
 }
 
 type runtimeNode struct {
@@ -48,6 +54,7 @@ type runtimeNode struct {
 	outputType  reflect.Type
 	info        NodeInfo
 	options     []runnable.Option
+	optionTypes []reflect.Type
 	pre         *runtimePreHandler
 	post        *runtimePostHandler
 	invoke      func(context.Context, any, []runnable.Option) (any, error)
@@ -57,6 +64,10 @@ type runtimeNode struct {
 	compile     func(map[uintptr]bool) error
 	nestedGraph bool
 	parallel    *runtimeParallelNode
+	// parallelJoin/parallelMember 是并行组展开拓扑中的内部角色标记：
+	// 入口仍挂在 parallel 上，汇合消费成员局部 State，成员是普通节点。
+	parallelJoin   *runtimeParallelNode
+	parallelMember *parallelMember
 }
 
 type runtimeEdge struct {
@@ -104,32 +115,33 @@ type runtimeNodeConfig struct {
 	options []runnable.Option
 }
 
-// WithPreHandler maps runtime State to one pure node input.
-func WithPreHandler(handler any) NodeOption {
+// WithPreHandler maps runtime State to one pure node input. The signature
+// func(context.Context, *S) (I, error) is checked by the Go compiler; how *S
+// relates to the graph State and I to the node input is validated by Compile.
+func WithPreHandler[S, I any](handler func(context.Context, *S) (I, error)) NodeOption {
 	return runtimeNodeOption(func(config *runtimeNodeConfig) error {
-		value, err := bindRuntimePreHandler(handler)
-		if err != nil {
-			return err
+		if handler == nil {
+			return errors.New("pre handler must be a non-nil function")
 		}
 		if config.pre != nil {
 			return errors.New("graph node has multiple pre handlers")
 		}
-		config.pre = value
+		config.pre = newRuntimePreHandler(handler)
 		return nil
 	})
 }
 
-// WithPostHandler applies one pure node output to runtime State.
-func WithPostHandler(handler any) NodeOption {
+// WithPostHandler applies one pure node output to runtime State. The signature
+// func(context.Context, *S, O) error is checked by the Go compiler.
+func WithPostHandler[S, O any](handler func(context.Context, *S, O) error) NodeOption {
 	return runtimeNodeOption(func(config *runtimeNodeConfig) error {
-		value, err := bindRuntimePostHandler(handler)
-		if err != nil {
-			return err
+		if handler == nil {
+			return errors.New("post handler must be a non-nil function")
 		}
 		if config.post != nil {
 			return errors.New("graph node has multiple post handlers")
 		}
-		config.post = value
+		config.post = newRuntimePostHandler(handler)
 		return nil
 	})
 }
@@ -155,6 +167,42 @@ func NewGraph[I, O any](name string) *Graph[I, O] {
 		nodes:      map[string]runtimeNode{},
 		maxSteps:   DefaultMaxSteps,
 	}
+}
+
+// SetStateFactory is the compile-time checked form of (*Graph).SetStateFactory.
+// Go methods cannot declare type parameters, so the typed variant is a package
+// function; I and O are inferred from the Graph, S from the factory.
+func SetStateFactory[I, O, S any](g *Graph[I, O], factory func(context.Context, I) (*S, error)) error {
+	if g == nil {
+		return validationError("graph.nil", "graph", "graph cannot be nil")
+	}
+	if factory == nil {
+		return validationError("graph.state_factory.invalid", "state_factory", "state factory must be a non-nil function")
+	}
+	stateType := typeOf[*S]()
+	if stateType.Elem().Kind() != reflect.Struct {
+		return validationError("graph.state_factory.pointer", "state_factory", "state factory must return a pointer to struct, got %s", typeName(stateType))
+	}
+	boundFactory := func(ctx context.Context, input I) (result any, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("state factory panicked: %v", recovered)
+			}
+		}()
+		state, err := factory(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		if state == nil {
+			return nil, errors.New("state factory returned nil State")
+		}
+		return state, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stateType = stateType
+	g.stateFactory = boundFactory
+	return nil
 }
 
 // SetStateFactory configures one run-exclusive pointer State factory.
@@ -220,9 +268,15 @@ func (g *Graph[I, O]) AddNode(name string, node any, options ...NodeOption) erro
 			return validationError("node.options.invalid", fmt.Sprintf("nodes[%q].options[%d]", name, index), "%v", err)
 		}
 	}
+	if config.pre == nil {
+		if driven, ok := node.(stateDriven); ok {
+			config.pre = driven.stateNodePre()
+		}
+	}
 	entry := runtimeNode{
 		id: name, component: node, inputType: inputType, outputType: outputType, info: info,
-		options: nodeScopedOptions(config.options), pre: config.pre, post: config.post, invoke: invoker,
+		options: append([]runnable.Option(nil), config.options...), optionTypes: declaredOptionTypes(node),
+		pre: config.pre, post: config.post, invoke: invoker,
 	}
 	if component != nil {
 		entry.compile = component.compileGraph
@@ -255,6 +309,19 @@ func (g *Graph[I, O]) AddBranch(from, to, label string, predicate any) error {
 		return err
 	}
 	return g.addRuntimeEdge(from, to, label, condition)
+}
+
+// AddBranch is the compile-time checked form of (*Graph).AddBranch. V is
+// inferred from the predicate; it may declare the source output type or the
+// State type, and Compile rejects a predicate matching neither or both.
+func AddBranch[I, O, V any](g *Graph[I, O], from, to, label string, predicate func(context.Context, V) (bool, error)) error {
+	if g == nil {
+		return validationError("graph.nil", "graph", "graph cannot be nil")
+	}
+	if predicate == nil {
+		return errors.New("graph branch predicate must be a non-nil function")
+	}
+	return g.addRuntimeEdge(from, to, label, newRuntimeCondition(predicate))
 }
 
 func (g *Graph[I, O]) addRuntimeEdge(from, to, label string, condition *runtimeCondition) error {
@@ -324,14 +391,13 @@ func (g *Graph[I, O]) SetNodeOptions(id string, options ...runnable.Option) erro
 	if g == nil {
 		return validationError("graph.nil", "graph", "graph cannot be nil")
 	}
-	scoped := nodeScopedOptions(options)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	node, ok := g.nodes[id]
 	if !ok {
 		return validationError("node.missing", fmt.Sprintf("nodes[%q]", id), "node is not registered")
 	}
-	node.options = scoped
+	node.options = append([]runnable.Option(nil), options...)
 	g.nodes[id] = node
 	return nil
 }
@@ -369,7 +435,14 @@ func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {
 		node.options = append([]runnable.Option(nil), node.options...)
 		nodes[id] = node
 	}
+	parallelGroups := make(map[string]*runtimeParallelNode, len(g.parallelGroups))
+	for name, spec := range g.parallelGroups {
+		// 声明期已冻结：分支与合并器只读共享即可。
+		parallelGroups[name] = spec
+	}
 	return &Graph[I, O]{
+		forks: cloneForks(g.forks), dispatches: cloneDispatches(g.dispatches), parallelGroups: parallelGroups, stepMerger: g.stepMerger, maxConcurrency: g.maxConcurrency,
+
 		name: g.name, description: g.description, inputType: g.inputType, outputType: g.outputType, stateType: g.stateType,
 		stateFactory: g.stateFactory, codec: g.codec, codecID: g.codecID, codecVersion: g.codecVersion, codecType: g.codecType,
 		nodes: nodes, nodeOrder: append([]string(nil), g.nodeOrder...), edges: append([]runtimeEdge(nil), g.edges...), maxSteps: g.maxSteps,
@@ -409,6 +482,9 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	if g.built {
 		return nil
 	}
+	// 并行组声明先于校验展开为普通拓扑：组名的出入边按成员闭包解析，
+	// 无显式出边的成员补默认汇合边。幂等——重复编译返回同一份视图。
+	g.edges = g.resolvedParallelEdges()
 	if errs := g.validateRuntimeGraph(); len(errs) > 0 {
 		return errs
 	}
@@ -417,6 +493,79 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	}
 	g.built = true
 	return nil
+}
+
+// resolvedParallelEdges 返回并行组边界解析后的边视图，不修改 Builder。
+// 解析规则与文档一致：
+//   - 以组名为源的边等价于从组内汇合出发（组名是组外路由身份）；
+//   - 以组名为目标的边，源在任一成员路径闭包内时指向汇合，否则指向入口；
+//   - 分支成员没有显式出边时补默认的 成员→汇合 边（声明替换默认汇合路由）。
+//
+// 该函数幂等：已解析的图上重复调用返回同一份边集合。
+func (g *Graph[I, O]) resolvedParallelEdges() []runtimeEdge {
+	if len(g.parallelGroups) == 0 {
+		return g.edges
+	}
+	edges := append([]runtimeEdge(nil), g.edges...)
+	// 第一阶段：组名的出边改发汇合。
+	for name, spec := range g.parallelGroups {
+		for i := range edges {
+			if edges[i].from == name {
+				edges[i].from = spec.join
+			}
+		}
+	}
+	// 第二阶段：成员路径闭包内「→组名」的边改投汇合。
+	for name, spec := range g.parallelGroups {
+		inner := g.parallelInnerNodes(name, spec, edges)
+		for i := range edges {
+			if edges[i].to == name && inner[edges[i].from] {
+				edges[i].to = spec.join
+			}
+		}
+	}
+	// 第三阶段：无显式出边的成员补默认汇合边。
+	outgoing := map[string]bool{}
+	for _, e := range edges {
+		outgoing[e.from] = true
+	}
+	for name, spec := range g.parallelGroups {
+		for _, branch := range spec.branches {
+			memberID := parallelMemberName(name, branch.name)
+			if !outgoing[memberID] {
+				edges = append(edges, runtimeEdge{from: memberID, to: spec.join})
+			}
+		}
+	}
+	return edges
+}
+
+// parallelInnerNodes 收集组成员路径上的内部节点（不含入口与汇合）。
+// 「→组名」的边在遍历时按汇合处理，避免把组外后继误并入成员闭包。
+func (g *Graph[I, O]) parallelInnerNodes(name string, spec *runtimeParallelNode, edges []runtimeEdge) map[string]bool {
+	outgoing := map[string][]string{}
+	for _, e := range edges {
+		to := e.to
+		if to == name {
+			to = spec.join
+		}
+		outgoing[e.from] = append(outgoing[e.from], to)
+	}
+	inner := map[string]bool{}
+	var walk func(string)
+	walk = func(id string) {
+		if id == name || id == spec.join || id == End || inner[id] {
+			return
+		}
+		inner[id] = true
+		for _, next := range outgoing[id] {
+			walk(next)
+		}
+	}
+	for _, branch := range spec.branches {
+		walk(parallelMemberName(name, branch.name))
+	}
+	return inner
 }
 
 func (g *Graph[I, O]) Snapshot() Snapshot {
@@ -497,8 +646,130 @@ func (g *Graph[I, O]) validateRuntimeTypes() error {
 			continue
 		}
 		target, exists := g.nodes[edge.to]
-		if exists && target.pre == nil && target.parallel == nil && !sourceType.AssignableTo(target.inputType) {
+		// 并行汇合的消费对象是成员局部 State 而非边输入，跳过输入类型比较。
+		if exists && target.pre == nil && target.parallel == nil && target.parallelJoin == nil && !sourceType.AssignableTo(target.inputType) {
 			return validationError("edge.type_mismatch", edgePath(index), "%s output %s is not assignable to %s input %s", edge.from, typeName(sourceType), edge.to, typeName(target.inputType))
+		}
+	}
+	return nil
+}
+
+// validateParallelGroups 校验展开后的并行拓扑：每条分支路径必须到达本组
+// 汇合；分支接续节点沿用分派成员路径的规则（PreHandler、不跨分支、不嵌套
+// 其他扇出边界）；汇合的入边只能来自本组成员闭包。
+func (g *Graph[I, O]) validateParallelGroups() error {
+	if len(g.parallelGroups) == 0 {
+		return nil
+	}
+	edges := g.resolvedParallelEdges()
+	outgoing := map[string][]string{}
+	for _, e := range edges {
+		outgoing[e.from] = append(outgoing[e.from], e.to)
+	}
+	for name, spec := range g.parallelGroups {
+		if _, ok := g.forks[name]; ok {
+			return fmt.Errorf("parallel group %q is also a fork source", name)
+		}
+		if _, ok := g.dispatches[name]; ok {
+			return fmt.Errorf("parallel group %q is also a dispatch source", name)
+		}
+		join := spec.join
+		if _, ok := g.nodes[join]; !ok {
+			return fmt.Errorf("parallel group %q join %q is not registered", name, join)
+		}
+		owners := map[string]string{}
+		inner := map[string]bool{}
+		for _, branch := range spec.branches {
+			entry := parallelMemberName(name, branch.name)
+			if _, ok := g.nodes[entry]; !ok {
+				return fmt.Errorf("parallel group %q member %q is not registered", name, entry)
+			}
+			seen := map[string]bool{}
+			active := map[string]bool{}
+			reached := false
+			var walk func(string) error
+			walk = func(id string) error {
+				if id == join {
+					reached = true
+					return nil
+				}
+				if active[id] {
+					return fmt.Errorf("cycle inside parallel group %q at %q", name, id)
+				}
+				if seen[id] {
+					return nil
+				}
+				if id == name {
+					return fmt.Errorf("parallel branch %q re-enters its own entry", entry)
+				}
+				if id == End || len(outgoing[id]) == 0 {
+					return fmt.Errorf("parallel branch %q path does not reach join %q", entry, join)
+				}
+				if _, ok := g.forks[id]; ok {
+					return fmt.Errorf("nested fork %q inside a parallel branch is unsupported", id)
+				}
+				if _, ok := g.dispatches[id]; ok {
+					return fmt.Errorf("nested dispatch %q inside a parallel branch is unsupported", id)
+				}
+				if _, ok := g.parallelGroups[id]; ok {
+					return fmt.Errorf("nested parallel group %q inside a parallel branch is unsupported", id)
+				}
+				if node, ok := g.nodes[id]; ok {
+					if node.parallelJoin != nil {
+						return fmt.Errorf("parallel branch %q enters join %q outside its group", entry, id)
+					}
+					if node.parallelMember != nil && node.parallelMember.group != name {
+						return fmt.Errorf("parallel branch %q enters member %q of group %q", entry, id, node.parallelMember.group)
+					}
+				}
+				if owner, ok := owners[id]; ok && owner != entry {
+					return fmt.Errorf("cross-branch node %q", id)
+				}
+				owners[id] = entry
+				inner[id] = true
+				if id != entry && g.nodes[id].pre == nil {
+					return fmt.Errorf("parallel branch %q path node %q requires a PreHandler", entry, id)
+				}
+				active[id] = true
+				seen[id] = true
+				for _, to := range outgoing[id] {
+					if err := walk(to); err != nil {
+						return err
+					}
+				}
+				delete(active, id)
+				return nil
+			}
+			if err := walk(entry); err != nil {
+				return err
+			}
+			if !reached {
+				return fmt.Errorf("parallel branch %q does not reach join %q", entry, join)
+			}
+		}
+		for _, e := range edges {
+			if e.to == join && !inner[e.from] {
+				return fmt.Errorf("edge %q -> %q enters join outside its group", e.from, e.to)
+			}
+		}
+		// 成员入口只允许组内扇出到达：任何指向成员入口的边都会制造第二个
+		// 入口点，破坏成员局部 State 的唯一来源。
+		for _, branch := range spec.branches {
+			entry := parallelMemberName(name, branch.name)
+			for _, e := range edges {
+				if e.to == entry {
+					return fmt.Errorf("edge %q -> %q enters parallel member directly", e.from, e.to)
+				}
+			}
+		}
+		// 成员路径上的接续节点同样不接受组外来路：整条路径的输入只能
+		// 来自同一分支闭包。外部进入会绕过组入口的局部 State 分配，运行
+		// 时该节点的出边已指向内部汇合，会调度出没有活跃组的汇合任务。
+		for _, e := range edges {
+			if !inner[e.to] || owners[e.from] == owners[e.to] {
+				continue
+			}
+			return fmt.Errorf("edge %q -> %q enters parallel group %q branch path from outside", e.from, e.to, name)
 		}
 	}
 	return nil
@@ -506,6 +777,15 @@ func (g *Graph[I, O]) validateRuntimeTypes() error {
 
 func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	var errs ValidationErrors
+	if err := g.validateForks(); err != nil {
+		errs = append(errs, validationError("graph.fork.invalid", "forks", "%v", err))
+	}
+	if err := g.validateDispatches(); err != nil {
+		errs = append(errs, validationError("graph.dispatch.invalid", "dispatches", "%v", err))
+	}
+	if err := g.validateParallelGroups(); err != nil {
+		errs = append(errs, validationError("graph.parallel.invalid", "parallel", "%v", err))
+	}
 	if err := g.validateRuntimeTypes(); err != nil {
 		switch value := err.(type) {
 		case ValidationError:
@@ -525,10 +805,13 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	if len(g.nodes) == 0 {
 		errs = append(errs, validationError("graph.nodes.empty", "nodes", "graph requires at least one node"))
 	}
+	// 结构检查统一使用解析后的边视图：并行组边界与默认汇合边都已展开，
+	// Builder 上未编译时与编译期看到同一份拓扑。
+	edges := g.resolvedParallelEdges()
 	outgoing := map[string][]int{}
 	reverse := map[string][]string{}
 	seenEdges := map[string]int{}
-	for index, candidate := range g.edges {
+	for index, candidate := range edges {
 		path := edgePath(index)
 		from, to := candidate.from, candidate.to
 		if from == End {
@@ -562,13 +845,13 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	for from, indexes := range outgoing {
 		unconditional, conditional := 0, 0
 		for _, index := range indexes {
-			if g.edges[index].condition == nil {
+			if edges[index].condition == nil {
 				unconditional++
 			} else {
 				conditional++
 			}
 		}
-		if unconditional > 1 {
+		if unconditional > 1 && len(g.forks[from].Branches) == 0 && g.dispatches[from] == nil && g.parallelGroups[from] == nil {
 			errs = append(errs, validationError("edge.fallback.multiple", fmt.Sprintf("outgoing[%q]", from), "only one unconditional edge is allowed, got %d", unconditional))
 		}
 		if conditional > 0 && unconditional != 1 {
@@ -577,10 +860,44 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	}
 	for _, id := range g.nodeOrder {
 		if len(outgoing[id]) == 0 {
+			// 动态分派来源的路由由清单接管，没有静态出边。
+			if _, ok := g.dispatches[id]; ok {
+				continue
+			}
+			// 并行组入口的扇出在调度层完成，同样没有静态出边。
+			if _, ok := g.parallelGroups[id]; ok {
+				continue
+			}
 			errs = append(errs, validationError("node.outgoing.missing", fmt.Sprintf("nodes[%q]", id), "node requires an outgoing edge"))
 		}
 	}
-	reachable := walkRuntimeForward(Start, outgoing, g.edges)
+	// 动态分派在静态拓扑中没有普通出边：可达性遍历使用「来源→各目标」
+	// 的虚拟边补足，成员路径上的后续节点仍走真实边；并行组入口同理
+	// 以「入口→成员」虚拟边补足扇出。
+	walkOutgoing, walkEdges := outgoing, edges
+	if len(g.dispatches) > 0 || len(g.parallelGroups) > 0 {
+		walkEdges = append([]runtimeEdge(nil), edges...)
+		walkOutgoing = map[string][]int{}
+		for from, indexes := range outgoing {
+			walkOutgoing[from] = append([]int(nil), indexes...)
+		}
+		for from, spec := range g.dispatches {
+			for _, target := range spec.targets {
+				walkOutgoing[from] = append(walkOutgoing[from], len(walkEdges))
+				walkEdges = append(walkEdges, runtimeEdge{from: from, to: target})
+				reverse[target] = append(reverse[target], from)
+			}
+		}
+		for name, spec := range g.parallelGroups {
+			for _, branch := range spec.branches {
+				member := parallelMemberName(name, branch.name)
+				walkOutgoing[name] = append(walkOutgoing[name], len(walkEdges))
+				walkEdges = append(walkEdges, runtimeEdge{from: name, to: member})
+				reverse[member] = append(reverse[member], name)
+			}
+		}
+	}
+	reachable := walkRuntimeForward(Start, walkOutgoing, walkEdges)
 	for _, id := range g.nodeOrder {
 		if !reachable[id] {
 			errs = append(errs, validationError("node.unreachable", fmt.Sprintf("nodes[%q]", id), "node is not reachable from START"))
@@ -618,6 +935,22 @@ func (g *Graph[I, O]) runtimeSourceType(id string) (reflect.Type, bool) {
 	}
 	node, ok := g.nodes[id]
 	return node.outputType, ok
+}
+
+// optionTypesProvider 是组件可选的类型声明能力：只声明接受的配置类型，
+// 不执行任何设置函数。未声明的组件不参与按类型广播，只能接收定向选项。
+type optionTypesProvider interface {
+	OptionTypes() []reflect.Type
+}
+
+// declaredOptionTypes 读取组件声明的可接受配置类型；返回值做防御性复制。
+func declaredOptionTypes(node any) []reflect.Type {
+	provider, ok := node.(optionTypesProvider)
+	if !ok || provider == nil {
+		return nil
+	}
+	types := provider.OptionTypes()
+	return append([]reflect.Type(nil), types...)
 }
 
 func bindRuntimeNode(name string, node any) (func(context.Context, any, []runnable.Option) (any, error), reflect.Type, reflect.Type, NodeInfo, graphComponent, error) {
@@ -664,6 +997,51 @@ func bindRuntimeNode(name string, node any) (func(context.Context, any, []runnab
 	}
 	component, _ := node.(graphComponent)
 	return invoker, inputType, outputType, info, component, nil
+}
+
+// typedArgument 与反射路径的 reflectArgument 语义一致：nil 接口值转为 T 的
+// 零值；不匹配的类型仍由断言 panic，经外层 recover 包装为 handler 错误。
+func typedArgument[T any](value any) T {
+	if value == nil {
+		var zero T
+		return zero
+	}
+	return value.(T)
+}
+
+// newRuntimePreHandler 由类型化签名生成直接调用闭包；与反射路径保持相同的
+// panic 包装语义，调用边界只做类型断言。
+func newRuntimePreHandler[S, I any](handler func(context.Context, *S) (I, error)) *runtimePreHandler {
+	return &runtimePreHandler{stateType: typeOf[*S](), inputType: typeOf[I](), invoke: func(ctx context.Context, state any) (output any, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("pre handler panicked: %v", recovered)
+			}
+		}()
+		return handler(ctx, typedArgument[*S](state))
+	}}
+}
+
+func newRuntimePostHandler[S, O any](handler func(context.Context, *S, O) error) *runtimePostHandler {
+	return &runtimePostHandler{stateType: typeOf[*S](), outputType: typeOf[O](), invoke: func(ctx context.Context, state, output any) (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("post handler panicked: %v", recovered)
+			}
+		}()
+		return handler(ctx, typedArgument[*S](state), typedArgument[O](output))
+	}}
+}
+
+func newRuntimeCondition[V any](predicate func(context.Context, V) (bool, error)) *runtimeCondition {
+	return &runtimeCondition{inputType: typeOf[V](), invoke: func(ctx context.Context, input any) (matched bool, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("graph branch predicate panicked: %v", recovered)
+			}
+		}()
+		return predicate(ctx, typedArgument[V](input))
+	}}
 }
 
 func bindRuntimePreHandler(handler any) (*runtimePreHandler, error) {

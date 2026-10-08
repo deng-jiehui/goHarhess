@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 const (
@@ -34,9 +35,12 @@ type Config struct {
 	MaxContextTokens     int
 	ReservedOutputTokens int
 	Counter              TokenCounter
-	RolePolicy           RolePolicy
-	MergeAdjacentRoles   bool
-	PromptCache          PromptCacheConfig
+	// MediaEstimator 估算图片/文件/音频/视频块的 token 成本；nil 时使用
+	// 保守固定值的 ApproxMediaEstimator。媒体内嵌 Data 不参与文本计数。
+	MediaEstimator     MediaTokenEstimator
+	RolePolicy         RolePolicy
+	MergeAdjacentRoles bool
+	PromptCache        PromptCacheConfig
 }
 
 type Request struct {
@@ -94,6 +98,9 @@ func NewContextBuilder(config Config) (*ContextBuilder, error) {
 	if config.Counter == nil {
 		config.Counter = ApproxTokenCounter{}
 	}
+	if config.MediaEstimator == nil {
+		config.MediaEstimator = ApproxMediaEstimator{}
+	}
 	if config.RolePolicy == "" {
 		config.RolePolicy = RolePolicyRepair
 	}
@@ -115,7 +122,29 @@ func NewContextBuilder(config Config) (*ContextBuilder, error) {
 	return &ContextBuilder{config: config}, nil
 }
 
-func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runnable.Option) (Result, error) {
+// Options 是 ContextBuilder 单次调用的类型化运行配置，覆盖 Request 中的
+// Token 预算字段；未设置时回落到 Request 字段，再回落到构造配置。
+type Options struct {
+	MaxContextTokens     int
+	ReservedOutputTokens int
+}
+
+// OptionTypes 声明 ContextBuilder 接收 contextengine.Options 类型的配置选项。
+func (*ContextBuilder) OptionTypes() []reflect.Type {
+	return []reflect.Type{runnable.OptionType[Options]()}
+}
+
+// WithMaxContextTokens 覆盖本次调用的上下文窗口大小。
+func WithMaxContextTokens(max int) runnable.Option {
+	return runnable.WrapOption(func(o *Options) { o.MaxContextTokens = max })
+}
+
+// WithReservedOutputTokens 覆盖本次调用的输出预留 Token 数。
+func WithReservedOutputTokens(reserved int) runnable.Option {
+	return runnable.WrapOption(func(o *Options) { o.ReservedOutputTokens = reserved })
+}
+
+func (a *ContextBuilder) Invoke(ctx context.Context, request Request, options ...runnable.Option) (Result, error) {
 	if a == nil {
 		return Result{}, errors.New("context assembler is not configured")
 	}
@@ -125,12 +154,22 @@ func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runna
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	maxTokens := request.MaxContextTokens
+	resolved, _, err := runnable.ResolveComponentOptions(Options{}, options...)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve context builder options: %w", err)
+	}
+	maxTokens := resolved.MaxContextTokens
+	if maxTokens == 0 {
+		maxTokens = request.MaxContextTokens
+	}
 	if maxTokens == 0 {
 		maxTokens = a.config.MaxContextTokens
 	}
-	reserved := request.ReservedOutputTokens
-	if reserved == 0 && request.MaxContextTokens == 0 {
+	reserved := resolved.ReservedOutputTokens
+	if reserved == 0 && resolved.MaxContextTokens == 0 {
+		reserved = request.ReservedOutputTokens
+	}
+	if reserved == 0 && maxTokens == a.config.MaxContextTokens {
 		reserved = a.config.ReservedOutputTokens
 	}
 	if maxTokens < 1 || reserved < 0 || reserved >= maxTokens {
@@ -158,11 +197,11 @@ func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runna
 		return Result{}, err
 	}
 
+	counter := usageCounter{text: a.config.Counter, media: a.config.MediaEstimator}
 	stats := Stats{
 		BudgetTokens:         budget,
-		InputTokens:          countMessages(append(schema.CloneMessages(prefix), normalized...), a.config.Counter),
 		StablePrefixMessages: len(prefix),
-		StablePrefixTokens:   countMessages(prefix, a.config.Counter),
+		StablePrefixTokens:   countMessages(prefix, counter),
 		RoleRepairs:          repairs,
 	}
 	if stats.StablePrefixTokens > budget {
@@ -170,18 +209,31 @@ func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runna
 	}
 
 	turns := splitTurns(normalized)
-	currentTokens := stats.StablePrefixTokens + countMessages(flattenTurns(turns), a.config.Counter)
-	for currentTokens > budget && len(turns) > 1 {
-		stats.DroppedTurns++
-		stats.DroppedMessages += len(turns[0])
-		turns = turns[1:]
-		currentTokens = stats.StablePrefixTokens + countMessages(flattenTurns(turns), a.config.Counter)
+	// 每轮只计一次数：token 计数随丢弃单调下降，逐轮扣减即可定位
+	// 裁剪点，不再每丢一轮就 flatten+全量重计（原 O(T²)）。
+	turnTokens := make([]int, len(turns))
+	currentTokens := stats.StablePrefixTokens
+	for i, turn := range turns {
+		turnTokens[i] = countMessages(turn, counter)
+		currentTokens += turnTokens[i]
 	}
-	normalized = flattenTurns(turns)
+	// 全量输入 token 等于前缀与全部轮次之和，直接复用累计值，
+	// 不再拼接克隆后重算。
+	stats.InputTokens = currentTokens
+	dropped := 0
+	for currentTokens > budget && dropped < len(turns)-1 {
+		stats.DroppedTurns++
+		stats.DroppedMessages += len(turns[dropped])
+		currentTokens -= turnTokens[dropped]
+		dropped++
+	}
+	// turn 中的消息已是 normalizeRoles 产出的独有副本，直接拼接，
+	// flattenTurns 不再做第二轮深拷贝。
+	normalized = flattenTurns(turns[dropped:])
 	for currentTokens > budget {
 		changed := false
 		for index := range normalized {
-			before := countMessage(normalized[index], a.config.Counter)
+			before := countMessage(normalized[index], counter)
 			if len(normalized[index].ContentBlocks) == 0 {
 				continue
 			}
@@ -192,11 +244,11 @@ func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runna
 				if target < 1 {
 					target = 1
 				}
-				fixed := before - countTopLevelTextBlocks(normalized[index].ContentBlocks, a.config.Counter)
+				fixed := before - countTopLevelTextBlocks(normalized[index].ContentBlocks, counter.text)
 				contentBudget := target - fixed
-				normalized[index].ContentBlocks = truncateBlocks(normalized[index].ContentBlocks, contentBudget, a.config.Counter, true)
+				normalized[index].ContentBlocks = truncateBlocks(normalized[index].ContentBlocks, contentBudget, counter.text, true)
 			}
-			after := countMessage(normalized[index], a.config.Counter)
+			after := countMessage(normalized[index], counter)
 			if after < before {
 				stats.TruncatedMessages++
 				currentTokens -= before - after
@@ -221,12 +273,14 @@ func (a *ContextBuilder) Invoke(ctx context.Context, request Request, _ ...runna
 		}
 		stats.PromptCacheAligned = true
 	}
-	messages := append(schema.CloneMessages(prefix), normalized...)
+	// prefix/normalized 都是引擎自有的独立副本，拼接结果直接移交调用方；
+	// prefix 容量等于长度，append 必然重新分配，不回写原切片。
+	messages := append(prefix, normalized...)
 	if err := validateMessages(messages, "assembled context"); err != nil {
 		return Result{}, err
 	}
-	stats.OutputTokens = countMessages(messages, a.config.Counter)
-	return Result{Messages: schema.CloneMessages(messages), Stats: stats}, nil
+	stats.OutputTokens = countMessages(messages, counter)
+	return Result{Messages: messages, Stats: stats}, nil
 }
 
 func (a *ContextBuilder) Stream(ctx context.Context, input Request, options ...runnable.Option) (*runnable.StreamReader[Result], error) {
@@ -329,7 +383,7 @@ func flattenTurns(turns [][]schema.Message) []schema.Message {
 	}
 	messages := make([]schema.Message, 0, count)
 	for _, turn := range turns {
-		messages = append(messages, schema.CloneMessages(turn)...)
+		messages = append(messages, turn...)
 	}
 	return messages
 }

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestGraphCallbackClosesFailedNodeBeforeGraphError(t *testing.T) {

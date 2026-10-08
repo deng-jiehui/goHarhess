@@ -3,7 +3,6 @@
 package control
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -13,7 +12,7 @@ import (
 var ErrInterruptRequested = errors.New("execution interrupt requested")
 
 // InterruptRequest is a typed cancellation cause that asks an execution
-// engine to persist a continuation at its next safe boundary.
+// engine to persist a checkpoint at its next safe boundary.
 type InterruptRequest struct {
 	Reason   string         `json:"reason,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
@@ -48,13 +47,6 @@ func AsInterrupt(err error) (InterruptRequest, bool) {
 		return InterruptRequest{}, false
 	}
 	return request.Clone(), true
-}
-
-// CheckpointStore persists opaque continuation bytes under an application-owned
-// key. Distributed ownership and consumption semantics belong to the caller.
-type CheckpointStore interface {
-	Save(ctx context.Context, key string, data []byte) error
-	Load(ctx context.Context, key string) (data []byte, found bool, err error)
 }
 
 func cloneMetadata(source map[string]any) map[string]any {

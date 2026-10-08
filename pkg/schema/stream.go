@@ -13,6 +13,8 @@ const (
 // MessageEvent carries either provider-neutral message deltas or cumulative
 // snapshots. Consumers can choose the representation without observing Graph
 // node events.
+// Deprecated: new run-stream consumers should use stream.MessageUpdate and
+// schema.MessageDelta. This type remains for existing callback subscriptions.
 type MessageEvent struct {
 	Kind     MessageEventKind
 	Messages []Message

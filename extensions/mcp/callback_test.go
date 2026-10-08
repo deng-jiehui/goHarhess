@@ -8,9 +8,9 @@ import (
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	mcpext "goharness/extensions/mcp"
-	"goharness/pkg/callback"
-	"goharness/pkg/tool"
+	mcpext "github.com/goharness/goharness/extensions/mcp"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestMCPCallbackReportsProviderNeutralOperations(t *testing.T) {

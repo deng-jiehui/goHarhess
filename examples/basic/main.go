@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/control"
-	"goharness/pkg/graph"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func main() {
@@ -37,12 +36,13 @@ func main() {
 		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("1", "echo", `{"text":"hello from tool"}`))},
 		[]schema.Message{schema.AssistantMessage("tool call finished")},
 	)
-	approved := false
-	approval := tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
-		if !approved {
-			return control.RequestInterrupt("approve tool batch", map[string]any{
-				"tool_call_id": batch.Calls[0].ID,
-			})
+	approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
+		answer, err := graph.Interrupt(ctx, map[string]any{"action": "approve_tools", "calls": batch.Calls})
+		if err != nil {
+			return err
+		}
+		if approved, ok := answer.(bool); !ok || !approved {
+			return errors.New("工具执行未获批准")
 		}
 		return nil
 	})
@@ -57,12 +57,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	store := &memoryExecutionStore{}
+	store := state.NewMemoryStore()
 	checkpoint := agent.WithCheckpoint(store, "example-run")
 	last, err := a.Invoke(ctx, []schema.Message{schema.UserMessage("please use echo")}, checkpoint)
-	if errors.Is(err, graph.ErrInterrupted) {
-		approved = true
-		last, err = agent.Resume(ctx, a, checkpoint)
+	var interrupted *graph.InterruptedError
+	if errors.As(err, &interrupted) {
+		pending := interrupted.PendingInterrupts()
+		// 示例模拟外部输入；实际应用由界面或外部系统提交。
+		last, err = agent.Resume(ctx, a, checkpoint, agent.WithResume(pending[0].ID, true))
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -72,26 +74,4 @@ func main() {
 		data, _ := json.MarshalIndent(msg, "", "  ")
 		fmt.Println(string(data))
 	}
-}
-
-type memoryExecutionStore struct {
-	mu   sync.Mutex
-	data map[string][]byte
-}
-
-func (s *memoryExecutionStore) Save(_ context.Context, key string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.data == nil {
-		s.data = map[string][]byte{}
-	}
-	s.data[key] = append([]byte(nil), data...)
-	return nil
-}
-
-func (s *memoryExecutionStore) Load(_ context.Context, key string) ([]byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, ok := s.data[key]
-	return append([]byte(nil), data...), ok, nil
 }

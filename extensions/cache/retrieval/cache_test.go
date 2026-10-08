@@ -10,9 +10,9 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	retrievalcache "goharness/extensions/cache/retrieval"
-	"goharness/pkg/retrieval"
-	"goharness/pkg/runnable"
+	retrievalcache "github.com/goharness/goharness/extensions/cache/retrieval"
+	"github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestCachedVectorStoreCachesExactQueryAndClonesHits(t *testing.T) {
@@ -173,7 +173,8 @@ func TestCachedVectorStoreBypassDoesNotReadOrWriteCache(t *testing.T) {
 func TestCachedVectorStoreForwardsRunnableOptions(t *testing.T) {
 	upstream := &recordingVectorStore{hits: []retrieval.SearchHit{{ID: "option"}}}
 	cached := newCachedVectorStore(t, upstream, time.Minute)
-	option := runnable.OptionFunc(func(set *runnable.OptionSet) { set.Values["provider"] = "fast" })
+	type vectorProbeConfig struct{ Provider string }
+	option := runnable.WrapOption(func(c *vectorProbeConfig) { c.Provider = "fast" })
 	if _, err := cached.Invoke(context.Background(), vectorQueryRequest(retrieval.VectorQuery{Vector: []float32{1}, TopK: 1}), option); err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/retrieval"
 )
 
 func TestTextChunkerRespectsTokenLimitsOverlapAndOffsets(t *testing.T) {

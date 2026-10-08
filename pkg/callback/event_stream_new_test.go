@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/callback"
 )
 
 func TestEventStreamRoutesExactTypesInRegistrationOrder(t *testing.T) {

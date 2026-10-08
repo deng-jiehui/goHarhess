@@ -10,18 +10,21 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/control"
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
 )
 
 type byteCheckpointStore struct {
-	mu      sync.Mutex
-	data    map[string][]byte
-	loads   int
-	saves   int
-	saveErr error
+	mu        sync.Mutex
+	memory    *state.MemoryStore
+	data      map[string][]byte
+	loads     int
+	saves     int
+	saveErr   error
+	failAfter int
 }
 
 type streamReceiveResult[T any] struct {
@@ -38,26 +41,45 @@ func receiveStreamMessage[T any](stream *runnable.StreamReader[T]) <-chan stream
 	return result
 }
 
-func (s *byteCheckpointStore) Save(_ context.Context, key string, data []byte) error {
+func (s *byteCheckpointStore) store() *state.MemoryStore {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.saves++
-	if s.saveErr != nil {
-		return s.saveErr
+	if s.memory == nil {
+		s.memory = state.NewMemoryStore()
 	}
-	if s.data == nil {
-		s.data = map[string][]byte{}
-	}
-	s.data[key] = append([]byte(nil), data...)
-	return nil
+	return s.memory
 }
-
-func (s *byteCheckpointStore) Load(_ context.Context, key string) ([]byte, bool, error) {
+func (s *byteCheckpointStore) Save(ctx context.Context, c state.Checkpoint) (state.Checkpoint, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.saves++
+	err := s.saveErr
+	if s.saves <= s.failAfter {
+		err = nil
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return state.Checkpoint{}, err
+	}
+	return s.store().Save(ctx, c)
+}
+func (s *byteCheckpointStore) Load(ctx context.Context, key string) (state.Checkpoint, bool, error) {
+	s.mu.Lock()
 	s.loads++
 	data, ok := s.data[key]
-	return append([]byte(nil), data...), ok, nil
+	s.mu.Unlock()
+	if ok {
+		return state.Checkpoint{ConversationID: key, Execution: data}, true, nil
+	}
+	return s.store().Load(ctx, key)
+}
+func (s *byteCheckpointStore) Get(ctx context.Context, key, id string) (state.Checkpoint, bool, error) {
+	return s.store().Get(ctx, key, id)
+}
+func (s *byteCheckpointStore) List(ctx context.Context, key string, o state.ListOptions) ([]state.Checkpoint, error) {
+	return s.store().List(ctx, key, o)
+}
+func (s *byteCheckpointStore) Delete(ctx context.Context, key string) error {
+	return s.store().Delete(ctx, key)
 }
 
 func (s *byteCheckpointStore) counts() (loads, saves int) {
@@ -66,7 +88,7 @@ func (s *byteCheckpointStore) counts() (loads, saves int) {
 	return s.loads, s.saves
 }
 
-type continuationState struct {
+type checkpointTestState struct {
 	Value string
 	Runs  int
 }
@@ -79,8 +101,8 @@ func newInterruptibleGraph(
 ) *graph.Graph[string, string] {
 	t.Helper()
 	g := graph.NewGraph[string, string]("interruptible")
-	if err := g.SetStateFactory(func(_ context.Context, input string) (*continuationState, error) {
-		return &continuationState{Value: input}, nil
+	if err := g.SetStateFactory(func(_ context.Context, input string) (*checkpointTestState, error) {
+		return &checkpointTestState{Value: input}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +116,10 @@ func newInterruptibleGraph(
 		return input + "-first", nil
 	})
 	if err := g.AddNode("first", first,
-		graph.WithPreHandler(func(_ context.Context, state *continuationState) (string, error) {
+		graph.WithPreHandler(func(_ context.Context, state *checkpointTestState) (string, error) {
 			return state.Value, nil
 		}),
-		graph.WithPostHandler(func(_ context.Context, state *continuationState, output string) error {
+		graph.WithPostHandler(func(_ context.Context, state *checkpointTestState, output string) error {
 			firstPostCalls.Add(1)
 			state.Value = output
 			state.Runs++
@@ -110,10 +132,10 @@ func newInterruptibleGraph(
 		return fmt.Sprintf("%s-second-%d", input, firstCalls.Load()), nil
 	})
 	if err := g.AddNode("second", second,
-		graph.WithPreHandler(func(_ context.Context, state *continuationState) (string, error) {
+		graph.WithPreHandler(func(_ context.Context, state *checkpointTestState) (string, error) {
 			return state.Value, nil
 		}),
-		graph.WithPostHandler(func(_ context.Context, state *continuationState, output string) error {
+		graph.WithPostHandler(func(_ context.Context, state *checkpointTestState, output string) error {
 			state.Value = output
 			state.Runs++
 			return nil
@@ -155,7 +177,7 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 	var interrupted *graph.InterruptedError
-	if !errors.As(err, &interrupted) || interrupted.Continuation.ResumeNode != "first" {
+	if !errors.As(err, &interrupted) || inspectCheckpoint(t, interrupted.Checkpoint).ResumeNode != "first" {
 		t.Fatalf("InterruptedError=%#v", interrupted)
 	}
 	if firstPostCalls.Load() != 0 {
@@ -170,7 +192,7 @@ func TestGraphInterruptDuringNodeSkipsCommitAndResumeReplaysNode(t *testing.T) {
 		t.Fatalf("output=%q first calls=%d post calls=%d", output, firstCalls.Load(), firstPostCalls.Load())
 	}
 	loads, saves := store.counts()
-	if loads != 1 || saves != 1 {
+	if loads != 2 || saves != 4 {
 		t.Fatalf("store loads=%d saves=%d", loads, saves)
 	}
 }
@@ -230,7 +252,7 @@ func TestGraphStreamDeliversPersistedInterruptionAfterContextCancellation(t *tes
 
 func TestGraphStreamDeliversCheckpointSaveFailureAfterInterruptRequest(t *testing.T) {
 	saveErr := errors.New("stream checkpoint unavailable")
-	store := &byteCheckpointStore{saveErr: saveErr}
+	store := &byteCheckpointStore{saveErr: saveErr, failAfter: 1}
 	started := make(chan struct{}, 1)
 	type streamState struct{ Messages []schema.Message }
 	g := graph.NewGraph[[]schema.Message, []schema.Message]("failed-message-checkpoint")
@@ -278,7 +300,7 @@ func TestGraphStreamDeliversCheckpointSaveFailureAfterInterruptRequest(t *testin
 	}
 }
 
-func TestGraphOrdinaryCancellationDoesNotSaveCheckpoint(t *testing.T) {
+func TestGraphOrdinaryCancellationKeepsEntryCheckpoint(t *testing.T) {
 	store := &byteCheckpointStore{}
 	started := make(chan struct{}, 1)
 	var firstCalls atomic.Int32
@@ -297,12 +319,12 @@ func TestGraphOrdinaryCancellationDoesNotSaveCheckpoint(t *testing.T) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 	loads, saves := store.counts()
-	if loads != 0 || saves != 0 {
+	if loads != 1 || saves != 1 {
 		t.Fatalf("store loads=%d saves=%d", loads, saves)
 	}
 }
 
-func TestGraphOrdinaryInvokeDoesNotTouchCheckpointStore(t *testing.T) {
+func TestGraphOrdinaryInvokeSavesEveryBoundary(t *testing.T) {
 	store := &byteCheckpointStore{}
 	var firstCalls atomic.Int32
 	var firstPostCalls atomic.Int32
@@ -312,7 +334,7 @@ func TestGraphOrdinaryInvokeDoesNotTouchCheckpointStore(t *testing.T) {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
 	loads, saves := store.counts()
-	if loads != 0 || saves != 0 {
+	if loads != 1 || saves != 3 {
 		t.Fatalf("store loads=%d saves=%d", loads, saves)
 	}
 }
@@ -346,7 +368,7 @@ func TestGraphResumeRejectsMissingAndMalformedCheckpointsBeforeNodes(t *testing.
 	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "missing")); !errors.Is(err, graph.ErrCheckpointNotFound) {
 		t.Fatalf("missing Resume error=%v", err)
 	}
-	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "malformed")); !errors.Is(err, graph.ErrInvalidContinuation) {
+	if _, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "malformed")); !errors.Is(err, state.ErrInvalidCheckpoint) {
 		t.Fatalf("malformed Resume error=%v", err)
 	}
 	if firstCalls.Load() != 0 || firstPostCalls.Load() != 0 {
@@ -365,20 +387,22 @@ func TestGraphResumeRejectsRevisionMismatchBeforeNodes(t *testing.T) {
 	if _, err := compiled.Invoke(ctx, "input", graph.WithCheckpoint(store, "revision")); !errors.Is(err, graph.ErrInterrupted) {
 		t.Fatalf("Invoke error=%v", err)
 	}
-	data, found, err := store.Load(context.Background(), "revision")
+	record, found, err := store.Load(context.Background(), "revision")
+	data := record.Execution
 	if err != nil || !found {
 		t.Fatalf("Load found=%t err=%v", found, err)
 	}
-	continuation, err := graph.DecodeContinuation(data)
+	progress, err := decodeProgress(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	continuation.GraphRevision = "different"
-	tampered, err := continuation.JSON()
+	progress.GraphRevision = "different"
+	tampered, err := progress.JSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(context.Background(), "revision", tampered); err != nil {
+	record.Execution = tampered
+	if _, err := store.Save(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -410,10 +434,10 @@ func TestGraphCheckpointCanBeResumedMoreThanOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != "input-first-second-1" || second != "input-first-second-2" {
+	if first != "input-first-second-1" || second != "input-first-second-1" {
 		t.Fatalf("first=%q second=%q", first, second)
 	}
-	if firstCalls.Load() != 2 || firstPostCalls.Load() != 2 {
+	if firstCalls.Load() != 1 || firstPostCalls.Load() != 1 {
 		t.Fatalf("first calls=%d post calls=%d", firstCalls.Load(), firstPostCalls.Load())
 	}
 }

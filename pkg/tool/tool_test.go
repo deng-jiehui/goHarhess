@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestParseArgsStrict(t *testing.T) {

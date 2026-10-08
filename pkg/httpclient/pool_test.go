@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/httpclient"
 )
 
 func TestPoolSharesTransportAcrossClientTimeouts(t *testing.T) {

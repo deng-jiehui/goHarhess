@@ -3,7 +3,7 @@ package retrieval_test
 import (
 	"testing"
 
-	"goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/retrieval"
 )
 
 func TestRetrieverCallbackInputRequiresOneTypedValue(t *testing.T) {

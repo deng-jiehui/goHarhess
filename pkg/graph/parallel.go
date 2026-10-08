@@ -1,25 +1,45 @@
 package graph
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 // ParallelBranch describes one pure Runnable and its State adapters.
+// NewParallelBranch 提供编译期检查签名、运行期直接调用的构造方式。
 type ParallelBranch struct {
 	Name    string
 	Node    any
 	Pre     any
 	Post    any
 	Options []runnable.Option
+}
+
+// NewParallelBranch builds one branch with compile-time checked State
+// adapters. The node only needs to expose Invoke with matching input and
+// output types; its relation to the branch handlers is checked by Compile.
+func NewParallelBranch[S, I, O any](
+	name string,
+	node interface {
+		Invoke(context.Context, I, ...runnable.Option) (O, error)
+	},
+	pre func(context.Context, *S) (I, error),
+	post func(context.Context, *S, O) error,
+	options ...runnable.Option,
+) ParallelBranch {
+	branch := ParallelBranch{Name: name, Node: node, Options: options}
+	if pre != nil {
+		branch.Pre = newRuntimePreHandler(pre)
+	}
+	if post != nil {
+		branch.Post = newRuntimePostHandler(post)
+	}
+	return branch
 }
 
 type runtimeParallelBranch struct {
@@ -30,13 +50,24 @@ type runtimeParallelBranch struct {
 	pre         *runtimePreHandler
 	post        *runtimePostHandler
 	options     []runnable.Option
+	optionTypes []reflect.Type
+	component   any
 	nestedGraph bool
 	compile     func(map[uintptr]bool) error
 }
 
 type runtimeParallelNode struct {
+	// join 是框架分配的统一汇合节点 ID：分支末端声明替换默认的直接汇合边，
+	// 组名的出边在编译期被解析为从该汇合出发。
+	join     string
 	branches []runtimeParallelBranch
 	merger   runtimeStateMerger
+}
+
+// parallelMember 标记一个并行组的成员节点，保留稳定的「组名＋分支名」身份。
+type parallelMember struct {
+	group  string
+	branch string
 }
 
 type runtimeStateMerger struct {
@@ -62,24 +93,41 @@ type runtimeParallelConfig struct {
 }
 
 // WithStateMerger applies branch State snapshots to the base State in
-// declaration order. The handler signature is
-// func(context.Context, *State, []*State) error.
-func WithStateMerger(handler any) ParallelOption {
+// declaration order. The signature func(context.Context, *S, []*S) error is
+// checked by the Go compiler; whether *S matches the graph State is validated
+// by Compile.
+func WithStateMerger[S any](handler func(context.Context, *S, []*S) error) ParallelOption {
 	return runtimeParallelOption(func(config *runtimeParallelConfig) error {
-		merger, err := bindRuntimeStateMerger(handler)
-		if err != nil {
-			return err
+		if handler == nil {
+			return errors.New("State merger must be a non-nil function")
+		}
+		if typeOf[*S]().Elem().Kind() != reflect.Struct {
+			return errors.New("State merger must have signature func(context.Context, *State, []*State) error")
 		}
 		if config.merger.invoke != nil {
 			return errors.New("parallel node has multiple State mergers")
 		}
-		config.merger = merger
+		config.merger = newRuntimeStateMerger(handler)
 		return nil
 	})
 }
 
+// parallelJoinName 分配组内统一汇合节点的稳定身份。后缀使用保留形式，
+// 分支名中的分隔符已在 AddParallelNode 校验，不会与成员节点冲突。
+func parallelJoinName(name string) string { return name + "/__join__" }
+
+// parallelMemberName 是成员节点的公共身份：分支通过「组名＋分支名」定位，
+// 普通边与恢复契约都复用同一份映射。
+func parallelMemberName(group, branch string) string { return group + "/" + branch }
+
 // AddParallelNode adds a Fan-Out/Fan-In node. State is copied only at this
 // ownership boundary by the configured State Codec.
+//
+// 声明即展开：组名仍是公共入口与路由身份，成员节点以「组名/分支名」登记，
+// 汇合点由框架分配为「组名/__join__」。默认拓扑是 入口扇出 → 各分支 → 汇合；
+// 给分支节点连出更多普通边即可让该分支继续自己的路径，所有路径必须到达汇合。
+// 编译期解析：以组名为目标的边，源在成员路径内时指向汇合，其余指向入口；
+// 以组名为源的边等价于从汇合出发。
 func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, options ...ParallelOption) error {
 	if g == nil {
 		return validationError("graph.nil", "graph", "graph cannot be nil")
@@ -107,14 +155,31 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 		return validationError("parallel.merger.nil", fmt.Sprintf("nodes[%q].merger", name), "parallel node requires a State merger")
 	}
 	owned := make([]runtimeParallelBranch, len(branches))
+	seen := map[string]bool{}
 	for index, branch := range branches {
 		branchName := strings.TrimSpace(branch.Name)
 		if branchName == "" {
 			branchName = fmt.Sprintf("branch[%d]", index)
 		}
+		if strings.Contains(branchName, "/") || branchName == "__join__" || branchName == Start || branchName == End {
+			return validationError("parallel.branch.name", fmt.Sprintf("nodes[%q].branches[%d]", name, index), "branch name %q is reserved or contains a separator", branchName)
+		}
+		if seen[branchName] {
+			return validationError("parallel.branch.duplicate", fmt.Sprintf("nodes[%q].branches[%d]", name, index), "branch name %q is duplicated", branchName)
+		}
+		seen[branchName] = true
 		invoker, inputType, outputType, _, component, err := bindRuntimeNode(branchName, branch.Node)
 		if err != nil {
 			return validationError("parallel.branch.invalid", fmt.Sprintf("nodes[%q].branches[%d]", name, index), "%v", err)
+		}
+		// State 驱动的分支默认使用恒等 Pre 与空 Post：分支在自己的 State 副本上就地修改。
+		if driven, ok := branch.Node.(stateDriven); ok {
+			if branch.Pre == nil {
+				branch.Pre = driven.stateNodePre()
+			}
+			if branch.Post == nil {
+				branch.Post = driven.stateNodePost()
+			}
 		}
 		pre, err := bindOptionalRuntimePreHandler(branch.Pre)
 		if err != nil {
@@ -134,7 +199,8 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 		}
 		owned[index] = runtimeParallelBranch{
 			name: branchName, inputType: inputType, outputType: outputType, invoke: invoker,
-			pre: pre, post: post, options: nodeScopedOptions(branch.Options), nestedGraph: component != nil,
+			pre: pre, post: post, options: append([]runnable.Option(nil), branch.Options...),
+			optionTypes: declaredOptionTypes(branch.Node), component: branch.Node, nestedGraph: component != nil,
 		}
 		if component != nil {
 			owned[index].compile = component.compileGraph
@@ -146,10 +212,15 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 			compilers = append(compilers, branch.compile)
 		}
 	}
+	spec := &runtimeParallelNode{join: parallelJoinName(name), branches: owned, merger: config.merger}
+	stateT := config.merger.stateType
 	entry := runtimeNode{
-		id: name, inputType: config.merger.stateType, outputType: config.merger.stateType,
-		info:     NodeInfo{ID: name, Kind: runnable.NodeKindParallel, Label: name, InputType: typeName(config.merger.stateType), OutputType: typeName(config.merger.stateType)},
-		parallel: &runtimeParallelNode{branches: owned, merger: config.merger},
+		id: name, inputType: stateT, outputType: stateT,
+		info:     NodeInfo{ID: name, Kind: runnable.NodeKindParallel, Label: name, InputType: typeName(stateT), OutputType: typeName(stateT)},
+		parallel: spec,
+		// 入口只做边界：输入由 State 重建，输出原样透传，扇出在调度层完成。
+		pre:    &runtimePreHandler{stateType: stateT, inputType: stateT, invoke: func(_ context.Context, s any) (any, error) { return s, nil }},
+		invoke: func(_ context.Context, in any, _ []runnable.Option) (any, error) { return in, nil },
 		compile: func(stack map[uintptr]bool) error {
 			for _, compile := range compilers {
 				if err := compile(stack); err != nil {
@@ -161,20 +232,61 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "nodes", "built graph cannot be modified")
-	}
 	if _, exists := g.nodes[name]; exists {
 		return validationError("node.id.duplicate", fmt.Sprintf("nodes[%q].id", name), "node ID is already registered")
 	}
+	for index, branch := range owned {
+		memberID := parallelMemberName(name, branch.name)
+		if _, exists := g.nodes[memberID]; exists {
+			return validationError("node.id.duplicate", fmt.Sprintf("nodes[%q].branches[%d]", name, index), "member node ID %q is already registered", memberID)
+		}
+	}
+	if _, exists := g.nodes[spec.join]; exists {
+		return validationError("node.id.duplicate", fmt.Sprintf("nodes[%q].id", name), "join node ID %q is already registered", spec.join)
+	}
 	g.nodes[name] = entry
 	g.nodeOrder = append(g.nodeOrder, name)
+	for _, branch := range owned {
+		memberID := parallelMemberName(name, branch.name)
+		g.nodes[memberID] = runtimeNode{
+			id: memberID, component: branch.component, inputType: branch.inputType, outputType: branch.outputType,
+			info:        NodeInfo{ID: memberID, Kind: runnable.NodeKindRunnable, Label: memberID, InputType: typeName(branch.inputType), OutputType: typeName(branch.outputType)},
+			options:     append([]runnable.Option(nil), branch.options...),
+			optionTypes: append([]reflect.Type(nil), branch.optionTypes...),
+			pre:         branch.pre,
+			post:        branch.post,
+			invoke:      branch.invoke,
+			compile:     branch.compile,
+			nestedGraph: branch.nestedGraph,
+			parallelMember: &parallelMember{
+				group:  name,
+				branch: branch.name,
+			},
+		}
+		g.nodeOrder = append(g.nodeOrder, memberID)
+	}
+	g.nodes[spec.join] = runtimeNode{
+		id: spec.join, inputType: stateT, outputType: stateT,
+		info:         NodeInfo{ID: spec.join, Kind: runnable.NodeKindParallel, Label: spec.join, InputType: typeName(stateT), OutputType: typeName(stateT)},
+		parallelJoin: spec,
+	}
+	g.nodeOrder = append(g.nodeOrder, spec.join)
+	if g.parallelGroups == nil {
+		g.parallelGroups = map[string]*runtimeParallelNode{}
+	}
+	g.parallelGroups[name] = spec
 	return nil
 }
+
+// 注意：component 保存原始组件对象（与普通节点一致），编译下钻经由
+// branch.compile，嵌套图与 relay 语义分别由 nestedGraph/relay 标记。
 
 func bindOptionalRuntimePreHandler(handler any) (*runtimePreHandler, error) {
 	if handler == nil {
 		return nil, nil
+	}
+	if bound, ok := handler.(*runtimePreHandler); ok {
+		return bound, nil
 	}
 	return bindRuntimePreHandler(handler)
 }
@@ -183,135 +295,25 @@ func bindOptionalRuntimePostHandler(handler any) (*runtimePostHandler, error) {
 	if handler == nil {
 		return nil, nil
 	}
+	if bound, ok := handler.(*runtimePostHandler); ok {
+		return bound, nil
+	}
 	return bindRuntimePostHandler(handler)
 }
 
-func bindRuntimeStateMerger(handler any) (runtimeStateMerger, error) {
-	value := reflect.ValueOf(handler)
-	if !value.IsValid() || isNilReflectValue(value) || value.Kind() != reflect.Func {
-		return runtimeStateMerger{}, errors.New("State merger must be a non-nil function")
-	}
-	typeOfHandler := value.Type()
-	if typeOfHandler.NumIn() != 3 || typeOfHandler.In(0) != contextType || typeOfHandler.In(1).Kind() != reflect.Pointer || typeOfHandler.In(1).Elem().Kind() != reflect.Struct || typeOfHandler.In(2).Kind() != reflect.Slice || typeOfHandler.In(2).Elem() != typeOfHandler.In(1) || typeOfHandler.NumOut() != 1 || typeOfHandler.Out(0) != errorType {
-		return runtimeStateMerger{}, errors.New("State merger must have signature func(context.Context, *State, []*State) error")
-	}
-	stateType := typeOfHandler.In(1)
-	return runtimeStateMerger{stateType: stateType, invoke: func(ctx context.Context, base any, branches []any) (err error) {
+// newRuntimeStateMerger 由类型化签名生成直接调用闭包，与反射路径保持相同的
+// panic 包装语义。
+func newRuntimeStateMerger[S any](handler func(context.Context, *S, []*S) error) runtimeStateMerger {
+	return runtimeStateMerger{stateType: typeOf[*S](), invoke: func(ctx context.Context, base any, branches []any) (err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				err = fmt.Errorf("State merger panicked: %v", recovered)
 			}
 		}()
-		branchValues := reflect.MakeSlice(typeOfHandler.In(2), len(branches), len(branches))
+		typed := make([]*S, len(branches))
 		for index, branch := range branches {
-			branchValues.Index(index).Set(reflect.ValueOf(branch))
+			typed[index] = typedArgument[*S](branch)
 		}
-		outputs := value.Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(base), branchValues})
-		if !outputs[0].IsNil() {
-			return outputs[0].Interface().(error)
-		}
-		return nil
-	}}, nil
-}
-
-func (g *Graph[I, O]) invokeRuntimeParallel(ctx context.Context, node *runtimeParallelNode, base any, plan runnable.OptionPlan) error {
-	codec := g.runtimeCodec()
-	if codec == nil {
-		return errors.New("parallel node requires a State factory and State Codec")
-	}
-	data, err := callStateCodecEncode(ctx, codec, base)
-	if err != nil {
-		return fmt.Errorf("snapshot parallel base State: %w", err)
-	}
-	inputs := make([]any, len(node.branches))
-	seenPointers := map[uintptr]string{reflect.ValueOf(base).Pointer(): "base State"}
-	for index := range node.branches {
-		inputs[index], err = callStateCodecDecode(ctx, codec, data)
-		if err != nil {
-			return fmt.Errorf("restore parallel branch %q State: %w", node.branches[index].name, err)
-		}
-		if reflect.TypeOf(inputs[index]) != g.stateType {
-			return fmt.Errorf("parallel branch %q State type %T, want %s", node.branches[index].name, inputs[index], typeName(g.stateType))
-		}
-		pointer := reflect.ValueOf(inputs[index]).Pointer()
-		if owner, exists := seenPointers[pointer]; exists {
-			return fmt.Errorf("parallel branch %q Codec did not create an independent State pointer; it shares ownership with %s", node.branches[index].name, owner)
-		}
-		seenPointers[pointer] = fmt.Sprintf("branch %q", node.branches[index].name)
-		if g.codec == nil {
-			if err := compareDynamicTypes(reflect.ValueOf(base), reflect.ValueOf(inputs[index]), g.stateType.String(), map[visitPair]bool{}); err != nil {
-				return fmt.Errorf("default State Codec lost dynamic type: %w; configure a custom State Codec", err)
-			}
-			if index == 0 {
-				roundTrip, err := json.Marshal(inputs[index])
-				if err != nil {
-					return fmt.Errorf("encode parallel State JSON round trip: %w", err)
-				}
-				if !bytes.Equal(data, roundTrip) {
-					return errors.New("default State Codec produced an unstable JSON round trip; configure a custom State Codec")
-				}
-			}
-		}
-	}
-	control, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	var workers sync.WaitGroup
-	var firstErr error
-	var errorOnce sync.Once
-	workers.Add(len(node.branches))
-	for index := range node.branches {
-		go func(index int) {
-			defer workers.Done()
-			branch := node.branches[index]
-			branchCtx := withRuntimeState(control, inputs[index])
-			branchPlan, err := plan.Cascade(branch.options...)
-			if err != nil {
-				errorOnce.Do(func() {
-					firstErr = fmt.Errorf("parallel branch %q options: %w", branch.name, err)
-					cancel(firstErr)
-				})
-				return
-			}
-			branchCtx = runnable.WithOptionPlan(branchCtx, branchPlan)
-			input := inputs[index]
-			if branch.pre != nil {
-				input, err = branch.pre.invoke(branchCtx, inputs[index])
-				if err != nil {
-					errorOnce.Do(func() {
-						firstErr = fmt.Errorf("parallel branch %q pre handler: %w", branch.name, err)
-						cancel(firstErr)
-					})
-					return
-				}
-			}
-			invokeCtx := branchCtx
-			if branch.nestedGraph {
-				invokeCtx = withoutRuntimeStateCheckpointProvider(invokeCtx)
-			}
-			output, err := branch.invoke(invokeCtx, input, branchPlan.ForwardOptionsFor(runnable.OptionScopeNode))
-			if err != nil {
-				errorOnce.Do(func() {
-					firstErr = fmt.Errorf("parallel branch %q: %w", branch.name, err)
-					cancel(firstErr)
-				})
-				return
-			}
-			if branch.post != nil {
-				if err := branch.post.invoke(branchCtx, inputs[index], output); err != nil {
-					errorOnce.Do(func() {
-						firstErr = fmt.Errorf("parallel branch %q post handler: %w", branch.name, err)
-						cancel(firstErr)
-					})
-				}
-			}
-		}(index)
-	}
-	workers.Wait()
-	if firstErr != nil {
-		return firstErr
-	}
-	if err := node.merger.invoke(ctx, base, inputs); err != nil {
-		return fmt.Errorf("merge parallel State: %w", err)
-	}
-	return nil
+		return handler(ctx, typedArgument[*S](base), typed)
+	}}
 }

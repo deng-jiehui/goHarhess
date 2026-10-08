@@ -4,21 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
-	"time"
 
-	"goharness/internal/agentrecipe"
-	"goharness/pkg/callback"
-	"goharness/pkg/schema"
-	"goharness/pkg/state"
+	"github.com/goharness/goharness/internal/agentrecipe"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
 )
 
 type conversationSession struct {
-	store        state.Store
-	writeTimeout time.Duration
-	checkpoint   state.Checkpoint
-	input        []schema.Message
-	values       map[string]any
+	checkpoint state.Checkpoint
+	input      []schema.Message
+	values     map[string]any
 }
 
 func (s *conversationSession) bind(ctx context.Context) context.Context {
@@ -27,7 +27,13 @@ func (s *conversationSession) bind(ctx context.Context) context.Context {
 	}
 	checkpoint := s.checkpoint.Clone()
 	checkpoint.Values = callback.CloneMetadata(s.values)
-	return state.WithCheckpoint(ctx, checkpoint)
+	ctx = state.WithCheckpoint(ctx, checkpoint)
+	// 会话标识属于运行追踪信息，经 ctx 元数据下发给回调与工具；
+	// 与持久化 State 分离，不参与业务 values。
+	return callback.WithMetadata(ctx, map[string]any{
+		"conversation_id":    checkpoint.ConversationID,
+		"checkpoint_version": checkpoint.Version,
+	})
 }
 
 func bindRunContext(ctx context.Context, session *conversationSession) context.Context {
@@ -36,17 +42,24 @@ func bindRunContext(ctx context.Context, session *conversationSession) context.C
 
 func conversationInput(session *conversationSession, fallback []schema.Message) []schema.Message {
 	if session != nil {
-		return schema.CloneMessages(session.input)
+		// session.input 归本次运行独有且按不可变约定只读，复制切片即可。
+		return append([]schema.Message(nil), session.input...)
 	}
 	return schema.CloneMessages(fallback)
 }
 
-func withRecipeCompletion(ctx context.Context, session *conversationSession) context.Context {
-	return agentrecipe.WithCompletionSink(ctx, func(input []schema.Message) {
-		if session != nil {
-			session.input = schema.CloneMessages(input)
-		}
-	})
+// recipeRunConfig 将完整会话与模型工作消息分开，恢复时由持久化 State 提供。
+// 会话侧数据在 loadConversation 完成隔离，这里只装配新切片、共享不可变元素。
+func recipeRunConfig(session *conversationSession, messages []schema.Message, maxLLMCalls int) agentrecipe.RunConfig {
+	cfg := agentrecipe.RunConfig{Input: conversationInput(session, messages), MaxLLMCalls: maxLLMCalls}
+	if session != nil {
+		cfg.History = make([]schema.Message, 0, len(session.checkpoint.Messages)+len(session.input))
+		cfg.History = append(cfg.History, session.checkpoint.Messages...)
+		cfg.History = append(cfg.History, session.input...)
+	} else {
+		cfg.History = schema.CloneMessages(messages)
+	}
+	return cfg
 }
 
 func (b *base) loadConversation(
@@ -54,71 +67,79 @@ func (b *base) loadConversation(
 	incoming []schema.Message,
 	opts *RunOptions,
 ) ([]schema.Message, *conversationSession, error) {
-	if opts == nil || opts.CheckpointBypass || strings.TrimSpace(opts.ConversationID) == "" {
+	if opts == nil || opts.CheckpointBypass {
 		return schema.CloneMessages(incoming), nil, nil
 	}
 	if ctx == nil {
 		return nil, nil, errors.New("conversation load context cannot be nil")
 	}
-	if b.checkpointStore == nil {
+	store := b.checkpointStore
+	conversationID := strings.TrimSpace(opts.ConversationID)
+	if opts.checkpointSet {
+		opts.checkpointKey = strings.TrimSpace(opts.checkpointKey)
+		if opts.checkpointKey == "" {
+			return nil, nil, errors.New("checkpoint ID cannot be empty")
+		}
+		if conversationID != "" && conversationID != opts.checkpointKey {
+			return nil, nil, errors.New("checkpoint ID and conversation ID must match")
+		}
+		conversationID = opts.checkpointKey
+		store = opts.checkpointStore
+	}
+	if conversationID == "" {
+		return schema.CloneMessages(incoming), nil, nil
+	}
+	if store == nil || (reflect.ValueOf(store).Kind() == reflect.Pointer && reflect.ValueOf(store).IsNil()) {
 		return nil, nil, errors.New("conversation ID requires an Agent checkpoint store")
 	}
-	conversationID := strings.TrimSpace(opts.ConversationID)
-	checkpoint, found, err := b.checkpointStore.Load(ctx, conversationID)
+	loadCtx := ctx
+	if _, interrupted := control.AsInterrupt(context.Cause(ctx)); interrupted {
+		loadCtx = context.WithoutCancel(ctx)
+	}
+	loadCtx, cancel := context.WithTimeout(loadCtx, b.checkpointTimeout)
+	defer cancel()
+	checkpoint, found, err := store.Load(loadCtx, conversationID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load conversation checkpoint %q: %w", conversationID, err)
 	}
 	if !found {
 		checkpoint = state.Checkpoint{ConversationID: conversationID, Values: map[string]any{}}
 	}
-	values := checkpoint.Clone().Values
-	for key, value := range opts.StateValues {
-		values[key] = value
-	}
-	opts.Metadata["conversation_id"] = conversationID
-	opts.Metadata["checkpoint_version"] = checkpoint.Version
-	assembled := append(schema.CloneMessages(checkpoint.Messages), schema.CloneMessages(incoming)...)
-	input := schema.CloneMessages(incoming)
-	return assembled, &conversationSession{
-		store:        b.checkpointStore,
-		writeTimeout: b.checkpointTimeout,
-		checkpoint:   checkpoint.Clone(),
-		input:        input,
-		values:       callback.CloneMetadata(values),
-	}, nil
-}
-
-func (s *conversationSession) commit(ctx context.Context, output []schema.Message) error {
-	if s == nil || s.store == nil {
-		return nil
-	}
-	checkpoint := s.checkpoint.Clone()
-	checkpoint.Messages = append(checkpoint.Messages, schema.CloneMessages(s.input)...)
-	checkpoint.Messages = append(checkpoint.Messages, withoutSystemMessages(output)...)
-	checkpoint.Values = callback.CloneMetadata(s.values)
-	writeCtx, cancel := s.writeContext(ctx)
-	defer cancel()
-	saved, err := s.store.Save(writeCtx, checkpoint)
-	if err != nil {
-		return fmt.Errorf("save conversation checkpoint %q: %w", checkpoint.ConversationID, err)
-	}
-	s.checkpoint = saved.Clone()
-	return nil
-}
-
-func (s *conversationSession) writeContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
-}
-
-func withoutSystemMessages(messages []schema.Message) []schema.Message {
-	filtered := make([]schema.Message, 0, len(messages))
-	for _, message := range messages {
-		if message.Role != schema.RoleSystem {
-			filtered = append(filtered, schema.CloneMessages([]schema.Message{message})[0])
+	if !opts.resume && checkpoint.Unfinished() {
+		if !opts.abandonUnfinished {
+			return nil, nil, fmt.Errorf("conversation %q: %w", conversationID, state.ErrUnfinishedRun)
+		}
+		if checkpoint, err = state.AbandonRun(loadCtx, store, conversationID); err != nil {
+			return nil, nil, fmt.Errorf("abandon unfinished run of conversation %q: %w", conversationID, err)
 		}
 	}
-	return filtered
+	opts.ConversationID = conversationID
+	// 检查点与持久化是配方图的入口配置，经转发通道交给图自己解析。
+	opts.forwarded = append(opts.forwarded, graph.WithCheckpointTimeout(store, conversationID, b.checkpointTimeout))
+	durability := b.checkpointDurability
+	if opts.durability != "" {
+		durability = opts.durability
+	}
+	if durability != "" {
+		opts.forwarded = append(opts.forwarded, graph.WithDurability(durability))
+	}
+	// checkpoint 由 Store.Load 返回的独立副本，已归本次运行所有；
+	// 只需要隔离 Values 供运行期修改，不再整份克隆。
+	values := callback.CloneMetadata(checkpoint.Values)
+	if !opts.resume {
+		for key, value := range opts.StateValues {
+			values[key] = value
+		}
+	}
+	// incoming 是调用方消息，进入运行边界克隆一次；checkpoint.Messages
+	// 已归运行所有，元素按不可变约定共享，只装配新切片。
+	input := schema.CloneMessages(incoming)
+	assembled := make([]schema.Message, 0, len(checkpoint.Messages)+len(input))
+	assembled = append(assembled, checkpoint.Messages...)
+	assembled = append(assembled, input...)
+	return assembled, &conversationSession{
+		checkpoint: checkpoint,
+		input:      input,
+		values:     values,
+	}, nil
 }

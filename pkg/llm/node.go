@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/stream"
 )
 
 // ChatModelNode turns a provider ChatModel into an observable Graph component.
@@ -72,7 +73,7 @@ func (n *ChatModelNode) Stream(ctx context.Context, request Request, options ...
 		"llm.model_type":               info.ModelType,
 		"llm.endpoint":                 info.Endpoint,
 		"llm.streaming":                true,
-		"llm.function_count":           len(request.Options.Functions),
+		"llm.function_count":           len(request.Functions),
 		"llm.capabilities.streaming":   capabilities.Streaming,
 		"llm.capabilities.tool_calls":  capabilities.ToolCalls,
 		"llm.capabilities.vision":      capabilities.Vision,
@@ -83,6 +84,7 @@ func (n *ChatModelNode) Stream(ctx context.Context, request Request, options ...
 		metadata["llm.attributes"] = info.Attributes
 	}
 	modelCtx, invocation := BeginCallback(ctx, n.name, metadata, request)
+	modelCtx, _ = stream.TrackMessages(modelCtx)
 	upstream, err := n.model.Stream(modelCtx, request.Clone(), options...)
 	if err != nil {
 		ErrorCallback(modelCtx, invocation, err)

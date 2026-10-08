@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestMiddlewareFuncCallsNext(t *testing.T) {

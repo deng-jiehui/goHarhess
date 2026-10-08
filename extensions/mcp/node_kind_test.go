@@ -3,8 +3,8 @@ package mcp_test
 import (
 	"testing"
 
-	mcpext "goharness/extensions/mcp"
-	"goharness/pkg/runnable"
+	mcpext "github.com/goharness/goharness/extensions/mcp"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 func TestDynamicToolsNodeDeclaresMCPNodeKind(t *testing.T) {

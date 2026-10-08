@@ -11,11 +11,11 @@ import (
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	mcpext "goharness/extensions/mcp"
-	"goharness/pkg/agent"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	mcpext "github.com/goharness/goharness/extensions/mcp"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestMCPResultPreservesContentThenStructuredPayload(t *testing.T) {
@@ -155,10 +155,11 @@ func TestMCPToolsRunInReactAgentAppendOnlyLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
-	model := llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, options llm.ChatOptions) ([]schema.Message, error) {
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		messages := request.Messages
 		current := calls.Add(1)
-		if len(options.Functions) != 1 || options.Functions[0].Name != "lookup" {
-			return nil, fmt.Errorf("model tool definitions = %#v", options.Functions)
+		if len(request.Functions) != 1 || request.Functions[0].Name != "lookup" {
+			return nil, fmt.Errorf("model tool definitions = %#v", request.Functions)
 		}
 		if current == 1 {
 			return []schema.Message{mcpCall("lookup", `{"key":"alpha"}`, "lookup-1")}, nil

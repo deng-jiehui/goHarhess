@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestToolModelVisibleErrorUsesEndLifecycle(t *testing.T) {

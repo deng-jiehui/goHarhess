@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/goharness/goharness/pkg/state"
 )
 
 var (
@@ -133,9 +135,6 @@ func (g *Graph[I, O]) SetStateCodec(codec StateCodec) error {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.built {
-		return validationError("graph.built", "state_codec", "built graph cannot be modified")
-	}
 	g.codec = codec
 	g.codecID = id
 	g.codecVersion = version
@@ -328,6 +327,20 @@ func (g *Graph[I, O]) snapshotRuntimeState(ctx context.Context, state any) (Grap
 	return checkpoint, nil
 }
 
+// hydrateRuntimeState 在快照解码后回填被外部化的会话字段：实现
+// state.ConversationRestorer 且 NeedsConversation 的 State 必须用检查点
+// 完整会话回填，长度不足或解码错误作为恢复不兼容上报。
+func hydrateRuntimeState(runtimeState any, messages state.Conversation) (any, error) {
+	restorer, ok := runtimeState.(state.ConversationRestorer)
+	if !ok || !restorer.NeedsConversation() {
+		return runtimeState, nil
+	}
+	if err := restorer.RestoreConversation(messages); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrResumeIncompatible, err)
+	}
+	return runtimeState, nil
+}
+
 func (g *Graph[I, O]) restoreRuntimeState(ctx context.Context, checkpoint GraphStateCheckpoint) (any, error) {
 	codec := g.runtimeCodec()
 	if codec == nil {
@@ -338,14 +351,14 @@ func (g *Graph[I, O]) restoreRuntimeState(ctx context.Context, checkpoint GraphS
 	}
 	id, version := g.runtimeCodecMetadata()
 	if checkpoint.CodecID != id || checkpoint.Version != version {
-		return nil, fmt.Errorf("Graph State checkpoint Codec %q/%d does not match %q/%d", checkpoint.CodecID, checkpoint.Version, id, version)
+		return nil, fmt.Errorf("%w: Graph State checkpoint Codec %q/%d does not match %q/%d", ErrResumeIncompatible, checkpoint.CodecID, checkpoint.Version, id, version)
 	}
 	state, err := callStateCodecDecode(ctx, codec, checkpoint.Data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: decode Graph State checkpoint: %v", ErrResumeIncompatible, err)
 	}
 	if reflect.TypeOf(state) != g.stateType {
-		return nil, fmt.Errorf("Graph State checkpoint decoded %T, want %s", state, typeName(g.stateType))
+		return nil, fmt.Errorf("%w: Graph State checkpoint decoded %T, want %s", ErrResumeIncompatible, state, typeName(g.stateType))
 	}
 	return state, nil
 }

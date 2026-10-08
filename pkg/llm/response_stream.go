@@ -5,8 +5,9 @@ import (
 	"errors"
 	"io"
 
-	"goharness/pkg/callback"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/stream"
 )
 
 // ObserveReader owns one ChatModel lifecycle while preserving the canonical
@@ -47,6 +48,12 @@ func ObserveReaderWithInvocation(ctx context.Context, invocation callback.Invoca
 					_ = writer.CloseWithError(ErrStreamTruncated)
 					return
 				}
+				if stream.HasMessageTracking(ctx) && !stream.MessagesPublished(ctx) {
+					if err := stream.PublishSnapshots(ctx, final.Messages); err != nil {
+						_ = writer.CloseWithError(err)
+						return
+					}
+				}
 				EndCallback(ctx, invocation, final)
 				return
 			}
@@ -56,6 +63,7 @@ func ObserveReaderWithInvocation(ctx context.Context, invocation callback.Invoca
 				return
 			}
 			final = value.Clone()
+			stream.EnsureMessageIDs(final.Messages)
 			sawResponse = true
 			if err := writer.Send(final.Clone()); err != nil {
 				ErrorCallback(ctx, invocation, err)

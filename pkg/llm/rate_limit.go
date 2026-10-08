@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type RateLimitConfig struct {
@@ -42,6 +43,26 @@ func NewRateLimitedModel(model ChatModel, config RateLimitConfig) (*RateLimitedM
 }
 
 func (m *RateLimitedModel) Capabilities() Capabilities { return m.model.Capabilities() }
+
+// UnwrapModel 返回被包装的下层模型，供策略链检查与重组使用。
+func (m *RateLimitedModel) UnwrapModel() ChatModel { return m.model }
+
+// Policy 返回生效中的限流配置。
+func (m *RateLimitedModel) Policy() RateLimitConfig {
+	return RateLimitConfig{MaxConcurrent: m.maxConcurrent, MinInterval: m.minInterval}
+}
+
+// OptionTypes 透传下游模型声明的扩展配置类型，让 Provider 专属选项能穿过
+// 限流包装层参与按类型分发。
+func (m *RateLimitedModel) OptionTypes() []reflect.Type {
+	if m == nil {
+		return nil
+	}
+	if provider, ok := m.model.(optionTypesProvider); ok && provider != nil {
+		return provider.OptionTypes()
+	}
+	return nil
+}
 func (m *RateLimitedModel) ModelInfo() ModelInfo {
 	info := DescribeModel(m.model)
 	if info.Attributes == nil {

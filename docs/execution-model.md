@@ -12,6 +12,31 @@
 `Stream` 返回 `*runnable.StreamReader[O]`；编译后的 Graph 仅暴露其
 完整的 END 结果。实时模型分片、工具进度和 Agent 快照通过类型化 Context EventStream 回调传递。Graph 生命周期事件使用类型化 Graph Callback 接口，绝不会进入业务数据 Reader。
 
+## 调度循环与执行模式
+
+Graph 只有一个调度循环。`Invoke`/`Resume` 与 `Stream`/`ResumeStream` 共用同一套控制语义：
+路由、步数上限、嵌套深度、CursorFrame、中断检测与落盘、Pre/Post Handler 和生命周期事件。
+两者唯一的区别是执行模式，它只决定每个节点采用哪一种执行形态、边上传递值还是流：
+
+| 模式 | 节点执行形态 | 边上的数据 |
+| --- | --- | --- |
+| Invoke | 一律 `Invoke` | 完整值 |
+| Stream | 输入为流时优先 `Transform`，其次 `Collect`；输入为值时优先 `Stream`，否则 `Invoke` | 值或流 |
+
+Stream 模式在以下位置把流物化为完整值：节点有 PreHandler 或 PostHandler、节点是并行节点、
+节点既无 `Transform` 也无 `Collect`、源节点存在条件出边、到达 END。配置 Checkpoint 或包含并行节点时，
+Stream 仍按上述规则以流形态执行节点，不会退化为 Invoke。
+
+每一步的固定顺序为：步数检查 → 前置中断检查 → 游标/NodeStart → PreHandler → 节点执行 →
+执行后中断检查 → PostHandler 提交 → NodeOutput/NodeEnd → 提交后路由 → AfterCommit 中断检查。
+流形态节点的 NodeEnd 延后到其输出流被下游消费完或提交之后。
+
+## 原生并行分支
+
+`AddFork` 和 `AddJoin` 可以直接组织普通节点的扇出与汇合。调度器每轮执行一批任务，短分支到达后等待长分支；整轮成功后通过 `SetStepMerger` 合并 State，再保存下一轮任务和汇合记录。`SetMaxConcurrency` 限制并发数，`MaxSteps` 按累计节点任务数计算。`AddBranch` 继续保持首个命中语义。
+
+原生分支图要求普通节点有 PreHandler，并显式配置合并器。分支中的流在轮末提交前收集完毕，流执行失败不会提交 State。完整规则、限制与示例见 [Graph 原生并行分支](graph-branches.md)。
+
 ## Graph 边界与纯节点
 
 只有公开的 Graph 输入和输出使用泛型：
@@ -50,6 +75,9 @@ _ = g.AddBranch("chat", "tools", "has_tool_calls",
 _ = g.AddEdge("chat", "finish") // unconditional fallback
 ```
 
+处理函数另有一组编译期检查签名的入口，类型参数全部从函数签名推导，生成的闭包直接调用、不再经过反射：
+`graph.WithPreHandler`、`graph.WithPostHandler`、`graph.WithStateMerger` 本身就是泛型函数；`SetStateFactory`、`AddBranch`、`SetStepMerger` 因 Go 方法不能声明类型参数，提供同名包级函数 `graph.SetStateFactory(g, fn)`、`graph.AddBranch(g, from, to, label, fn)`、`graph.SetStepMerger(g, fn)`；并行分支可用 `graph.NewParallelBranch` 构造。两组入口混用合法，`Compile` 的类型与拓扑校验对两者完全一致。
+
 ## Runtime State
 
 State 是可选的。有状态 Graph 注册一个工厂，其结果必须是非 nil 的结构体指针：
@@ -86,6 +114,25 @@ _ = g.AddNode("search", retriever,
 
 没有 PreHandler 时，入边值必须可赋给节点输入。PostHandler 可以修改 State，但不会替换出边值；节点输出仍可供下游节点和基于输出的分支使用。
 
+### State 节点
+
+当业务步骤本身就围绕 State 组织（读取字段、调用组件、就地写回）时，用 `graph.StateNode` 代替"组件 + Pre + Post"三段式；输入输出固定为 `*S`，函数内直接修改 State，不凭空产生业务输出：
+
+```go
+_ = g.AddNode("search", graph.StateNode(func(
+    ctx context.Context, state *ResearchState,
+) error {
+    result, err := retriever.Invoke(ctx, retrieval.Query{Text: state.Topic})
+    if err != nil {
+        return err
+    }
+    state.Notes = append(state.Notes, result.Text)
+    return nil
+}))
+```
+
+State 节点自动携带恒等 PreHandler（`AddNode` 与并行分支识别该形态，显式 `WithPreHandler` 仍可覆盖），因此天然满足可恢复性与动态中断对 Pre 的要求，函数内的 `graph.Interrupt`、选项与回调照常生效。State 节点链可零胶水直连；接普通节点时由下游自己的 PreHandler 提取输入，作为图结束节点时由 finish 类节点声明输出。并行分支中的 State 节点修改分支自己的 State 副本，轮末仍由 merger 合并；未指定 Post 时默认为空操作。
+
 Graph 持有拓扑锁时不会运行用户函数。节点和 Handler 接收节点执行 Context，其中包含取消、截止时间、Trace 和 Callback span 值。
 
 ## State snapshots
@@ -118,10 +165,12 @@ Fan-Out 分支接收独立的 State 指针，并通过显式 `WithStateMerger` �
 每个执行中的节点都会压入一个可安全编码为 JSON 的 `graph.CursorFrame`。中断的 Checkpoint 持久化完整 `CursorStack`；Resume 消费匹配的
 顶层帧，无需重建 Go 调用栈。Context、goroutine、客户端和工具批次等运行时对象从不存储。
 
-可恢复 Graph 要求每个可能的恢复目标都有 State Codec 和 PreHandler。任意异构边值不会被序列化。Graph 会在调用用户代码前校验 Checkpoint Schema、Graph 名称、确定性版本、Codec 和恢复节点。
+可恢复 Graph 要求 State 可序列化，且每个可能的恢复目标节点具备输入重建能力：有 PreHandler 的节点由 PreHandler 从 State 重建输入；没有 PreHandler 的顺序节点在调度时把边输入冻结为 JSON 存入任务（编码发生在执行线程，节点之后的修改不影响已保存输入），其输入类型必须能 JSON 往返——接口、`chan`、函数、Reader 等类型在编译期就使图失去可恢复性，嵌套动态值（如 `map[string]any` 中的数字）在保存时做解码比对，漂移会被拒绝。Graph 会在调用用户代码前校验 Checkpoint Schema、Graph 名称、确定性版本、Codec 和恢复节点。
 
-只有组件返回或设为 `context.WithCancelCause` cause 的类型化 `control.InterruptRequest` 才会创建 Continuation。普通取消
-普通取消和截止时间不会保存 Continuation。按调用配置持久化，并使用同一个由应用拥有的 key 恢复：
+PreHandler 或节点返回、或设为 `context.WithCancelCause` cause 的类型化 `control.InterruptRequest` 会同步保存中断检查点。
+PostHandler 是提交阶段，返回中断请求会以 `node.post.interrupt` 执行错误失败，不会落盘。
+普通取消和截止时间不会额外保存中断记录；配置检查点后的已提交进度仍可恢复。落盘保存 State、调度数据和下一批任务的持久化输入：挂起时尚未消费完的输出流会被关闭，恢复点的输入由其 PreHandler 或调度时冻结的任务输入重建。
+未配置 Checkpoint 时，任何中断请求都返回 `graph.ErrCheckpointRequired`。按调用配置持久化，并使用同一个由应用拥有的 key 恢复：
 
 ```go
 output, err := g.Invoke(ctx, input, graph.WithCheckpoint(store, key))
@@ -132,17 +181,38 @@ if errors.Is(err, graph.ErrInterrupted) {
 
 恢复语义为 at-least-once。执行中断的节点以及中断并行节点的每个分支都可能再次运行。框架有意不提供 Lease、分布式锁、fencing 或一次性 Checkpoint 删除；多副本应用必须在进入 Graph 前串行化 Resume。
 
-内置 Agent 配方使用同一 Graph Continuation。普通顺序运行不会编码 State。Agent Prompt 会在每次模型调用前立即注入，因此持久化 State 保存调用方拥有的会话历史，而不是旧 Agent 实例的 Prompt 或凭据。
+内置 Agent 配方使用同一 `state.Checkpoint`。未配置检查点或图级合并器的普通顺序运行不会逐节点编码 State。Agent Prompt 会在每次模型调用前立即注入，因此持久化 State 保存调用方拥有的会话历史，而不是旧 Agent 实例的 Prompt 或凭据。
 
 ## Option 与 Context
 
-metadata 等框架 Option 通过 `runnable.OptionPlan` 级联。
-Provider- or node-specific options use `runnable.NodeOption`; graph-local node
-Option 使用 `graph.WithNodeOptions`。State Handler 属于 Graph Option，绝不会转发给纯节点。
+调用选项是不透明的 `runnable.Option`，只承载组件运行配置：每条配置按类型
+归属组件，由 `runnable.WrapOption` 构造、`runnable.ResolveComponentOptions`
+在所属组件入口解析一次。Graph 在运行入口完成静态分发：无目标选项按
+`OptionTypes()` 声明的类型广播给同级节点；`runnable.ForNode`/
+`runnable.ForPath` 定向选项按节点路径逐层消费，转发型节点（`OptionRelay`，
+如 `ToolsNode`、`AgentNode`、嵌套图）把剩余路径交给内部组件继续解析。
+无接收者的类型在入口明确报错。
+
+追踪元数据统一经 `context.Context` 传递，与 Option 完全分离：
+
+```go
+ctx := callback.WithMetadata(ctx, map[string]any{
+    "request_id": "req-123",
+    "source":     "web",
+})
+```
+
+`callback.WithMetadata`/`callback.WithoutMetadata` 基于当前快照返回派生
+ctx，`callback.MetadataFromContext` 返回独立副本；三者对 map、slice 与
+嵌套容器做递归复制，父调用与并行分支互不影响。框架在对应调用边界写入
+自身信息——Agent 加载会话后注入 `conversation_id`/`checkpoint_version`，
+Graph 节点与工具调用沿用既有回调入口的补充标签。组件需要分支级标签时
+创建自己的派生 ctx，只影响该分支及其下游。元数据不写入检查点；需要随
+会话保存的数据使用 `agent.WithStateValue`/`WithStateValues`。
 
 取消、截止时间、Trace、Callback 和身份信息仍保留在
-`context.Context`。Graph Checkpoint 配置属于调用 Option，
-由 Graph 消费，不会转发给纯节点。
+`context.Context`。Graph Checkpoint、Durability、恢复输入等配置归属
+Graph 自身类型，在当前图入口消费，不会转发给纯节点。
 
 ## Agent recipes
 
@@ -155,8 +225,13 @@ Option 使用 `graph.WithNodeOptions`。State Handler 属于 Graph Option，绝�
   Router 模式执行一个选定的 Agent 节点后结束。
 - GroupChat: `select -> agent:<name> -> select`, bounded by round count.
 
-`agent.AgentNode` 是公开的子节点适配器。它返回类型化 `runnable.Outcome`，使 Supervisor 模式可以将子节点失败转为
-观测，而 Router 和 GroupChat 可以传播同一失败。子执行仍是真实的 Graph 节点，因此快照、回调和 Continuation 恢复点会暴露所选 Agent 名称，而不是不透明的分发步骤。
+每种配方有独立的 State（`ToolState`、`RoutingState`、`GroupState`，公共部分为 Input/Messages/Response），
+这是运行状态的唯一真相源：Handler 直接读写 State，纯节点只通过 PreHandler 取输入。
+Context 只携带按配方实例隔离的只读运行配置（原始输入、模型调用预算、完成回调），
+因此嵌套的子 Agent 无法读到父级配方的状态。ReAct 的模型调用预算在首次运行时写入 State，恢复时沿用。
+
+`agent.AgentNode` 是公开的子节点适配器。子 Agent 的业务失败以类型化 `runnable.Outcome` 返回，使 Supervisor 模式可以将其转为
+观测，而 Router 和 GroupChat 可以传播同一失败；控制类失败（中断、不支持的中断、缺少检查点、父级取消）直接作为错误返回，由父级 Graph 失败或挂起，绝不会变成模型可见的观测。子执行仍是真实的 Graph 节点，因此快照、回调和 检查点中的恢复位置会暴露所选 Agent 名称，而不是不透明的分发步骤。
 
 嵌套 Agent 和 Graph 创建独立的生命周期作用域。Graph 节点拥有自己的子 span，因此 APM 系统仍能保留节点级瀑布时序。
 除节点 ID 和 step 外，`graph.NodeExecution` 还携带编译后的节点类型及输入/输出类型。

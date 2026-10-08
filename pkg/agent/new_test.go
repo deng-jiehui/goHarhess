@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/graph"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
@@ -25,18 +25,18 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
 	})
 	var modelCalls atomic.Int32
-	model := llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, options llm.ChatOptions) ([]schema.Message, error) {
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, options llm.Options) ([]schema.Message, error) {
 		call := modelCalls.Add(1)
-		if len(options.Functions) != 1 || options.Functions[0].Name != "echo" {
-			return nil, fmt.Errorf("model definitions = %#v", options.Functions)
+		if len(request.Functions) != 1 || request.Functions[0].Name != "echo" {
+			return nil, fmt.Errorf("model definitions = %#v", request.Functions)
 		}
 		if call == 1 {
 			return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("echo-1", "echo", `{"text":"hello"}`))}, nil
 		}
-		if len(messages) < 3 {
-			return nil, fmt.Errorf("second turn messages = %#v", messages)
+		if len(request.Messages) < 3 {
+			return nil, fmt.Errorf("second turn messages = %#v", request.Messages)
 		}
-		observation := messages[len(messages)-1]
+		observation := request.Messages[len(request.Messages)-1]
 		results := observation.FunctionToolResults()
 		if observation.Role != schema.RoleTool || len(results) != 1 || results[0].CallID != "echo-1" || toolResultText(observation) != "hello" {
 			return nil, fmt.Errorf("tool observation = %#v", observation)

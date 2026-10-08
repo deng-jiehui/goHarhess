@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	coreretrieval "goharness/pkg/retrieval"
-	"goharness/pkg/runnable"
+	coreretrieval "github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 const (

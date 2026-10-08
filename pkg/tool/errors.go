@@ -20,7 +20,43 @@ var (
 	ErrInvalidMiddleware = errors.New("invalid middleware")
 	// ErrNextUnavailable identifies next used outside its Middleware lifetime.
 	ErrNextUnavailable = errors.New("middleware next is no longer available")
+	// ErrInvalidToolArgs identifies tool call arguments that violate the declared JSON schema.
+	ErrInvalidToolArgs = errors.New("tool arguments violate the declared schema")
+	// ErrMalformedArgs identifies tool call arguments that are not a valid JSON object.
+	ErrMalformedArgs = errors.New("tool arguments are not a valid JSON object")
+	// ErrUnknownTool identifies a call naming a tool that is not registered.
+	ErrUnknownTool = errors.New("tool does not exist")
+	// ErrToolAbandoned identifies an execution left running after its timeout or
+	// cancellation; the abandoned worker keeps holding runtime resources.
+	ErrToolAbandoned = errors.New("tool execution abandoned: the tool did not respond to cancellation")
+	// ErrToolUnavailable identifies a call rejected while the tool's abandoned
+	// executions reached the configured threshold.
+	ErrToolUnavailable = errors.New("tool is temporarily unavailable")
 )
+
+// ModelVisibleError marks an error whose message is authored for the model.
+// Tool and middleware code wrap feedback meant for the next model turn; every
+// other error class is replaced by a sanitized generic message before reaching
+// the model, while the full error remains in logs and callbacks.
+type ModelVisibleError struct {
+	Err error
+}
+
+// ModelVisible wraps err so its message is shown to the model in tool results.
+func ModelVisible(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ModelVisibleError{Err: err}
+}
+
+func (e *ModelVisibleError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *ModelVisibleError) Unwrap() error {
+	return e.Err
+}
 
 // ExecutionPanicError describes a panic recovered by the fixed execution pipeline.
 type ExecutionPanicError struct {
@@ -76,6 +112,28 @@ func (e *PermissionDeniedError) Is(target error) bool {
 	return target == ErrPermissionDenied
 }
 
+// InvalidArgsError reports arguments that failed the tool's JSON schema. It is
+// a model-visible tool error (isError result), not an execution failure.
+type InvalidArgsError struct {
+	ToolName string
+	Err      error
+}
+
+func (e *InvalidArgsError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("tool %q arguments violate the declared schema", e.ToolName)
+	}
+	return fmt.Sprintf("tool %q arguments violate the declared schema: %v", e.ToolName, e.Err)
+}
+
+func (e *InvalidArgsError) Unwrap() error {
+	return e.Err
+}
+
+func (e *InvalidArgsError) Is(target error) bool {
+	return target == ErrInvalidToolArgs
+}
+
 // MaxDepthError reports the current depth and the fixed system limit.
 type MaxDepthError struct {
 	Depth    int
@@ -103,6 +161,33 @@ func (e *DeadlockError) Error() string {
 func (e *DeadlockError) Is(target error) bool {
 	return target == ErrDeadlockRisk
 }
+
+// AbandonedError 是放弃事件的告警载荷：Execute 因超时或取消先返回后，工具仍
+// 在后台运行，归还前持续占用 worker、批次与并发组资源。
+type AbandonedError struct {
+	ToolName  string
+	Abandoned int
+	Threshold int
+	Err       error
+}
+
+func (e *AbandonedError) Error() string {
+	return fmt.Sprintf("tool %q ignored cancellation (%v); %d abandoned execution(s) still hold runtime resources", e.ToolName, e.Err, e.Abandoned)
+}
+func (e *AbandonedError) Unwrap() error        { return e.Err }
+func (e *AbandonedError) Is(target error) bool { return target == ErrToolAbandoned }
+
+// UnavailableError 报告熔断期间被拒绝的调用：该工具的未归还执行数已达阈值。
+type UnavailableError struct {
+	ToolName  string
+	Abandoned int
+	Threshold int
+}
+
+func (e *UnavailableError) Error() string {
+	return fmt.Sprintf("tool %q is temporarily unavailable: %d abandoned execution(s) reached the threshold %d", e.ToolName, e.Abandoned, e.Threshold)
+}
+func (e *UnavailableError) Is(target error) bool { return target == ErrToolUnavailable }
 
 // ExtensionError adds the middleware name and lifecycle phase to a business error.
 type ExtensionError struct {

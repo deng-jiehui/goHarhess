@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/internal/agentrecipe"
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/agentrecipe"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
-func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schema.Message) (*agentrecipe.Recipe, error) {
+// textReAct 为 true 时使用文本 ReAct 兼容模式：请求不携带原生 Functions，
+// 工具以文本协议注入提示，并从模型正文解析 Action/Action Input。
+func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schema.Message, textReAct bool) (*agentrecipe.Recipe, error) {
 	return agentrecipe.NewToolRecipe(string(AgentKindReact), agentrecipe.Hooks{
 		Model: base.modelNode,
 		Tools: base.toolNode,
@@ -19,17 +21,20 @@ func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schem
 			if prepareModelMessages != nil {
 				messages = prepareModelMessages(messages)
 			}
-			return base.prepareLLMRequest(ctx, messages, base.toolDefinitions(), opts)
+			functions := base.toolDefinitions()
+			if textReAct {
+				functions = nil
+			}
+			return base.prepareLLMRequest(ctx, messages, functions, opts)
 		},
 		DetectCalls: func(messages []schema.Message) []agentrecipe.Call {
-			actions := detectReactActions(messages)
+			actions := detectReactActions(messages, textReAct)
 			calls := make([]agentrecipe.Call, len(actions))
 			for i, action := range actions {
 				calls[i] = agentrecipe.Call{Name: action.Name, Arguments: action.Input, FunctionID: action.FunctionID, Thought: action.Thought, Structured: action.Structured}
 			}
 			return calls
 		},
-		RehydrateLLMCalls: countToolResponseTurns,
 		Observation: func(result agentrecipe.ToolResult) schema.Message {
 			content := joinAgentTextBlocks(result.ContentBlocks)
 			if result.Err != nil {
@@ -52,30 +57,6 @@ func joinAgentTextBlocks(blocks []schema.ContentBlock) string {
 		}
 	}
 	return strings.Join(parts, "")
-}
-
-// countToolResponseTurns derives the completed model-call count at the only
-// ReAct checkpoint boundary: immediately before the next model call.
-// Consecutive observations are one tool batch. The explicit marker is used
-// for newly persisted messages; role/text detection remains as a migration
-// fallback for checkpoints written by older versions.
-func countToolResponseTurns(messages []schema.Message) int {
-	turns := 0
-	inBatch := false
-	for _, message := range messages {
-		marked, _ := message.Extra["agent_observation"].(bool)
-		isToolResponse := marked || message.Role == schema.RoleTool || len(message.FunctionToolResults()) > 0 ||
-			(message.Role == schema.RoleAssistant && strings.HasPrefix(strings.TrimSpace(message.JoinedText("")), "Observation:"))
-		if isToolResponse {
-			if !inBatch {
-				turns++
-			}
-			inBatch = true
-			continue
-		}
-		inBatch = false
-	}
-	return turns
 }
 
 func recipeName(base *base, fallback string) string {

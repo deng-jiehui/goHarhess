@@ -44,19 +44,19 @@ func (m *ResponseMeta) validate() error {
 	return nil
 }
 
-func cloneResponseMeta(meta *ResponseMeta, strict bool, path string) (*ResponseMeta, error) {
+func cloneResponseMeta(meta *ResponseMeta, strict bool, path string, fallback CloneFallbackFunc) (*ResponseMeta, error) {
 	if meta == nil {
 		return nil, nil
 	}
 	cloned := *meta
-	extra, err := cloneExtra(meta.Extra, strict, path+".extra")
+	extra, err := cloneExtra(meta.Extra, strict, path+".extra", fallback)
 	if err != nil {
 		return nil, err
 	}
 	cloned.Extra = extra
 	if meta.Usage != nil {
 		usage := *meta.Usage
-		usage.Extra, err = cloneExtra(meta.Usage.Extra, strict, path+".usage.extra")
+		usage.Extra, err = cloneExtra(meta.Usage.Extra, strict, path+".usage.extra", fallback)
 		if err != nil {
 			return nil, err
 		}

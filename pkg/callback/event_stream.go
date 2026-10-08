@@ -16,6 +16,45 @@ type StreamCallback struct {
 }
 
 type streamCallbacksContextKey struct{}
+type streamSignalsContextKey struct{}
+type streamSignal struct {
+	typ reflect.Type
+	fn  func()
+}
+
+// WithStreamSignal observes publication without requesting a payload snapshot.
+// It is intended for framework progress guards such as model retries.
+func WithStreamSignal[T any](ctx context.Context, fn func()) context.Context {
+	existing, _ := ctx.Value(streamSignalsContextKey{}).([]streamSignal)
+	values := append(append([]streamSignal(nil), existing...), streamSignal{reflect.TypeFor[T](), fn})
+	return context.WithValue(ctx, streamSignalsContextKey{}, values)
+}
+func NotifyStream[T any](ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	values, _ := ctx.Value(streamSignalsContextKey{}).([]streamSignal)
+	for _, v := range values {
+		if v.typ == reflect.TypeFor[T]() && v.fn != nil {
+			func() { defer func() { _ = recover() }(); v.fn() }()
+		}
+	}
+}
+
+// HasStreamCallbacks allows legacy snapshot producers to avoid full-message
+// cloning when only the public incremental run stream is subscribed.
+func HasStreamCallbacks[T any](ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	callbacks, _ := ctx.Value(streamCallbacksContextKey{}).([]StreamCallback)
+	for _, c := range callbacks {
+		if c.typ == reflect.TypeFor[T]() {
+			return true
+		}
+	}
+	return false
+}
 
 // WithStreamCallbacksIsolated starts a child observation scope without
 // inheriting parent stream sinks. It is used for nested Graph/Agent runs that
@@ -59,10 +98,13 @@ func WithStreamCallbacks(ctx context.Context, callbacks ...StreamCallback) conte
 
 // EmitStream synchronously publishes one typed real-time value. Observer
 // failures are isolated and reported to the Manager ErrorSink when present.
+// Deprecated: publish UI messages and activities through pkg/stream. This
+// function remains the compatibility API for existing typed observers.
 func EmitStream[T any](ctx context.Context, value T) {
 	if ctx == nil {
 		return
 	}
+	NotifyStream[T](ctx)
 	callbacks, _ := ctx.Value(streamCallbacksContextKey{}).([]StreamCallback)
 	want := reflect.TypeFor[T]()
 	manager, _ := ManagerFromContext(ctx)

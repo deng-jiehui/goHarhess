@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type traceKey struct{}
@@ -285,7 +285,7 @@ func TestRuntimeRejectsDeadlockRiskAndMiddlewareCannotSwallowIt(t *testing.T) {
 		},
 	}, nil)
 	binding := registerTool(t, runtime, value)
-	ctx := context.WithValue(context.Background(), executionStateKey{}, executionState{heldGroups: []string{"network"}})
+	ctx := context.WithValue(context.Background(), executionStateKey{}, executionState{held: map[*scheduler][]string{runtime.scheduler: {"network"}}})
 
 	_, err := runtime.NewScope(1).Execute(ctx, binding, CallInput{})
 	if !errors.Is(err, ErrDeadlockRisk) {

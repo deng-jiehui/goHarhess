@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type runtimeParallelState struct {
@@ -105,7 +105,10 @@ func TestRuntimeParallelSnapshotsBranchesAndMergesInDeclarationOrder(t *testing.
 	if len(output) != 3 || output[0] != "base" || output[1] != "base:first" || output[2] != "base:second" {
 		t.Fatalf("parallel output = %#v", output)
 	}
-	if encodes.Load() != 1 || decodes.Load() != 2 {
+	// 展开拓扑的 State 复制点：成员轮克隆(1+3)、每任务路由副本(2+2)、
+	// 到达时的成员终态快照(2+0)、汇合轮克隆(1+2)、成员 State 恢复(0+2)、
+	// 汇合路由副本(1+1)。合并失败不会污染入口 State。
+	if encodes.Load() != 7 || decodes.Load() != 10 {
 		t.Fatalf("codec calls = encode:%d decode:%d", encodes.Load(), decodes.Load())
 	}
 	if len(seen) != 2 {

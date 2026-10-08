@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 const DefaultMaxReferenceTokens = 4096

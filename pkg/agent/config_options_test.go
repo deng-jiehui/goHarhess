@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/contextengine"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/contextengine"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 	var gotMessages []schema.Message
-	var gotOptions llm.ChatOptions
-	model := llm.NewHandlerModel(func(ctx context.Context, messages []schema.Message, opts llm.ChatOptions) ([]schema.Message, error) {
-		gotMessages = messages
+	var gotOptions llm.Options
+	model := llm.NewHandlerModel(func(ctx context.Context, request llm.Request, opts llm.Options) ([]schema.Message, error) {
+		gotMessages = request.Messages
 		gotOptions = opts
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})
@@ -58,44 +58,28 @@ func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 }
 
 func TestAgentLanguageDoesNotBecomeProviderGenerateConfig(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		opts []agent.RunOption
-	}{
-		{name: "auto detected", text: "hello"},
-		{name: "explicit run language", text: "hello", opts: []agent.RunOption{agent.WithLang("zh")}},
+	var gotOptions llm.Options
+	model := llm.NewHandlerModel(func(_ context.Context, _ llm.Request, opts llm.Options) ([]schema.Message, error) {
+		gotOptions = opts
+		return []schema.Message{schema.AssistantMessage("ok")}, nil
+	})
+	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var gotOptions llm.ChatOptions
-			model := llm.NewHandlerModel(func(_ context.Context, _ []schema.Message, opts llm.ChatOptions) ([]schema.Message, error) {
-				gotOptions = opts
-				return []schema.Message{schema.AssistantMessage("ok")}, nil
-			})
-			value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
-			if err != nil {
-				t.Fatal(err)
-			}
-			options := make([]runnable.Option, len(test.opts))
-			for index, option := range test.opts {
-				options[index] = option
-			}
-			if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage(test.text)}, options...); err != nil {
-				t.Fatal(err)
-			}
-			if value, exists := gotOptions.ExtraGenerateConfig["lang"]; exists {
-				t.Fatalf("provider generate config contains implicit lang: %#v", value)
-			}
-		})
+	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")}); err != nil {
+		t.Fatal(err)
+	}
+	if value, exists := gotOptions.ExtraGenerateConfig["lang"]; exists {
+		t.Fatalf("provider generate config contains implicit lang: %#v", value)
 	}
 }
 
 func TestWithContextBuilderLambdaReplacesDefaultContextNode(t *testing.T) {
 	called := false
-	model := llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-		if len(messages) != 1 || messages[0].JoinedText("") != "custom context" {
-			return nil, fmt.Errorf("model messages = %#v", messages)
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if len(request.Messages) != 1 || request.Messages[0].JoinedText("") != "custom context" {
+			return nil, fmt.Errorf("model messages = %#v", request.Messages)
 		}
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})

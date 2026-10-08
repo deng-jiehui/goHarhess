@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func routingCall(name string) schema.Message {
@@ -100,8 +100,8 @@ func TestRoutingAgentDoesNotSendSupervisorToolCallToChild(t *testing.T) {
 	var childInput []schema.Message
 	worker, err := agent.NewBasicAgent(agent.BaseConfig{
 		Name: "worker",
-		Model: llm.NewHandlerModel(func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) ([]schema.Message, error) {
-			childInput = schema.CloneMessages(messages)
+		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+			childInput = schema.CloneMessages(request.Messages)
 			return []schema.Message{schema.AssistantMessage("child result")}, nil
 		}),
 	})
@@ -174,7 +174,7 @@ func TestRoutingAgentRejectsUnknownMode(t *testing.T) {
 func TestRoutingAgentSupervisorHandlesUnknownSubAgentAndChildError(t *testing.T) {
 	failing, err := agent.NewBasicAgent(agent.BaseConfig{
 		Name: "failing",
-		Model: llm.NewHandlerModel(func(context.Context, []schema.Message, llm.ChatOptions) ([]schema.Message, error) {
+		Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 			return nil, errors.New("provider unavailable")
 		}),
 	})
@@ -206,15 +206,19 @@ func TestRoutingAgentSupervisorHandlesUnknownSubAgentAndChildError(t *testing.T)
 	for _, message := range output {
 		joined += toolResultText(message) + message.JoinedText("") + "\n"
 	}
-	if !strings.Contains(joined, "unregistered") || !strings.Contains(joined, "provider unavailable") {
+	// 未注册的子代理名对模型可见（可自纠）；子 Agent 内部错误细节已脱敏。
+	if !strings.Contains(joined, "unregistered sub-agent") || !strings.Contains(joined, `Sub-agent "failing" failed`) {
 		t.Fatalf("supervisor observations=%q", joined)
+	}
+	if strings.Contains(joined, "provider unavailable") {
+		t.Fatalf("internal child error leaked to model: %q", joined)
 	}
 }
 
 func TestRoutingAgentRouterPropagatesUnknownAndChildErrors(t *testing.T) {
 	worker, err := agent.NewBasicAgent(agent.BaseConfig{
 		Name: "worker",
-		Model: llm.NewHandlerModel(func(context.Context, []schema.Message, llm.ChatOptions) ([]schema.Message, error) {
+		Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 			return nil, errors.New("child failed")
 		}),
 	})
@@ -251,7 +255,7 @@ func TestRoutingAgentStopsAtMaxStepsWithoutLooping(t *testing.T) {
 	supervisor, err := agent.NewRoutingAgent(agent.SupervisorConfig{
 		BaseConfig: agent.BaseConfig{
 			Name: "supervisor",
-			Model: llm.NewHandlerModel(func(context.Context, []schema.Message, llm.ChatOptions) ([]schema.Message, error) {
+			Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 				calls.Add(1)
 				return []schema.Message{routingCall("worker")}, nil
 			}),

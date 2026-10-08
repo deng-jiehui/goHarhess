@@ -11,15 +11,18 @@ import (
 	"net/url"
 	"strings"
 
-	"goharness/pkg/httpclient"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 const (
 	defaultOpenAIBaseURL    = "https://api.openai.com/v1"
 	defaultDeepSeekBaseURL  = "https://api.deepseek.com"
 	defaultDashScopeBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	// DefaultMaxResponseBytes 是非流式响应体的默认读取上限（32 MiB）。
+	// 超限即调用失败，截断内容不会被当作完整响应解析。
+	DefaultMaxResponseBytes int64 = 32 << 20
 )
 
 // OpenAICompatibleConfig configures providers that expose the Chat
@@ -34,6 +37,9 @@ type OpenAICompatibleConfig struct {
 	Headers                 map[string]string
 	Capabilities            Capabilities
 	IncludeReasoningContent bool
+	// MaxResponseBytes 是非流式响应体的读取上限；零值或负值使用
+	// DefaultMaxResponseBytes。
+	MaxResponseBytes int64
 }
 
 // OpenAICompatibleModel implements the OpenAI Chat Completions wire format.
@@ -48,6 +54,7 @@ type OpenAICompatibleModel struct {
 	headers                 map[string]string
 	capabilities            Capabilities
 	includeReasoningContent bool
+	maxResponseBytes        int64
 }
 
 func init() {
@@ -75,6 +82,7 @@ func openAICompatibleFactory(defaultBaseURL string, reasoning bool) Factory {
 			Client:                  cfg.HTTPClient,
 			Headers:                 rawHeaders(cfg.Raw),
 			IncludeReasoningContent: reasoning || rawBool(cfg.Raw, "include_reasoning_content"),
+			MaxResponseBytes:        rawInt64(cfg.Raw, "max_response_bytes"),
 		})
 	}
 }
@@ -99,6 +107,10 @@ func NewOpenAICompatibleModel(cfg OpenAICompatibleConfig) (*OpenAICompatibleMode
 			Reasoning:  cfg.IncludeReasoningContent,
 		}
 	}
+	maxResponseBytes := cfg.MaxResponseBytes
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = DefaultMaxResponseBytes
+	}
 	return &OpenAICompatibleModel{
 		model:                   model,
 		endpoint:                endpoint,
@@ -108,6 +120,7 @@ func NewOpenAICompatibleModel(cfg OpenAICompatibleConfig) (*OpenAICompatibleMode
 		headers:                 cloneHeaders(cfg.Headers),
 		capabilities:            capabilities,
 		includeReasoningContent: cfg.IncludeReasoningContent,
+		maxResponseBytes:        maxResponseBytes,
 	}, nil
 }
 
@@ -142,18 +155,18 @@ func (m *OpenAICompatibleModel) HTTPClient() *http.Client {
 	return m.client
 }
 
-func (m *OpenAICompatibleModel) request(ctx context.Context, input Request, streaming bool) (*http.Response, error) {
+func (m *OpenAICompatibleModel) request(ctx context.Context, input Request, opts Options, streaming bool) (*http.Response, error) {
 	if ctx == nil {
 		return nil, errors.New("OpenAI-compatible model context cannot be nil")
 	}
 	if streaming && !m.capabilities.Streaming {
 		return nil, errors.New("OpenAI-compatible model does not support streaming")
 	}
-	if len(input.Options.Functions) > 0 && !m.capabilities.ToolCalls {
+	if len(input.Functions) > 0 && !m.capabilities.ToolCalls {
 		return nil, errors.New("OpenAI-compatible model does not support tool calls")
 	}
 
-	payload, err := m.requestPayload(input.Messages, input.Options, streaming)
+	payload, err := m.requestPayload(input.Messages, input.Functions, opts, streaming)
 	if err != nil {
 		return nil, err
 	}
@@ -184,15 +197,22 @@ func (m *OpenAICompatibleModel) request(ctx context.Context, input Request, stre
 	return response, nil
 }
 
-func (m *OpenAICompatibleModel) Invoke(ctx context.Context, input Request, _ ...runnable.Option) (Response, error) {
-	response, err := m.request(ctx, input, false)
+func (m *OpenAICompatibleModel) Invoke(ctx context.Context, input Request, options ...runnable.Option) (Response, error) {
+	resolved, remaining, err := resolveModelOptions(options)
+	if err != nil {
+		return Response{}, fmt.Errorf("resolve model options: %w", err)
+	}
+	if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+		return Response{}, fmt.Errorf("resolve model options: %w", err)
+	}
+	response, err := m.request(ctx, input, resolved, false)
 	if err != nil {
 		return Response{}, err
 	}
 	defer response.Body.Close()
-	data, err := io.ReadAll(response.Body)
+	data, err := readBoundedResponseBody(response.Body, m.maxResponseBytes)
 	if err != nil {
-		return Response{}, fmt.Errorf("read OpenAI-compatible response: %w", err)
+		return Response{}, err
 	}
 	messages, usage, finishReason, err := decodeOpenAIResponse(data, false)
 	if err != nil {
@@ -203,9 +223,16 @@ func (m *OpenAICompatibleModel) Invoke(ctx context.Context, input Request, _ ...
 
 var _ ChatModel = (*OpenAICompatibleModel)(nil)
 
-func (m *OpenAICompatibleModel) Stream(ctx context.Context, input Request, _ ...runnable.Option) (*runnable.StreamReader[Response], error) {
+func (m *OpenAICompatibleModel) Stream(ctx context.Context, input Request, options ...runnable.Option) (*runnable.StreamReader[Response], error) {
+	resolved, remaining, err := resolveModelOptions(options)
+	if err != nil {
+		return nil, fmt.Errorf("resolve model options: %w", err)
+	}
+	if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+		return nil, fmt.Errorf("resolve model options: %w", err)
+	}
 	streamCtx, cancel := context.WithCancel(ctx)
-	response, err := m.request(streamCtx, input, true)
+	response, err := m.request(streamCtx, input, resolved, true)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -229,7 +256,7 @@ func (m *OpenAICompatibleModel) Transform(ctx context.Context, input *runnable.S
 	return m.Stream(ctx, value, options...)
 }
 
-func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, opts ChatOptions, streaming bool) (map[string]any, error) {
+func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functions []schema.FunctionDefinition, opts Options, streaming bool) (map[string]any, error) {
 	payload := map[string]any{}
 	for key, value := range MergeGenerateConfig(m.generateConfig, opts.ExtraGenerateConfig) {
 		payload[key] = value
@@ -241,8 +268,8 @@ func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, opts C
 	}
 	payload["messages"] = encodedMessages
 	payload["stream"] = streaming
-	if len(opts.Functions) > 0 && payload["tools"] == nil && payload["functions"] == nil {
-		payload["tools"] = encodeOpenAITools(opts.Functions)
+	if len(functions) > 0 && payload["tools"] == nil && payload["functions"] == nil {
+		payload["tools"] = encodeOpenAITools(functions)
 	}
 	return payload, nil
 }
@@ -730,6 +757,19 @@ func (e *HTTPStatusError) Error() string {
 
 func (e *HTTPStatusError) StatusCode() int { return e.Status }
 
+// readBoundedResponseBody 最多读取 limit+1 字节；超过 limit 即判定响应过大，
+// 返回明确的 ResponseTooLargeError，截断数据绝不进入响应解码。
+func readBoundedResponseBody(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read OpenAI-compatible response: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, &ResponseTooLargeError{Provider: "OpenAI-compatible", Limit: limit}
+	}
+	return data, nil
+}
+
 func providerHTTPError(response *http.Response) error {
 	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
@@ -761,6 +801,25 @@ func rawBool(raw map[string]any, key string) bool {
 	}
 	value, _ := raw[key].(bool)
 	return value
+}
+
+// rawInt64 读取配置文件中的整数值；容忍 JSON 数字常见的 float64。
+func rawInt64(raw map[string]any, key string) int64 {
+	if raw == nil {
+		return 0
+	}
+	switch value := raw[key].(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case float64:
+		return int64(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return parsed
+	}
+	return 0
 }
 
 func rawHeaders(raw map[string]any) map[string]string {

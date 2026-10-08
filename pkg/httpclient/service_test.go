@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/httpclient"
 )
 
 func TestServiceUsesSharedPoolAndAppliesPerServiceAuth(t *testing.T) {

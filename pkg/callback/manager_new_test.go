@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/callback"
 )
 
 type auditCallback interface {

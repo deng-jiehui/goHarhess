@@ -5,7 +5,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 // TokenCounter is intentionally provider-neutral. Applications can inject a
@@ -45,8 +45,68 @@ func (ApproxTokenCounter) Count(text string) int {
 	return tokens
 }
 
-func countMessage(message schema.Message, counter TokenCounter) int {
-	total := 4 + counter.Count(string(message.Role))
+// MediaTokenEstimator 估算图片、文件、音频、视频等非文本块的 token 成本。
+// 媒体的真实计费由 Provider 按分辨率、时长等决定，内嵌的 base64 Data 是
+// 二进制载荷，不按文本计数；框架只提供保守默认实现，应用可用 Provider
+// 的实际规则替换。
+type MediaTokenEstimator interface {
+	EstimateMedia(block schema.ContentBlock) int
+}
+
+// 默认媒体估算量级：图片与视频按高分辨率档位的常见计量（约 85 加每块
+// tile 170 token 的叠加上限）取保守值；文件与音频为固定占位。需要精确
+// 计费时通过 Config.MediaEstimator 注入自定义实现。
+const (
+	defaultImageMediaTokens = 1105
+	defaultFileMediaTokens  = 256
+	defaultAudioMediaTokens = 300
+	defaultVideoMediaTokens = 1105
+)
+
+// ApproxMediaEstimator 按媒体类型返回固定估算值；零值字段回落到默认量级，
+// 负值表示按零计。内嵌 Data 与 URI 不参与文本计数。
+type ApproxMediaEstimator struct {
+	Image int
+	File  int
+	Audio int
+	Video int
+}
+
+func (e ApproxMediaEstimator) EstimateMedia(block schema.ContentBlock) int {
+	resolve := func(media *schema.MediaContent, value, fallback int) int {
+		if media == nil {
+			return 0
+		}
+		if value == 0 {
+			return fallback
+		}
+		if value < 0 {
+			return 0
+		}
+		return value
+	}
+	switch block.Type {
+	case schema.ContentBlockTypeImage:
+		return resolve(block.Image, e.Image, defaultImageMediaTokens)
+	case schema.ContentBlockTypeFile:
+		return resolve(block.File, e.File, defaultFileMediaTokens)
+	case schema.ContentBlockTypeAudio:
+		return resolve(block.Audio, e.Audio, defaultAudioMediaTokens)
+	case schema.ContentBlockTypeVideo:
+		return resolve(block.Video, e.Video, defaultVideoMediaTokens)
+	}
+	return 0
+}
+
+// usageCounter 是消息计费的两个入口：文本经 TokenCounter 估算，媒体块经
+// MediaTokenEstimator 估算，互不混用。
+type usageCounter struct {
+	text  TokenCounter
+	media MediaTokenEstimator
+}
+
+func countMessage(message schema.Message, counter usageCounter) int {
+	total := 4 + counter.text.Count(string(message.Role))
 	var count func([]schema.ContentBlock) int
 	count = func(blocks []schema.ContentBlock) int {
 		n := 0
@@ -54,31 +114,28 @@ func countMessage(message schema.Message, counter TokenCounter) int {
 			switch b.Type {
 			case schema.ContentBlockTypeText:
 				if b.Text != nil {
-					n += counter.Count(b.Text.Text)
+					n += counter.text.Count(b.Text.Text)
 				}
 			case schema.ContentBlockTypeReasoning:
 				if b.Reasoning != nil {
-					n += counter.Count(b.Reasoning.Text) + counter.Count(b.Reasoning.Signature)
+					n += counter.text.Count(b.Reasoning.Text) + counter.text.Count(b.Reasoning.Signature)
 				}
-			case schema.ContentBlockTypeImage:
-				n += countMedia(b.Image, counter)
-			case schema.ContentBlockTypeFile:
-				n += countMedia(b.File, counter)
-			case schema.ContentBlockTypeAudio:
-				n += countMedia(b.Audio, counter)
-			case schema.ContentBlockTypeVideo:
-				n += countMedia(b.Video, counter)
+			case schema.ContentBlockTypeImage,
+				schema.ContentBlockTypeFile,
+				schema.ContentBlockTypeAudio,
+				schema.ContentBlockTypeVideo:
+				n += counter.media.EstimateMedia(b)
 			case schema.ContentBlockTypeFunctionToolCall:
 				if b.FunctionToolCall != nil {
-					n += counter.Count(b.FunctionToolCall.ID) + counter.Count(b.FunctionToolCall.Name) + counter.Count(b.FunctionToolCall.Arguments)
+					n += counter.text.Count(b.FunctionToolCall.ID) + counter.text.Count(b.FunctionToolCall.Name) + counter.text.Count(b.FunctionToolCall.Arguments)
 				}
 			case schema.ContentBlockTypeFunctionToolResult:
 				if b.FunctionToolResult != nil {
-					n += counter.Count(b.FunctionToolResult.CallID) + counter.Count(b.FunctionToolResult.Name) + count(b.FunctionToolResult.ContentBlocks)
+					n += counter.text.Count(b.FunctionToolResult.CallID) + counter.text.Count(b.FunctionToolResult.Name) + count(b.FunctionToolResult.ContentBlocks)
 				}
 			case schema.ContentBlockTypeOpaque:
 				if b.Opaque != nil {
-					n += counter.Count(b.Opaque.Kind) + counter.Count(string(b.Opaque.Raw))
+					n += counter.text.Count(b.Opaque.Kind) + counter.text.Count(string(b.Opaque.Raw))
 				}
 			}
 		}
@@ -88,14 +145,7 @@ func countMessage(message schema.Message, counter TokenCounter) int {
 	return total
 }
 
-func countMedia(media *schema.MediaContent, counter TokenCounter) int {
-	if media == nil {
-		return 0
-	}
-	return counter.Count(media.URI) + counter.Count(media.MIMEType) + counter.Count(string(media.Data))
-}
-
-func countMessages(messages []schema.Message, counter TokenCounter) int {
+func countMessages(messages []schema.Message, counter usageCounter) int {
 	total := 0
 	for _, message := range messages {
 		total += countMessage(message, counter)

@@ -6,13 +6,13 @@ import (
 	"sync"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/callback"
-	"goharness/pkg/graph"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 type usageEventModel struct{}
@@ -112,7 +112,7 @@ func TestAgentLLMErrorCallbackDoesNotReplaceBusinessError(t *testing.T) {
 	seen := make(chan error, 1)
 	observer := llm.CallbackFuncs{CallbackName: "llm", Error: func(_ context.Context, err error) error { seen <- err; return errors.New("observer unavailable") }}
 	manager, _ := callback.NewManager(callback.Config{}, []callback.Handler{observer})
-	model := llm.NewHandlerModel(func(context.Context, []schema.Message, llm.ChatOptions) ([]schema.Message, error) { return nil, reason })
+	model := llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) { return nil, reason })
 	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
 	if err != nil {
 		t.Fatal(err)

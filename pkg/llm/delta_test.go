@@ -3,8 +3,8 @@ package llm_test
 import (
 	"testing"
 
-	"goharness/pkg/llm"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestDeltaAccumulatorMergesFunctionBlocksByPosition(t *testing.T) {

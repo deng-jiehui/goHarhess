@@ -3,7 +3,7 @@ package llm
 import (
 	"context"
 
-	"goharness/pkg/callback"
+	"github.com/goharness/goharness/pkg/callback"
 )
 
 // Callback observes ChatModel lifecycle boundaries.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 const DefaultChunkMaxTokens = 512

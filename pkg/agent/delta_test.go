@@ -6,11 +6,11 @@ import (
 	"sync"
 	"testing"
 
-	"goharness/pkg/agent"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestReactAgentAssemblesDeltaFunctionCall(t *testing.T) {
@@ -71,7 +71,7 @@ func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 	})
 	value, err := agent.NewReactAgent(agent.ReactAgentConfig{BaseConfig: agent.BaseConfig{
 		Name: "react", Model: model, Tools: []tool.Tool{echo},
-	}})
+	}, TextReAct: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 type deltaScriptedModel struct {
 	mu        sync.Mutex
 	responses [][]llm.Response
-	options   []llm.ChatOptions
+	options   []llm.Options
 }
 
 func newDeltaScriptedModel(responses ...[]llm.Response) *deltaScriptedModel {
@@ -110,7 +110,11 @@ func (m *deltaScriptedModel) Invoke(ctx context.Context, request llm.Request, op
 	return stream.Collect(ctx)
 }
 
-func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, _ ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	resolved, _, err := runnable.ResolveComponentOptions(llm.Options{}, options...)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	if len(m.responses) == 0 {
 		m.mu.Unlock()
@@ -118,12 +122,12 @@ func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, _ 
 	}
 	events := m.responses[0]
 	m.responses = m.responses[1:]
-	m.options = append(m.options, request.Options)
+	m.options = append(m.options, resolved)
 	m.mu.Unlock()
 
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		accumulator := llm.NewDeltaAccumulator(request.Options.DeltaStream)
+		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
 		for _, event := range events {
 			messages, err := accumulator.Apply(event)
 			if err != nil {

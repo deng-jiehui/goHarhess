@@ -3,6 +3,7 @@ package llm_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,10 +12,10 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	cachellm "goharness/extensions/cache/llm"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	cachellm "github.com/goharness/goharness/extensions/cache/llm"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 func TestMemoryCacheLRUAndTTL(t *testing.T) {
@@ -113,7 +114,7 @@ func TestCachedModelBypassesSensitiveRequests(t *testing.T) {
 	upstream := &testModel{response: response("secret")}
 	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{
 		ModelID: "test-model",
-		SensitiveDetector: func(_ context.Context, messages []schema.Message, _ llm.ChatOptions) bool {
+		SensitiveDetector: func(_ context.Context, messages []schema.Message, _ llm.Options) bool {
 			return messages[len(messages)-1].JoinedText("") == "password"
 		},
 	})
@@ -135,7 +136,7 @@ func TestCachedModelBypassesSensitiveRequests(t *testing.T) {
 
 func TestCachedModelFunctionCallPolicy(t *testing.T) {
 	requestWithTools := request("search")
-	requestWithTools.Options.Functions = []schema.FunctionDefinition{{Name: "search"}}
+	requestWithTools.Functions = []schema.FunctionDefinition{{Name: "search"}}
 	for _, test := range []struct {
 		name    string
 		enabled bool
@@ -269,6 +270,224 @@ func TestRedisCacheRoundTripAndTTL(t *testing.T) {
 	server.FastForward(2 * time.Minute)
 	if _, found, err := store.Get(context.Background(), "key"); err != nil || found {
 		t.Fatalf("expired found=%v err=%v", found, err)
+	}
+}
+
+// extConfigModel 声明扩展配置类型并按 tag 回应：验证 Provider 扩展参数
+// 计入缓存身份。
+type extConfig struct {
+	Tier string
+}
+
+type opaqueConfig struct {
+	Tier  string
+	Hooks func() // 无法 JSON 编码的字段
+}
+
+type extConfigModel struct {
+	calls atomic.Int64
+}
+
+func (m *extConfigModel) Invoke(ctx context.Context, request llm.Request, options ...runnable.Option) (llm.Response, error) {
+	reader, err := m.Stream(ctx, request, options...)
+	if err != nil {
+		return llm.Response{}, err
+	}
+	return llm.CollectResponse(ctx, reader)
+}
+
+// hiddenConfig 的未导出字段被 JSON 静默丢弃：两个仅内部字段不同的配置
+// 若按 JSON 编码会共用缓存键。
+type hiddenConfig struct {
+	Tier   string
+	secret int
+}
+
+// anyConfig 的接口字段承载任意具体类型：命名类型 Celsius(5) 与
+// float64(5) 的 Kind 相同，若指纹只按 Kind 编码会误命中。
+type anyConfig struct {
+	Extra any
+}
+
+// goStringConfig 实现 GoStringer：%#v 指纹会被劫持为恒定输出，使不同
+// 配置值产生相同缓存键；结构指纹按字段内容取值，不受其影响。
+type goStringConfig struct {
+	Tier string
+}
+
+// celsius 是与 float64 同底层类型的命名类型，用于验证接口字段的
+// 具体类型区分。
+type celsius float64
+
+func (goStringConfig) GoString() string { return "poison" }
+
+func (m *extConfigModel) Stream(ctx context.Context, _ llm.Request, options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	m.calls.Add(1)
+	resolved, remaining, err := runnable.ResolveComponentOptions(extConfig{}, options...)
+	var hidden hiddenConfig
+	if err == nil {
+		var rest []runnable.Option
+		hidden, rest, err = runnable.ResolveComponentOptions(hiddenConfig{}, remaining...)
+		remaining = rest
+	}
+	var goStr goStringConfig
+	if err == nil {
+		var rest []runnable.Option
+		goStr, rest, err = runnable.ResolveComponentOptions(goStringConfig{}, remaining...)
+		remaining = rest
+	}
+	var anyCfg anyConfig
+	if err == nil {
+		var rest []runnable.Option
+		anyCfg, rest, err = runnable.ResolveComponentOptions(anyConfig{}, remaining...)
+		remaining = rest
+	}
+	if err == nil {
+		var rest []runnable.Option
+		_, rest, err = runnable.ResolveComponentOptions(opaqueConfig{}, remaining...)
+		remaining = rest
+	}
+	if err == nil {
+		err = runnable.CheckNoRemainingOptions(remaining...)
+	}
+	tag := resolved.Tier
+	if tag == "" {
+		tag = "none"
+	}
+	if goStr.Tier != "" {
+		tag = "gs-" + goStr.Tier
+	}
+	if anyCfg.Extra != nil {
+		tag = fmt.Sprintf("%s-any%T", tag, anyCfg.Extra)
+	}
+	if hidden.secret != 0 {
+		tag = fmt.Sprintf("%s-secret%d", tag, hidden.secret)
+	}
+	reader, writer := runnable.Pipe[llm.Response](context.WithoutCancel(ctx))
+	go func() {
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		if err := writer.Send(response("tier:" + tag)); err != nil {
+			return
+		}
+		_ = writer.Close()
+	}()
+	return reader, nil
+}
+func (m *extConfigModel) Collect(ctx context.Context, input *runnable.StreamReader[llm.Request], options ...runnable.Option) (llm.Response, error) {
+	return runnable.CollectFromInvoke(ctx, input, m.Invoke, options...)
+}
+func (m *extConfigModel) Transform(ctx context.Context, input *runnable.StreamReader[llm.Request], options ...runnable.Option) (*runnable.StreamReader[llm.Response], error) {
+	return runnable.TransformFromInvoke(ctx, input, m.Invoke, options...)
+}
+func (*extConfigModel) Capabilities() llm.Capabilities { return llm.Capabilities{Streaming: true} }
+func (*extConfigModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Name: "ext-model"} }
+func (m *extConfigModel) Calls() int                   { return int(m.calls.Load()) }
+
+// 扩展配置值进入缓存键：tier=fast 的缓存命中不能让 tier=deep 复用。
+func TestCachedModelIncludesExtensionConfigInKey(t *testing.T) {
+	upstream := &extConfigModel{}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "ext"})
+	withTier := func(tier string) runnable.Option {
+		return runnable.WrapOption(func(c *extConfig) { c.Tier = tier })
+	}
+	for _, item := range []struct {
+		tier string
+		want string
+	}{{"fast", "tier:fast"}, {"deep", "tier:deep"}, {"fast", "tier:fast"}} {
+		got, err := cached.Invoke(context.Background(), request("same"), withTier(item.tier))
+		if err != nil || got.Messages[0].JoinedText("") != item.want {
+			t.Fatalf("tier=%s response=%#v err=%v", item.tier, got, err)
+		}
+	}
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2", upstream.Calls())
+	}
+}
+
+// 仅在未导出字段上不同的配置必须产生不同缓存键——JSON 会静默丢弃这些
+// 字段，指纹化保留它们。
+func TestCachedModelSeparatesHiddenFields(t *testing.T) {
+	upstream := &extConfigModel{}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "hidden"})
+	withHidden := func(secret int) runnable.Option {
+		return runnable.WrapOption(func(c *hiddenConfig) { c.secret = secret })
+	}
+	for _, item := range []struct {
+		secret int
+		want   string
+	}{{1, "tier:none-secret1"}, {2, "tier:none-secret2"}, {1, "tier:none-secret1"}} {
+		got, err := cached.Invoke(context.Background(), request("same"), withHidden(item.secret))
+		if err != nil || got.Messages[0].JoinedText("") != item.want {
+			t.Fatalf("secret=%d response=%#v err=%v", item.secret, got, err)
+		}
+	}
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2", upstream.Calls())
+	}
+}
+
+// 实现了 GoStringer 的配置类型不能让 %#v 指纹塌缩为恒定值：两个不同
+// 的 Tier 必须产生不同缓存键，不能误命中。
+func TestCachedModelSeparatesGoStringerConfigs(t *testing.T) {
+	upstream := &extConfigModel{}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "gostring"})
+	withTier := func(tier string) runnable.Option {
+		return runnable.WrapOption(func(c *goStringConfig) { c.Tier = tier })
+	}
+	for _, item := range []struct {
+		tier string
+		want string
+	}{{"a", "tier:gs-a"}, {"b", "tier:gs-b"}, {"a", "tier:gs-a"}} {
+		got, err := cached.Invoke(context.Background(), request("same"), withTier(item.tier))
+		if err != nil || got.Messages[0].JoinedText("") != item.want {
+			t.Fatalf("tier=%s response=%#v err=%v", item.tier, got, err)
+		}
+	}
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2 (GoStringer must not collapse the key)", upstream.Calls())
+	}
+}
+
+// 接口字段中底层类型相同的命名类型不能塌缩为同一指纹：any 持有的
+// celsius(5) 与 float64(5) 必须产生不同缓存键。
+func TestCachedModelSeparatesInterfaceConcreteTypes(t *testing.T) {
+	upstream := &extConfigModel{}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "any"})
+	withExtra := func(v any) runnable.Option {
+		return runnable.WrapOption(func(c *anyConfig) { c.Extra = v })
+	}
+	for _, item := range []struct {
+		value any
+		want  string
+	}{{celsius(5), "tier:none-anyllm_test.celsius"}, {float64(5), "tier:none-anyfloat64"}, {celsius(5), "tier:none-anyllm_test.celsius"}} {
+		got, err := cached.Invoke(context.Background(), request("same"), withExtra(item.value))
+		if err != nil || got.Messages[0].JoinedText("") != item.want {
+			t.Fatalf("value=%v(%T) response=%#v err=%v", item.value, item.value, got, err)
+		}
+	}
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2 (named types sharing a Kind must not collide)", upstream.Calls())
+	}
+}
+
+// 无法稳定编码的扩展配置不参与缓存身份：绕过缓存而不是命中错误结果。
+func TestCachedModelBypassesUnencodableExtensionConfig(t *testing.T) {
+	upstream := &extConfigModel{}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "opaque"})
+	opaqueOpt := runnable.WrapOption(func(c *opaqueConfig) { c.Hooks = func() {} })
+	for range 2 {
+		if _, err := cached.Invoke(context.Background(), request("same"), opaqueOpt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if upstream.Calls() != 2 {
+		t.Fatalf("calls=%d, want 2 (unencodable config must bypass)", upstream.Calls())
+	}
+	if cached.Stats().Bypasses != 2 {
+		t.Fatalf("stats=%#v", cached.Stats())
 	}
 }
 

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"goharness/pkg/contextengine"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/contextengine"
+	"github.com/goharness/goharness/pkg/schema"
 )
 
 type runeCounter struct{}
@@ -257,7 +257,7 @@ func TestAssemblerPreservesParallelCallsWithTheSameToolName(t *testing.T) {
 }
 
 func TestContextBuilderTruncatesTextWithoutFlatteningBlocks(t *testing.T) {
-	assembler, err := contextengine.NewContextBuilder(contextengine.Config{MaxContextTokens: 40, ReservedOutputTokens: 5})
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{MaxContextTokens: 40, ReservedOutputTokens: 5, MediaEstimator: contextengine.ApproxMediaEstimator{Image: 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,8 +293,29 @@ func TestContextBuilderBudgetsTopLevelTextBlocksSeparately(t *testing.T) {
 	}
 }
 
+// runeMediaEstimator 按 URI、MIME 与内嵌 Data 的 rune 数估算媒体块——
+// 测试用它验证媒体估算入口被调用，而不是计固定值。
+type runeMediaEstimator struct{}
+
+func (runeMediaEstimator) EstimateMedia(block schema.ContentBlock) int {
+	media := block.Image
+	if media == nil {
+		media = block.File
+	}
+	if media == nil {
+		media = block.Audio
+	}
+	if media == nil {
+		media = block.Video
+	}
+	if media == nil {
+		return 0
+	}
+	return utf8.RuneCountInString(media.URI) + utf8.RuneCountInString(media.MIMEType) + utf8.RuneCountInString(string(media.Data))
+}
+
 func TestContextBuilderCountsEveryBlockPayloadRecursively(t *testing.T) {
-	assembler, err := contextengine.NewContextBuilder(contextengine.Config{MaxContextTokens: 100, ReservedOutputTokens: 10, Counter: runeCounter{}})
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{MaxContextTokens: 100, ReservedOutputTokens: 10, Counter: runeCounter{}, MediaEstimator: runeMediaEstimator{}})
 	if err != nil {
 		t.Fatal(err)
 	}

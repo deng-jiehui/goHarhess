@@ -2,12 +2,13 @@ package graph_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/graph"
-	"goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
 )
 
 type runtimeAPIState struct {
@@ -68,22 +69,30 @@ func TestRuntimeStateFactoryRunsOnceAndSequentialHandlersSharePointer(t *testing
 	}
 }
 
+type apiNodeConfig struct {
+	Flags map[string]bool
+}
+
+// 绑定给节点的选项在一次调用中各自只执行一次，节点自行解析。
 func TestWithNodeOptionsForwardsEachOptionOnce(t *testing.T) {
 	g := graph.NewGraph[string, string]("node-options")
 	var applications atomic.Int32
 	option := func(key string) runnable.Option {
-		return runnable.OptionFunc(func(set *runnable.OptionSet) {
+		return runnable.WrapOption(func(c *apiNodeConfig) {
 			applications.Add(1)
-			set.Metadata[key] = true
+			c.Flags[key] = true
 		})
 	}
 	node := runnable.Func[string, string](func(_ context.Context, input string, options ...runnable.Option) (string, error) {
-		resolved, err := runnable.ResolveOptions(options...)
+		resolved, remaining, err := runnable.ResolveComponentOptions(apiNodeConfig{Flags: map[string]bool{}}, options...)
 		if err != nil {
 			return "", err
 		}
-		if resolved.Metadata["first"] != true || resolved.Metadata["second"] != true {
-			t.Fatalf("node metadata = %#v", resolved.Metadata)
+		if err := runnable.CheckNoRemainingOptions(remaining...); err != nil {
+			return "", err
+		}
+		if !resolved.Flags["first"] || !resolved.Flags["second"] {
+			return "", fmt.Errorf("node config flags = %#v", resolved.Flags)
 		}
 		return input, nil
 	})

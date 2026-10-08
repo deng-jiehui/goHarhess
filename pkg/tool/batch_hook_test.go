@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"goharness/pkg/control"
-	"goharness/pkg/schema"
-	"goharness/pkg/tool"
+	"github.com/goharness/goharness/pkg/control"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestBeforeBatchInterruptsEveryToolBeforeExecution(t *testing.T) {

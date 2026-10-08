@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"goharness/internal/agentrecipe"
-	"goharness/pkg/llm"
-	"goharness/pkg/runnable"
-	"goharness/pkg/schema"
+	"github.com/goharness/goharness/internal/agentrecipe"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 const DefaultRoutingMaxSteps = 8
@@ -54,10 +55,8 @@ func DefaultSupervisorConfig() SupervisorConfig {
 // Graph recipe like the other built-in Agents.
 type RoutingAgent struct {
 	*base
-	returnControl bool
-	maxSteps      int
-	functions     []schema.FunctionDefinition
-	recipe        *agentrecipe.Recipe
+	functions []schema.FunctionDefinition
+	recipe    *agentrecipe.Recipe
 }
 
 func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error) {
@@ -92,12 +91,7 @@ func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error
 	if err != nil {
 		return nil, err
 	}
-	a := &RoutingAgent{
-		base:          base,
-		returnControl: returnControl,
-		maxSteps:      maxSteps,
-		functions:     functions,
-	}
+	a := &RoutingAgent{base: base, functions: functions}
 	agentNodes := make([]agentrecipe.RoutedAgent, 0, len(hub.Agents()))
 	for _, child := range hub.Agents() {
 		node, nodeErr := NewAgentNode(child)
@@ -107,9 +101,10 @@ func NewRoutingAgent(cfg SupervisorConfig, opts ...Option) (*RoutingAgent, error
 		agentNodes = append(agentNodes, agentrecipe.RoutedAgent{Name: child.Name(), Node: node})
 	}
 	a.recipe, err = agentrecipe.NewRoutingRecipe(recipeName(base, string(AgentKindRouting)), agentrecipe.RoutingHooks{
-		MaxSteps: maxSteps,
-		Model:    a.modelNode,
-		Agents:   agentNodes,
+		MaxSteps:      maxSteps,
+		ReturnControl: returnControl,
+		Model:         a.modelNode,
+		Agents:        agentNodes,
 		PrepareModel: func(ctx context.Context, messages []schema.Message) (llm.Request, error) {
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
 			return a.prepareLLMRequest(ctx, messages, a.functions, runOpts)
@@ -139,8 +134,14 @@ func resolveRoutingMode(cfg SupervisorConfig) (bool, error) {
 	}
 }
 
-func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, opts ...RunOption) (*runnable.StreamReader[[]schema.Message], error) {
-	runOpts := resolveRunOptions(a.limits, opts...)
+func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
+	runOpts, err := resolveRunOptions(a.limits, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.dispatchRunOptions(&runOpts); err != nil {
+		return nil, err
+	}
 	runOpts.agentKind = AgentKindRouting
 	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
 	if err != nil {
@@ -152,22 +153,16 @@ func (a *RoutingAgent) stream(ctx context.Context, messages []schema.Message, op
 	if err != nil {
 		return nil, err
 	}
-	lifecycle.session = session
 	runOpts.session = session
 	runCtx = withResolvedRunOptions(runCtx, runOpts)
 	runCtx = a.bindModelStream(runCtx)
 	runCtx = withToolExecutionLimits(runCtx, runOpts)
-	runCtx = withRecipeCompletion(runCtx, session)
-	runCtx = agentrecipe.WithRoutingRunConfig(runCtx, agentrecipe.RoutingRunConfig{
-		MaxSteps:      a.maxSteps,
-		ReturnControl: a.returnControl,
-		Input:         conversationInput(session, messages),
-	})
+	recipeConfig := recipeRunConfig(session, messages, 0)
 	var stream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
-		stream, err = a.recipe.ResumeStream(runCtx, graphNodeOptions(runOpts)...)
+		stream, err = a.recipe.ResumeStream(runCtx, recipeConfig, runOpts.forwarded...)
 	} else {
-		stream, err = a.recipe.Stream(runCtx, prepared, graphNodeOptions(runOpts)...)
+		stream, err = a.recipe.Stream(runCtx, prepared, recipeConfig, runOpts.forwarded...)
 	}
 	if err != nil {
 		lifecycle.fail(err)
@@ -218,7 +213,14 @@ func detectRoutingCalls(messages []schema.Message) []agentrecipe.Call {
 func routingObservation(result agentrecipe.RoutedResult) schema.Message {
 	content := ""
 	if result.Err != nil {
-		content = fmt.Sprintf("Sub-agent %q failed: %v", result.Call.Name, result.Err)
+		// 子 Agent 错误默认脱敏；显式 ModelVisible 的反馈才透传给决策模型，
+		// 完整错误保留在日志与 callback 侧。
+		var visible *tool.ModelVisibleError
+		if errors.As(result.Err, &visible) {
+			content = fmt.Sprintf("Sub-agent %q failed: %v", result.Call.Name, visible.Err)
+		} else {
+			content = fmt.Sprintf("Sub-agent %q failed", result.Call.Name)
+		}
 	} else {
 		parts := make([]string, 0, len(result.Messages))
 		for _, message := range result.Messages {
