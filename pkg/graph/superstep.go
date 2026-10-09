@@ -480,11 +480,16 @@ type StepGroup struct {
 // GroupMember 是动态分派清单的一个成员：成员 ID、清单内序号与入口节点。
 // 成员输入冻结在首个任务的 StepTask.Input 中；State 保存成员上一节点
 // 提交后的局部 State——多步成员链各轮由此继续，不回到公共合并态。
+// TaskID 记录提交该成员终态的任务编号，最终合并据此回填 StepResult；
+// live 持有本次运行内成员的内存态 State，避免无检查点路径为接续反复
+// 编解码快照——持久化开启时 State 仍按轮编码，live 仅作解码短路。
 type GroupMember struct {
-	ID    string                `json:"id"`
-	Seq   int                   `json:"seq"`
-	Node  string                `json:"node"`
-	State *GraphStateCheckpoint `json:"state,omitempty"`
+	ID     string                `json:"id"`
+	Seq    int                   `json:"seq"`
+	Node   string                `json:"node"`
+	TaskID string                `json:"task_id,omitempty"`
+	State  *GraphStateCheckpoint `json:"state,omitempty"`
+	live   any
 }
 
 // StepSchedule 是已提交轮次之后的下一批任务。
@@ -1062,17 +1067,22 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			states := make([]any, len(s.Group.Members))
 			for i := range s.Group.Members {
 				member := &s.Group.Members[i]
-				if member.State == nil {
+				switch {
+				case member.live != nil:
+					// 运行内成员终态直接消费内存对象，免快照解码。
+					states[i] = member.live
+				case member.State != nil:
+					restored, rerr := g.restoreRuntimeState(taskCtx, *member.State)
+					if rerr == nil && coord != nil {
+						restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
+					}
+					if rerr != nil {
+						return taskOutcome{err: fmt.Errorf("restore parallel member %q state: %w", member.ID, rerr)}
+					}
+					states[i] = restored
+				default:
 					return taskOutcome{err: fmt.Errorf("parallel group %q member %q state missing at join", s.Group.Fork, member.ID)}
 				}
-				restored, rerr := g.restoreRuntimeState(taskCtx, *member.State)
-				if rerr == nil && coord != nil {
-					restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
-				}
-				if rerr != nil {
-					return taskOutcome{err: fmt.Errorf("restore parallel member %q state: %w", member.ID, rerr)}
-				}
-				states[i] = restored
 			}
 			mergeCtx := withRuntimeState(context.WithoutCancel(taskCtx), candidate)
 			if merr := spec.merger.invoke(mergeCtx, candidate, states); merr != nil {
@@ -1124,6 +1134,11 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			}
 			local = restored
 			copies[index] = local
+		} else if member != nil && member.live != nil {
+			// 本次运行内的成员局部 State 直接沿用上轮提交的内存对象，
+			// 不经编解码往返；live 仅存在于本轮调度，落盘/恢复走 State。
+			local = member.live
+			copies[index] = local
 		} else if member != nil && member.State != nil {
 			// 成员的后续节点从该成员上一节点提交的局部 State 继续；
 			// 挂起任务的 Entry 快照（上分支）更新，优先于成员快照。
@@ -1137,7 +1152,7 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			local = restored
 			copies[index] = local
 		}
-		if member != nil && len(task.Input) > 0 && node.inputType == g.stateType && member.State == nil && (record == nil || record.Entry == nil) {
+		if member != nil && len(task.Input) > 0 && node.inputType == g.stateType && member.live == nil && member.State == nil && (record == nil || record.Entry == nil) {
 			// 分派输入本身是图 State（StateNode 类入口）：冻结快照直接成为
 			// 成员局部 State，节点输入、上下文、快照与合并结果同一份对象。
 			decoded, derr := decodeTaskInput(task.Input, node.inputType)
@@ -1371,34 +1386,28 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		}
 		if target == joinNode {
 			next.Group.Arrived = append(next.Group.Arrived, task.Branch)
-			if memberLocal {
-				// 到达汇合的成员保存终态局部 State：合并按声明序消费。
-				snap, serr := g.snapshotRuntimeState(routeBase, results[i].State)
-				if serr != nil {
-					return nil, nil, nil, fmt.Errorf("snapshot member %q state: %w", task.Branch, serr)
-				}
-				for mi := range next.Group.Members {
-					if next.Group.Members[mi].ID == task.Branch {
-						next.Group.Members[mi].State = &snap
-						break
-					}
-				}
-			}
 		} else {
 			next.Tasks = append(next.Tasks, next.task(target, task.GroupID, task.Branch))
-			if memberLocal {
-				// 成员局部 State 与下一批任务进入同一份调度快照：
-				// 下一节点从成员自己的提交态继续。
-				snap, serr := g.snapshotRuntimeState(routeBase, results[i].State)
-				if serr != nil {
-					return nil, nil, nil, fmt.Errorf("snapshot member %q state: %w", task.Branch, serr)
+		}
+		if memberLocal {
+			// 成员本次提交的局部 State 记入成员条目：内存态对象直接沿用，
+			// 供下一轮接续与最终合并消费，不经编解码往返；TaskID 回填最终
+			// 合并的 StepResult。开启持久化时再编码快照随调度进入检查点。
+			for mi := range next.Group.Members {
+				member := &next.Group.Members[mi]
+				if member.ID != task.Branch {
+					continue
 				}
-				for mi := range next.Group.Members {
-					if next.Group.Members[mi].ID == task.Branch {
-						next.Group.Members[mi].State = &snap
-						break
+				member.live = results[i].State
+				member.TaskID = task.ID
+				if setup.configured {
+					snap, serr := g.snapshotRuntimeState(routeBase, results[i].State)
+					if serr != nil {
+						return nil, nil, nil, fmt.Errorf("snapshot member %q state: %w", task.Branch, serr)
 					}
+					member.State = &snap
 				}
+				break
 			}
 		}
 	}
@@ -1423,17 +1432,22 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			final := make([]StepResult[any], len(next.Group.Members))
 			for mi := range next.Group.Members {
 				member := &next.Group.Members[mi]
-				if member.State == nil {
-					return nil, nil, nil, fmt.Errorf("group %q member %q state missing at join %q", s.Group.Fork, member.ID, joinNode)
+				memberState := member.live
+				if memberState == nil {
+					// 恢复态运行没有内存快照：从持久化快照解码成员终态。
+					if member.State == nil {
+						return nil, nil, nil, fmt.Errorf("group %q member %q state missing at join %q", s.Group.Fork, member.ID, joinNode)
+					}
+					restored, rerr := g.restoreRuntimeState(routeBase, *member.State)
+					if rerr == nil && coord != nil {
+						restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
+					}
+					if rerr != nil {
+						return nil, nil, nil, fmt.Errorf("restore member %q state: %w", member.ID, rerr)
+					}
+					memberState = restored
 				}
-				restored, rerr := g.restoreRuntimeState(routeBase, *member.State)
-				if rerr == nil && coord != nil {
-					restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
-				}
-				if rerr != nil {
-					return nil, nil, nil, fmt.Errorf("restore member %q state: %w", member.ID, rerr)
-				}
-				final[mi] = StepResult[any]{NodeID: member.Node, GroupID: s.Group.ID, Branch: member.ID, State: restored}
+				final[mi] = StepResult[any]{TaskID: member.TaskID, NodeID: member.Node, GroupID: s.Group.ID, Branch: member.ID, State: memberState}
 			}
 			mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
 			if err = merger.invoke(mergeCtx, candidate, final); err != nil {

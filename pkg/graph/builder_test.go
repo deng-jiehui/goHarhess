@@ -419,6 +419,7 @@ func TestBuilderParallelMergeScoped(t *testing.T) {
 func TestBuilderParallelMemberRoute(t *testing.T) {
 	var merges atomic.Int32
 	var received [][]string
+	var receivedIDs []string
 	app, err := graph.NewState[builderState]("member-route").
 		Node("prep", func(_ context.Context, s *builderState) error {
 			s.Docs = []string{s.Query}
@@ -446,6 +447,7 @@ func TestBuilderParallelMemberRoute(t *testing.T) {
 				merges.Add(1)
 				for _, r := range results {
 					received = append(received, append([]string(nil), r.State.Docs...))
+					receivedIDs = append(receivedIDs, r.TaskID)
 					base.Docs = append(base.Docs, r.State.Docs[len(r.State.Docs)-1])
 				}
 				return nil
@@ -465,13 +467,21 @@ func TestBuilderParallelMemberRoute(t *testing.T) {
 	}
 	// 多步分支的中间态不触发合并：a 经路由走到 a2 后到达汇合，b 先到汇合
 	// 等待；合并只在全部成员到达后按声明序消费各自的终态 State——
-	// a 分支的终态包含 a2，不是首轮的中间结果 [q a]。
+	// a 分支的终态包含 a2，不是首轮的中间结果 [q a]；每条结果携带各自
+	// 到达汇合的任务编号，业务可按 TaskID 区分成员输出。
 	if merges.Load() != 1 {
 		t.Fatalf("merge invoked %d times, want 1", merges.Load())
 	}
 	want := [][]string{{"q", "a", "a2"}, {"q", "b"}}
 	if !reflect.DeepEqual(received, want) {
 		t.Fatalf("merger received %v, want final member states %v", received, want)
+	}
+	seenIDs := map[string]bool{}
+	for _, id := range receivedIDs {
+		if id == "" || seenIDs[id] {
+			t.Fatalf("merge TaskIDs missing or duplicated: %v", receivedIDs)
+		}
+		seenIDs[id] = true
 	}
 	if !out.Done || fmt.Sprint(out.Docs) != "[q a2 b]" {
 		t.Fatalf("output=%+v", out)

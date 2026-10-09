@@ -106,9 +106,9 @@ func TestRuntimeParallelSnapshotsBranchesAndMergesInDeclarationOrder(t *testing.
 		t.Fatalf("parallel output = %#v", output)
 	}
 	// 展开拓扑的 State 复制点：成员轮克隆(1+3)、每任务路由副本(2+2)、
-	// 到达时的成员终态快照(2+0)、汇合轮克隆(1+2)、成员 State 恢复(0+2)、
-	// 汇合路由副本(1+1)。合并失败不会污染入口 State。
-	if encodes.Load() != 7 || decodes.Load() != 10 {
+	// 汇合轮克隆(1+2)、汇合路由副本(1+1)。成员终态在未开启持久化时经
+	// 内存态直接交接，不付出快照编解码；合并失败不会污染入口 State。
+	if encodes.Load() != 5 || decodes.Load() != 8 {
 		t.Fatalf("codec calls = encode:%d decode:%d", encodes.Load(), decodes.Load())
 	}
 	if len(seen) != 2 {

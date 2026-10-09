@@ -5,10 +5,11 @@
 指标（`B/op`、`allocs/op`）与基线逐项一致或改善，无一超过 +10% 阈值；`ns/op`
 有 2 项超阈，经同条件复测确认为采样噪声，依据见下文"复测记录"。
 
-阶段二改动（`b4808e6`、`eedd987`、`ec48966`、`7073e79`）为 API 面收敛：
-`graph.NewState` 门面、单次求值路由边、组级合并器（全体到达后一次性执行）、
-`Checkpointer`/`Thread`、`tool.New`、`agent.New(model, opts...)` 与
-Agent 接口缩减。运行期热路径未变，预期与基线持平。
+阶段二改动（`b4808e6`、`eedd987`、`ec48966`、`7073e79` 及后续复核修复）
+为 API 面收敛：`graph.NewState` 门面、单次求值路由边、组级合并器（全体
+到达后一次性执行）、`Checkpointer`/`Thread`、`tool.New`、
+`agent.New(model, opts...)` 与 Agent 接口缩减；第三轮复核后为成员局部态
+增加活指针复用，原生分支热路径较基线进一步下降。
 
 ## 环境
 
@@ -54,6 +55,31 @@ Agent 接口缩减。运行期热路径未变，预期与基线持平。
 2. 相关代码路径未变——`pkg/schema` 的传输/克隆不含阶段二任何改动；
 3. 双侧各 10 次同条件复测中位差 +4.0% 与 -0.3%，均落在 ±10% 阈值内；
    Full 组的单样本抖动（15.5%/37.9%）未在复测中复现，判定为采样噪声。
+
+## 原生分支开销复测（第三轮复核后）
+
+第三轮复核标记 `forkjoin`（原生分支）族耗时/分配超阈：根因是成员局部态
+每轮无条件 `snapshotRuntimeState`/`restoreRuntimeState` 编解码。修复为
+`GroupMember` 增加未导出活指针：无检查点运行时直接复用内存态，仅
+`setup.configured` 时才编码快照供持久化；汇合时优先读活指针。
+
+修复后按门槛双侧各 10 次同条件复测（`pre-slim` worktree 与修复态，
+`-p=1 -benchmem -benchtime=1s -count=10 -cpu=1`，原始输出归档
+[raw/phase2/rerun/pre-slim-forkjoin.txt](raw/phase2/rerun/pre-slim-forkjoin.txt) 与
+[raw/phase2/rerun/phase2-forkjoin.txt](raw/phase2/rerun/phase2-forkjoin.txt)）：
+
+| 场景 | 基线中位 ns/op | 候选中位 ns/op | 差值 | B/op 差值 | allocs/op 差值 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `forkjoin/branches=2/state_bytes=1024` | 45,336 | 45,495 | +0.4% | -0.7% | -3.5% |
+| `forkjoin/branches=8/state_bytes=1024` | 158,046 | 116,515 | -26.3% | -4.3% | -20.5% |
+| `forkjoin/branches=8/state_bytes=65536` | 4,014,360 | 3,983,697 | -0.8% | -0.1% | -20.3% |
+| `forkjoin/branches=8/max_concurrency=1` | 127,347 | 115,298 | -9.5% | -4.3% | -20.3% |
+| `forkjoin/branches=8/max_concurrency=8` | 129,249 | 115,671 | -10.5% | -4.2% | -20.2% |
+| `forkjoin/branches=32/state_bytes=1024` | 682,927 | 398,141 | -41.7% | -24.5% | -55.2% |
+
+六项全部在 ±10% 阈值内且多数显著优于基线：活指针复用同时消除了旧模型每轮
+批内合并的重复工作，分支越多收益越大。检查点路径行为不变（`configured` 时
+仍编码快照并随调度持久化，恢复走快照解码）。
 
 ## 结果摘要（cpu=1，10 次采样中位数）
 
