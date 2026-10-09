@@ -70,9 +70,6 @@ type executionProgress struct {
 	// Waiting 是挂起时的当前阻塞位置：本层问题、子调用或并行任务组。
 	// 恢复判定以它为准，已回答的旧问题不会误唤醒后来阻塞的任务。
 	Waiting *waitRecord `json:"waiting,omitempty"`
-	// Contract 是保存时的条目化图契约：整图 revision 变化后，恢复时按
-	// 仍会执行的节点闭包逐项比较；旧格式没有该字段，只能整图哈希匹配。
-	Contract *progressContract `json:"contract,omitempty"`
 	// Pending 登记挂起节点内已完成的工具调用结果（键为调用去重键）；
 	// 恢复重放节点时命中登记的调用直接复用结果，不再执行。
 	Pending map[string]json.RawMessage `json:"pending,omitempty"`
@@ -265,17 +262,9 @@ type graphRunConfig struct {
 	hasCheckpoint bool
 	durability    Durability
 	inputs        []resumeInput
-	migration     *migrationConfig
 	// managedBuilders 是受管任务构建函数注册表；只在根运行生效，
 	// 嵌套运行共享根协调器的同一份注册。
 	managedBuilders map[string]managedBuilderEntry
-}
-
-// migrationConfig 声明一次恢复迁移：整图 revision 为 from 的进度先经
-// migrate 改写 State，再按恢复闭包逐项校验兼容性。
-type migrationConfig struct {
-	from    string
-	migrate func(GraphStateCheckpoint) (GraphStateCheckpoint, error)
 }
 
 // graphRunConfigType 是 Graph 运行配置的归属类型；未导出，外部组件无法声明接收。
@@ -315,24 +304,7 @@ func (c *graphRunConfig) finalize() error {
 		seen[input.id] = struct{}{}
 		c.inputs[index].data = data
 	}
-	if c.migration != nil {
-		if strings.TrimSpace(c.migration.from) == "" {
-			return errors.New("graph migration requires a source revision")
-		}
-		if c.migration.migrate == nil {
-			return errors.New("graph migration requires a migrate function")
-		}
-	}
 	return nil
-}
-
-// WithMigration 声明一次恢复迁移：保存进度的整图 revision 为
-// fromRevision 时，先由 migrate 改写其中的 State，再按恢复节点及其
-// 后继闭包逐项校验兼容性。迁移只处理 State 演进，不豁免结构校验。
-func WithMigration(fromRevision string, migrate func(GraphStateCheckpoint) (GraphStateCheckpoint, error)) runnable.Option {
-	return runnable.WrapOption(func(c *graphRunConfig) {
-		c.migration = &migrationConfig{from: fromRevision, migrate: migrate}
-	})
 }
 
 func WithCheckpoint(store state.Store, key string) runnable.Option {

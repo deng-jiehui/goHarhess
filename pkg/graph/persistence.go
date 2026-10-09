@@ -289,7 +289,7 @@ func (g *Graph[I, O]) persistProgress(ctx context.Context, config checkpointConf
 		return GraphStateCheckpoint{}, err
 	}
 	revision, _ := g.recoveryMetadata()
-	c := executionProgress{GraphName: g.Name(), GraphRevision: revision, ResumeNode: next, Step: step, Visits: cloneVisits(visits), State: snapshot, CursorStack: cursor.Clone(), Point: InterruptPointAfterCommit, Contract: contractOf(g)}
+	c := executionProgress{GraphName: g.Name(), GraphRevision: revision, ResumeNode: next, Step: step, Visits: cloneVisits(visits), State: snapshot, CursorStack: cursor.Clone(), Point: InterruptPointAfterCommit}
 	c.Schedule = scheduleFromContext(ctx)
 	// 会话在当前 goroutine 取出副本，后台写入不会读到下一节点对 State 的修改。
 	var conversation = (state.Checkpoint{}).Messages

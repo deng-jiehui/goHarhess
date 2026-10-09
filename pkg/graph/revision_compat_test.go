@@ -93,8 +93,9 @@ func revisionTestSuspend(t *testing.T, g *graph.Graph[string, string]) (*byteChe
 	return store, progress.Interrupts[0].ID, progress.GraphRevision
 }
 
-// 恢复闭包之外的拓扑改动（恢复点上游新增节点）不再使检查点失效。
-func TestResumeAllowsChangesOutsideResumeClosure(t *testing.T) {
+// 整图指纹是唯一的兼容性判据：恢复点上游新增节点同样使指纹变化，
+// 检查点不再区分闭包内外，一律拒绝恢复。
+func TestResumeRejectsChangesOutsideResumeClosure(t *testing.T) {
 	counters := map[string]*atomic.Int32{"a": {}, "pre": {}}
 	store, questionID, _ := revisionTestSuspend(t, revisionTestGraph(t, false, false, nil, counters))
 
@@ -103,19 +104,13 @@ func TestResumeAllowsChangesOutsideResumeClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"))
-	if err != nil {
-		t.Fatalf("resume after upstream insert: %v", err)
-	}
-	if out != "in-a-yes-b" {
-		t.Fatalf("out=%q", out)
-	}
-	if counters["a"].Load() != 1 || counters["pre"].Load() != 0 {
-		t.Fatalf("a=%d pre=%d, upstream nodes must not re-execute", counters["a"].Load(), counters["pre"].Load())
+	_, err = compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"))
+	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
+		t.Fatalf("resume after upstream insert = %v, want ErrGraphRevisionMismatch", err)
 	}
 }
 
-// 恢复闭包内的结构变化（恢复点后插入后继节点）仍被拒绝。
+// 恢复点之后插入后继节点同样被拒绝。
 func TestResumeRejectsChangesInsideResumeClosure(t *testing.T) {
 	counters := map[string]*atomic.Int32{"a": {}}
 	store, questionID, _ := revisionTestSuspend(t, revisionTestGraph(t, false, false, nil, counters))
@@ -131,20 +126,19 @@ func TestResumeRejectsChangesInsideResumeClosure(t *testing.T) {
 	}
 }
 
-// 无契约条目的旧进度仍按整图 revision 严格比较。
-func TestResumeWithoutContractStillRequiresExactRevision(t *testing.T) {
+// 篡改的图名同样被拒绝：指纹之外的身份字段仍逐项核对。
+func TestResumeRejectsDifferentGraphName(t *testing.T) {
 	counters := map[string]*atomic.Int32{"a": {}}
 	store, questionID, _ := revisionTestSuspend(t, revisionTestGraph(t, false, false, nil, counters))
 	record, found, err := store.Load(context.Background(), "rev")
 	if err != nil || !found {
 		t.Fatalf("load: %v %v", found, err)
 	}
-	// 剥掉契约字段模拟旧格式进度：上游插入同样应被拒绝。
 	stripped := map[string]any{}
 	if err := json.Unmarshal(record.Execution, &stripped); err != nil {
 		t.Fatal(err)
 	}
-	delete(stripped, "contract")
+	stripped["graph_name"] = "other-graph"
 	raw, err := json.Marshal(stripped)
 	if err != nil {
 		t.Fatal(err)
@@ -154,20 +148,20 @@ func TestResumeWithoutContractStillRequiresExactRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v2 := revisionTestGraph(t, true, false, nil, counters)
+	v2 := revisionTestGraph(t, false, false, nil, counters)
 	compiled, err := v2.Compile()
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"))
 	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
-		t.Fatalf("resume without contract = %v, want ErrGraphRevisionMismatch", err)
+		t.Fatalf("resume with renamed graph = %v, want ErrGraphRevisionMismatch", err)
 	}
 }
 
-// WithMigration 把旧版本编码头表示的 State 改写为新版本格式后继续恢复；
-// 未声明迁移或声明的来源版本不匹配时仍被拒绝。
-func TestResumeMigrationRewritesStateCodec(t *testing.T) {
+// Codec 升级使整图指纹变化：同名图、同拓扑下仅 State 编解码演进
+// 也拒绝恢复，不再提供迁移通道。
+func TestResumeRejectsCodecUpgrade(t *testing.T) {
 	codecV1, err := graph.NewStateCodec[*checkpointTestState]("test-state", 1,
 		func(_ context.Context, s *checkpointTestState) ([]byte, error) { return json.Marshal(s) },
 		func(_ context.Context, data []byte) (*checkpointTestState, error) {
@@ -195,9 +189,8 @@ func TestResumeMigrationRewritesStateCodec(t *testing.T) {
 	}
 
 	counters := map[string]*atomic.Int32{"a": {}}
-	store, questionID, oldRev := revisionTestSuspend(t, revisionTestGraph(t, false, false, codecV1, counters))
+	store, questionID, _ := revisionTestSuspend(t, revisionTestGraph(t, false, false, codecV1, counters))
 
-	// 同一张图，仅 State 编解码升级：未迁移时拒绝。
 	v2 := revisionTestGraph(t, false, false, codecV2, counters)
 	compiled, err := v2.Compile()
 	if err != nil {
@@ -205,37 +198,7 @@ func TestResumeMigrationRewritesStateCodec(t *testing.T) {
 	}
 	_, err = compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"))
 	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
-		t.Fatalf("resume without migration = %v, want ErrGraphRevisionMismatch", err)
-	}
-	// 声明的来源版本不匹配，迁移不生效。
-	_, err = compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"),
-		graph.WithMigration("deadbeef", func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			return old, nil
-		}))
-	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
-		t.Fatalf("resume with wrong migration source = %v, want ErrGraphRevisionMismatch", err)
-	}
-	// 匹配来源版本：v1 字节改写为 v2 格式后继续恢复。
-	migrated := false
-	out, err := compiled.Resume(context.Background(), graph.WithCheckpoint(store, "rev"), graph.WithResume(questionID, "yes"),
-		graph.WithMigration(oldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			migrated = true
-			return graph.GraphStateCheckpoint{
-				CodecID: old.CodecID, Version: 2,
-				Data: append([]byte("v2|"), old.Data...),
-			}, nil
-		}))
-	if err != nil {
-		t.Fatalf("resume with migration: %v", err)
-	}
-	if !migrated {
-		t.Fatal("migration function was not invoked")
-	}
-	if out != "in-a-yes-b" {
-		t.Fatalf("out=%q", out)
-	}
-	if counters["a"].Load() != 1 {
-		t.Fatalf("a re-ran: %d", counters["a"].Load())
+		t.Fatalf("resume after codec upgrade = %v, want ErrGraphRevisionMismatch", err)
 	}
 }
 
@@ -323,290 +286,10 @@ func TestResumeRejectsDeletedDownstreamPath(t *testing.T) {
 	}
 }
 
-// P2：恢复现场的全部 State 快照（frame.State、任务 Entry/Local）都要经
-// 迁移函数改写。A 已完成、B 待审批时升级 Codec：A 的结果继续复用，B 从
-// 迁移后的入口快照重放。
-func TestResumeMigrationCoversTaskSnapshots(t *testing.T) {
-	codecV1, err := graph.NewStateCodec[*forkState]("fork-state", 1,
-		func(_ context.Context, s *forkState) ([]byte, error) { return json.Marshal(s) },
-		func(_ context.Context, data []byte) (*forkState, error) {
-			var s forkState
-			return &s, json.Unmarshal(data, &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	codecV2, err := graph.NewStateCodec[*forkState]("fork-state", 2,
-		func(_ context.Context, s *forkState) ([]byte, error) {
-			data, err := json.Marshal(s)
-			return append([]byte("v2|"), data...), err
-		},
-		func(_ context.Context, data []byte) (*forkState, error) {
-			text, ok := strings.CutPrefix(string(data), "v2|")
-			if !ok {
-				return nil, errors.New("not a v2 payload")
-			}
-			var s forkState
-			return &s, json.Unmarshal([]byte(text), &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var aRuns, bRuns atomic.Int32
-	build := func(codec graph.StateCodec) *graph.Graph[string, string] {
-		g := graph.NewGraph[string, string]("migfork")
-		must := func(err error) {
-			t.Helper()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		must(g.SetStateFactory(func(_ context.Context, _ string) (*forkState, error) { return &forkState{}, nil }))
-		must(g.SetStepMerger(func(_ context.Context, base *forkState, rs []graph.StepResult[*forkState]) error {
-			n := len(base.Values)
-			for _, r := range rs {
-				base.Values = append(base.Values, r.State.Values[n:]...)
-			}
-			return nil
-		}))
-		must(g.SetStateCodec(codec))
-		must(g.AddNode("a", runnable.Func[string, string](func(_ context.Context, in string, _ ...runnable.Option) (string, error) {
-			aRuns.Add(1)
-			return "a", nil
-		}), graph.WithPreHandler(func(_ context.Context, s *forkState) (string, error) { return "a", nil }),
-			graph.WithPostHandler(func(_ context.Context, s *forkState, out string) error { s.Values = append(s.Values, out); return nil })))
-		must(g.AddNode("b", runnable.Func[string, string](func(ctx context.Context, in string, _ ...runnable.Option) (string, error) {
-			bRuns.Add(1)
-			answer, err := graph.Interrupt(ctx, "approve b")
-			if err != nil {
-				return "", err
-			}
-			return "b:" + fmt.Sprint(answer), nil
-		}), graph.WithPreHandler(func(_ context.Context, s *forkState) (string, error) { return "b", nil }),
-			graph.WithPostHandler(func(_ context.Context, s *forkState, out string) error { s.Values = append(s.Values, out); return nil })))
-		must(g.AddNode("join", runnable.Func[string, string](func(_ context.Context, in string, _ ...runnable.Option) (string, error) { return in, nil }),
-			graph.WithPreHandler(func(_ context.Context, s *forkState) (string, error) { return strings.Join(s.Values, ","), nil })))
-		must(g.AddFork(graph.Start, "a", "b"))
-		must(g.AddJoin(graph.Start, "join"))
-		must(g.AddEdge("a", "join"))
-		must(g.AddEdge("b", "join"))
-		must(g.AddEdge("join", graph.End))
-		return g
-	}
-
-	v1 := build(codecV1)
-	compiled, err := v1.Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := &byteCheckpointStore{}
-	_, err = compiled.Invoke(context.Background(), "go", graph.WithCheckpoint(store, "migfork"))
-	pending := interruptedPending(t, err)
-	if len(pending) != 1 {
-		t.Fatalf("pending=%v", pending)
-	}
-	record, found, err := store.Load(context.Background(), "migfork")
-	if err != nil || !found {
-		t.Fatalf("load: %v %v", found, err)
-	}
-	oldRev := inspectCheckpoint(t, record).GraphRevision
-
-	v2 := build(codecV2)
-	compiled2, err := v2.Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opt := graph.WithCheckpoint(store, "migfork")
-	out, err := compiled2.Resume(context.Background(), opt,
-		graph.WithResume(pending[0].ID, "yes"),
-		graph.WithMigration(oldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			return graph.GraphStateCheckpoint{
-				CodecID: old.CodecID, Version: 2,
-				Data: append([]byte("v2|"), old.Data...),
-			}, nil
-		}))
-	if err != nil {
-		t.Fatalf("resume with migration over task snapshots: %v", err)
-	}
-	if !strings.Contains(out, "a") || !strings.Contains(out, "b:yes") {
-		t.Fatalf("merged=%q", out)
-	}
-	if aRuns.Load() != 1 {
-		t.Fatalf("completed branch re-executed: a=%d", aRuns.Load())
-	}
-}
-
-// P1：迁移并回答后节点暂时失败，再次直接 Resume 必须读取已提交的新版
-// 现场——回答保存时的图版本与已迁移 State 同属一份快照，不能重复执行旧版迁移。
-func TestResumeMigrationPersistsNewIdentity(t *testing.T) {
-	codecV1, err := graph.NewStateCodec[*checkpointTestState]("test-state", 1,
-		func(_ context.Context, s *checkpointTestState) ([]byte, error) { return json.Marshal(s) },
-		func(_ context.Context, data []byte) (*checkpointTestState, error) {
-			var s checkpointTestState
-			return &s, json.Unmarshal(data, &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	codecV2, err := graph.NewStateCodec[*checkpointTestState]("test-state", 2,
-		func(_ context.Context, s *checkpointTestState) ([]byte, error) {
-			data, err := json.Marshal(s)
-			return append([]byte("v2|"), data...), err
-		},
-		func(_ context.Context, data []byte) (*checkpointTestState, error) {
-			text, ok := strings.CutPrefix(string(data), "v2|")
-			if !ok {
-				return nil, errors.New("not a v2 payload")
-			}
-			var s checkpointTestState
-			return &s, json.Unmarshal([]byte(text), &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 回答后的 ask 重放暂时失败一次：回答保存与节点提交之间的快照
-	// 必须已经携带新版本标记，否则再次恢复会对 v2 数据重复迁移。
-	var askFails atomic.Bool
-	askFails.Store(true)
-	build := func(codec graph.StateCodec) *graph.Graph[string, string] {
-		g := graph.NewGraph[string, string]("flaky-ask")
-		must := func(err error) {
-			t.Helper()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		must(g.SetStateFactory(func(_ context.Context, input string) (*checkpointTestState, error) {
-			return &checkpointTestState{Value: input}, nil
-		}))
-		must(g.SetStateCodec(codec))
-		must(g.AddNode("ask", runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
-			answer, err := graph.Interrupt(ctx, "approve")
-			if err != nil {
-				return "", err
-			}
-			if askFails.Swap(false) {
-				return "", errors.New("ask flaky failure")
-			}
-			return input + "-" + fmt.Sprint(answer), nil
-		}), graph.WithPreHandler(func(_ context.Context, s *checkpointTestState) (string, error) { return s.Value, nil }),
-			graph.WithPostHandler(func(_ context.Context, s *checkpointTestState, out string) error { s.Value = out; return nil })))
-		must(g.AddEdge(graph.Start, "ask"))
-		must(g.AddEdge("ask", graph.End))
-		return g
-	}
-	store, questionID, oldRev := suspendAt(t, build(codecV1), "flaky")
-
-	compiled2, err := build(codecV2).Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var migrations atomic.Int32
-	opt := graph.WithCheckpoint(store, "flaky")
-	migration := graph.WithMigration(oldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-		migrations.Add(1)
-		return graph.GraphStateCheckpoint{
-			CodecID: old.CodecID, Version: 2,
-			Data: append([]byte("v2|"), old.Data...),
-		}, nil
-	})
-	// 第一次恢复：迁移+回答，ask 重放暂时失败，现场停在回答保存的快照上。
-	_, err = compiled2.Resume(context.Background(), opt, graph.WithResume(questionID, "yes"), migration)
-	if err == nil || !strings.Contains(err.Error(), "flaky") {
-		t.Fatalf("first resume = %v, want transient business failure", err)
-	}
-	// 第二次恢复：不带答案直接续跑，已提交现场必须是新版本——再进入
-	// 旧版迁移会把 v2 数据二次前缀，迁移与解码都会失败。
-	out, err := compiled2.Resume(context.Background(), opt, migration)
-	if err != nil {
-		t.Fatalf("second resume after transient failure: %v", err)
-	}
-	if !strings.HasSuffix(out, "-yes") {
-		t.Fatalf("out=%q", out)
-	}
-	if migrations.Load() != 1 {
-		t.Fatalf("migration ran %d times, want exactly once", migrations.Load())
-	}
-}
-
-// 迁移函数返回当前 Codec 无法解码的快照：整个准备结果拒绝发布，
-// 旧检查点与待答问题保持不变。
-func TestResumeMigrationRejectsUndecodableSnapshot(t *testing.T) {
-	codecV1, err := graph.NewStateCodec[*checkpointTestState]("test-state", 1,
-		func(_ context.Context, s *checkpointTestState) ([]byte, error) { return json.Marshal(s) },
-		func(_ context.Context, data []byte) (*checkpointTestState, error) {
-			var s checkpointTestState
-			return &s, json.Unmarshal(data, &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	codecV2, err := graph.NewStateCodec[*checkpointTestState]("test-state", 2,
-		func(_ context.Context, s *checkpointTestState) ([]byte, error) {
-			data, err := json.Marshal(s)
-			return append([]byte("v2|"), data...), err
-		},
-		func(_ context.Context, data []byte) (*checkpointTestState, error) {
-			text, ok := strings.CutPrefix(string(data), "v2|")
-			if !ok {
-				return nil, errors.New("not a v2 payload")
-			}
-			var s checkpointTestState
-			return &s, json.Unmarshal([]byte(text), &s)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, questionID, oldRev := suspendAt(t, func() *graph.Graph[string, string] {
-		g := sidePathGraph(t, "", nil)
-		if err := g.SetStateCodec(codecV1); err != nil {
-			t.Fatal(err)
-		}
-		return g
-	}(), "badmig")
-
-	v2 := sidePathGraph(t, "", nil)
-	if err := v2.SetStateCodec(codecV2); err != nil {
-		t.Fatal(err)
-	}
-	compiled2, err := v2.Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opt := graph.WithCheckpoint(store, "badmig")
-	// 迁移函数报错：拒绝恢复。
-	_, err = compiled2.Resume(context.Background(), opt, graph.WithResume(questionID, "yes"),
-		graph.WithMigration(oldRev, func(graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			return graph.GraphStateCheckpoint{}, errors.New("migration blew up")
-		}))
-	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
-		t.Fatalf("resume with failing migration = %v, want ErrGraphRevisionMismatch", err)
-	}
-	// 迁移结果无法由当前 Codec 解码：同样拒绝。
-	_, err = compiled2.Resume(context.Background(), opt, graph.WithResume(questionID, "yes"),
-		graph.WithMigration(oldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			return graph.GraphStateCheckpoint{CodecID: old.CodecID, Version: 2, Data: []byte("not-json")}, nil
-		}))
-	if !errors.Is(err, graph.ErrGraphRevisionMismatch) {
-		t.Fatalf("resume with undecodable migration = %v, want ErrGraphRevisionMismatch", err)
-	}
-	// 旧检查点原样保留：版本标记、State 版本与问题 ID 均未变。
-	record, found, err := store.Load(context.Background(), "badmig")
-	if err != nil || !found {
-		t.Fatalf("load: %v %v", found, err)
-	}
-	saved := inspectCheckpoint(t, record)
-	if saved.GraphRevision != oldRev || saved.State.Version != 1 || strings.HasPrefix(string(saved.State.Data), "v2|") {
-		t.Fatalf("checkpoint mutated: rev=%q codec=%s/%d", saved.GraphRevision, saved.State.CodecID, saved.State.Version)
-	}
-	if len(saved.Interrupts) != 1 || saved.Interrupts[0].ID != questionID || saved.Interrupts[0].Answered {
-		t.Fatalf("pending question lost: %+v", saved.Interrupts)
-	}
-}
-
-// 嵌套子图使用自己的迁移规则：子图升级自身 Codec，父图 Codec 保持原版本；
-// 子执行的新版 State 与新版本标记同一份落盘，父图其余分支不受影响。
-func TestNestedChildMigrationKeepsOwnCodecBoundary(t *testing.T) {
+// 嵌套子图指纹独立校验：子图升级自身 Codec 后子 frame 的整图指纹与
+// 当前编译不一致，父图恢复按 ErrResumeIncompatible 拒绝——父子各有
+// 自己的指纹边界，父图结构与 Codec 不变也不影响判定。
+func TestNestedChildRejectsChangedFingerprint(t *testing.T) {
 	childCodec := func(version int) graph.StateCodec {
 		encode := func(_ context.Context, s *inputState) ([]byte, error) { return json.Marshal(s) }
 		decode := func(_ context.Context, data []byte) (*inputState, error) {
@@ -660,7 +343,6 @@ func TestNestedChildMigrationKeepsOwnCodecBoundary(t *testing.T) {
 	}
 
 	var childCall *graph.CompiledGraph[string, string]
-	var childOpts []runnable.Option
 	parent := graph.NewGraph[string, string]("parent")
 	must := func(err error) {
 		t.Helper()
@@ -672,7 +354,7 @@ func TestNestedChildMigrationKeepsOwnCodecBoundary(t *testing.T) {
 		return &checkpointTestState{Value: in}, nil
 	}))
 	must(parent.AddNode("call", runnable.Func[string, string](func(ctx context.Context, in string, _ ...runnable.Option) (string, error) {
-		return childCall.Invoke(ctx, in, childOpts...)
+		return childCall.Invoke(ctx, in)
 	}), graph.WithPreHandler(func(_ context.Context, s *checkpointTestState) (string, error) { return s.Value, nil })))
 	must(parent.AddEdge(graph.Start, "call"))
 	must(parent.AddEdge("call", graph.End))
@@ -680,52 +362,29 @@ func TestNestedChildMigrationKeepsOwnCodecBoundary(t *testing.T) {
 
 	childCall = buildChild(1)
 	store := &byteCheckpointStore{}
-	opt := graph.WithCheckpoint(store, "nested-mig")
+	opt := graph.WithCheckpoint(store, "nested-fp")
 	_, err := compiledParent.Invoke(context.Background(), "in", opt)
 	pending := interruptedPending(t, err)
 	if len(pending) != 1 {
 		t.Fatalf("pending=%v", pending)
 	}
-	tree := loadExecTree(t, store, "nested-mig")
+	tree := loadExecTree(t, store, "nested-fp")
 	if len(tree.Children) != 1 || tree.Children[0].Frame.GraphRevision == "" {
 		t.Fatalf("child frame missing: %+v", tree.Children)
 	}
 	childOldRev := tree.Children[0].Frame.GraphRevision
 
-	// 子图升级自身 Codec v1→v2；父图结构、父图 Codec 均不变。回答第一个
-	// 问题后子图在第二个问题上再次挂起——此刻的子 frame 仍在树中。
+	// 子图升级自身 Codec v1→v2：父图结构、父图 Codec 均不变，但子 frame
+	// 指纹与当前子图编译不一致，父图带答案恢复被拒。
 	childCall = buildChild(2)
-	childOpts = []runnable.Option{graph.WithMigration(childOldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-		return graph.GraphStateCheckpoint{
-			CodecID: old.CodecID, Version: 2,
-			Data: append([]byte("v2|"), old.Data...),
-		}, nil
-	})}
-	firstID := pending[0].ID
-	_, err = compiledParent.Resume(context.Background(), opt, graph.WithResume(firstID, "yes"))
-	pending = interruptedPending(t, err)
-	if len(pending) != 1 || pending[0].ID == firstID {
-		t.Fatalf("pending=%v, want the child's second question", pending)
+	_, err = compiledParent.Resume(context.Background(), opt, graph.WithResume(pending[0].ID, "yes"))
+	if !errors.Is(err, graph.ErrResumeIncompatible) {
+		t.Fatalf("resume after child codec change = %v, want ErrResumeIncompatible", err)
 	}
-	// 落盘的子 frame：State 已是 v2 编码、版本标记与当前子图一致。
-	tree = loadExecTree(t, store, "nested-mig")
-	if len(tree.Children) != 1 {
-		t.Fatalf("children=%v", tree.Children)
-	}
-	frame := tree.Children[0].Frame
-	if frame.State.CodecID != "child-state" || frame.State.Version != 2 || !strings.HasPrefix(string(frame.State.Data), "v2|") {
-		t.Fatalf("child frame state not migrated: %+v", frame.State)
-	}
-	if frame.GraphRevision == childOldRev {
-		t.Fatal("child frame kept old revision after migration")
-	}
-	// 回答第二个问题：父图汇合完成。
-	out, err := compiledParent.Resume(context.Background(), opt, graph.WithResume(pending[0].ID, "confirmed"))
-	if err != nil {
-		t.Fatalf("final resume: %v", err)
-	}
-	if !strings.Contains(out, "yes/confirmed") {
-		t.Fatalf("out=%q", out)
+	// 父图检查点原样保留：子 frame 指纹未变，可再次以旧版子图恢复。
+	savedTree := loadExecTree(t, store, "nested-fp")
+	if len(savedTree.Children) != 1 || savedTree.Children[0].Frame.GraphRevision != childOldRev {
+		t.Fatalf("child frame mutated: %+v", savedTree.Children)
 	}
 }
 

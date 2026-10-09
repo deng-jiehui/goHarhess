@@ -227,9 +227,8 @@ func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup *runSetu
 	if err != nil {
 		return executionProgress{}, err
 	}
-	// 恢复校验与数据迁移在接受答案之前完成：全部 State 快照、图版本与契约
-	// 在准备结果中同属一份现场，之后任何保存都同时携带新数据与新版本标记。
-	prepared, err := g.prepareRecoveredFrame(ctx, &progress, setup.config.migration, ErrGraphRevisionMismatch)
+	// 恢复校验在接受答案之前完成：图名与整图指纹必须与当前编译一致。
+	prepared, err := g.prepareRecoveredFrame(&progress, ErrGraphRevisionMismatch)
 	if err != nil {
 		return executionProgress{}, err
 	}
@@ -299,22 +298,20 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		}
 		adopted = child
 		// 子图身份校验先于状态分流：首次执行在记录上登记 callee 身份，重放
-		// 时图名必须一致；版本一致性按子执行状态校验——带子 frame 的按
-		// 条目化契约在恢复闭包内逐项比较（声明迁移时先改写全部 State 快照），
-		// 无 frame 的记录仍要求登记版本与当前一致，不靠重新执行掩盖。
+		// 时图名必须一致；版本一致性按子执行状态校验——带子 frame 的整图
+		// 指纹必须与当前编译一致，无 frame 的记录仍要求登记版本一致。
 		revision, _ := g.recoveryMetadata()
 		if idErr := site.coord.claimChildIdentity(child, g.Name(), revision); idErr != nil {
 			return zero, idErr
 		}
 		if child.Frame != nil && child.Frame.GraphName != "" {
-			prepared, pErr := g.prepareRecoveredFrame(ctx, child.Frame, setup.config.migration, ErrResumeIncompatible)
-			if pErr != nil {
+			if _, pErr := g.prepareRecoveredFrame(child.Frame, ErrResumeIncompatible); pErr != nil {
 				return zero, pErr
 			}
-			if prepared != child.Frame || child.Revision != revision {
-				// 迁移后的快照与新版本标记是同一份现场：经协调器在树锁内
-				// 发布，随后任何保存都同时携带两者；其余分支进度不受影响。
-				if pubErr := site.coord.adoptPreparedChild(ctx, child, prepared, revision); pubErr != nil {
+			if child.Revision != revision {
+				// 早期保存的登记版本落后于已校验 frame 时同步更新标记，
+				// 与指纹比对共同构成唯一判据。
+				if pubErr := site.coord.adoptPreparedChild(ctx, child, child.Frame, revision); pubErr != nil {
 					return zero, pubErr
 				}
 			}
@@ -372,12 +369,11 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 			return zero, idErr
 		}
 		if managed.Frame != nil && managed.Frame.GraphName != "" {
-			prepared, pErr := g.prepareRecoveredFrame(ctx, managed.Frame, setup.config.migration, ErrResumeIncompatible)
-			if pErr != nil {
+			if _, pErr := g.prepareRecoveredFrame(managed.Frame, ErrResumeIncompatible); pErr != nil {
 				return zero, pErr
 			}
-			if prepared != managed.Frame || managed.Revision != revision {
-				if pubErr := ms.coord.adoptPreparedManaged(ctx, managed, prepared, revision); pubErr != nil {
+			if managed.Revision != revision {
+				if pubErr := ms.coord.adoptPreparedManaged(ctx, managed, managed.Frame, revision); pubErr != nil {
 					return zero, pubErr
 				}
 			}
@@ -1432,7 +1428,6 @@ func (g *Graph[I, O]) persistInterruption(
 		Schedule:      scheduleFromContext(ctx),
 		GraphName:     g.Name(),
 		GraphRevision: revision,
-		Contract:      contractOf(g),
 		ResumeNode:    resumeNode,
 		Step:          step,
 		Visits:        cloneVisits(visits),

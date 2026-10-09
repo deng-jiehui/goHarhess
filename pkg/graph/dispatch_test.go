@@ -346,10 +346,9 @@ func TestDispatchMemberSuspendAtSecondNodeResumes(t *testing.T) {
 	}
 }
 
-// 成员局部 State 快照随 Codec 版本迁移：round-1 提交后挂起（round-2
-// 任务尚未建记录），升级 Codec 并带迁移恢复必须成功——成员的
-// member.State 快照与主 State 属于同一版本链。
-func TestDispatchMemberStateMigration(t *testing.T) {
+// Codec 版本演进使整图指纹变化：round-1 提交后挂起的检查点在新版本
+// 图上恢复，不再提供迁移通道，必须直接拒绝。
+func TestDispatchResumeRejectsCodecChange(t *testing.T) {
 	codecV1, err := graph.NewStateCodec[*memberChainState]("member-chain", 1,
 		func(_ context.Context, s *memberChainState) ([]byte, error) { return json.Marshal(s) },
 		func(_ context.Context, data []byte) (*memberChainState, error) {
@@ -375,9 +374,8 @@ func TestDispatchMemberStateMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var migrations atomic.Int32
 	build := func(codec graph.StateCodec, pauseAfterFirstRound func()) *graph.Graph[string, string] {
-		g := graph.NewGraph[string, string]("member-migration")
+		g := graph.NewGraph[string, string]("member-codec-change")
 		if err := g.SetStateFactory(func(_ context.Context, _ string) (*memberChainState, error) {
 			return &memberChainState{}, nil
 		}); err != nil {
@@ -468,30 +466,9 @@ func TestDispatchMemberStateMigration(t *testing.T) {
 	if !errors.As(err, &stopped) {
 		t.Fatalf("expected interruption between rounds, got %v", err)
 	}
-	record, found, lerr := store.Load(context.Background(), "conv")
-	if lerr != nil || !found {
-		t.Fatalf("load: %v %v", found, lerr)
-	}
-	progress := inspectCheckpoint(t, record)
-	oldRev := progress.GraphRevision
 	v2 := mustCompile(t, build(codecV2, nil))
-	out, err := v2.Resume(context.Background(),
-		graph.WithCheckpoint(store, "conv"),
-		graph.WithMigration(oldRev, func(old graph.GraphStateCheckpoint) (graph.GraphStateCheckpoint, error) {
-			migrations.Add(1)
-			return graph.GraphStateCheckpoint{
-				CodecID: old.CodecID, Version: 2,
-				Data: append([]byte("v2|"), old.Data...),
-			}, nil
-		}))
-	if err != nil {
-		t.Fatalf("resume with migration: %v", err)
-	}
-	if out != "parsed:fetched:a,parsed:fetched:b" {
-		t.Fatalf("resumed output=%q", out)
-	}
-	if migrations.Load() < 3 {
-		t.Fatalf("migrations=%d, want main state plus both member snapshots", migrations.Load())
+	if _, err := v2.Resume(context.Background(), graph.WithCheckpoint(store, "conv")); !errors.Is(err, graph.ErrGraphRevisionMismatch) {
+		t.Fatalf("resume after codec change = %v, want ErrGraphRevisionMismatch", err)
 	}
 }
 

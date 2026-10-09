@@ -49,7 +49,6 @@ type Graph[I, O any] struct {
 	maxConcurrency       int
 	built                bool
 	revision             string
-	contract             *revisionContract
 	resumableErr         error
 }
 
