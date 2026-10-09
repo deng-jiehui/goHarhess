@@ -38,7 +38,7 @@ func NewState[S any](name string) *Builder[S] {
 	return b
 }
 
-// Graph 返回底层图，供 AddNode/AddBranch/AddParallelNode 等高级 API 使用。
+// Graph 返回底层图，供 AddNode/AddBranch/AddFork 等高级 API 使用。
 // 绕过门面登记的声明不经 Compile 聚合，仍以引擎自身校验为准。
 func (b *Builder[S]) Graph() *Graph[S, *S] {
 	return b.g

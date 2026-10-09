@@ -36,7 +36,7 @@
   比较，阈值 ±10%。
 - `B/op` 与 `allocs/op`：0 项超阈；多项因阶段二起引入的成员活指针复用显著改善
   （forkjoin `branches=32` 为 -24.5%/-55.2%）。
-- `ns/op`：35 项改善超过 10%，10 项超阈（下述），其余在阈值内波动。
+- `ns/op`：21 项改善超过 10%，10 项超阈（下述），其余在阈值内波动。
 
 ## 复测记录（10% 阈值规则）
 
@@ -71,7 +71,7 @@
 
 | 场景 | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-﻿| GHFull/AgentPersist/model_calls=10/checkpoint=async | 5.91M | 5.10M | 22.0k |
+| GHFull/AgentPersist/model_calls=10/checkpoint=async | 5.91M | 5.10M | 22.0k |
 | GHFull/AgentPersist/model_calls=10/checkpoint=off | 1.95M | 845.1k | 12.2k |
 | GHFull/AgentPersist/model_calls=10/checkpoint=sync | 5.92M | 5.10M | 22.0k |
 | GHFull/AgentPersist/model_calls=50/checkpoint=async | 120.89M | 115.02M | 411.1k |

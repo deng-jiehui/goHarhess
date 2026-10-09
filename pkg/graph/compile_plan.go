@@ -18,11 +18,6 @@ type erasedStream struct {
 
 func compileRuntimePlans[I, O any](runtime *Graph[I, O]) (*CompiledGraph[I, O], error) {
 	for id, node := range runtime.nodes {
-		// 并行组入口与汇合没有用户组件：入口是透传边界，汇合消费成员
-		// 局部 State，两者都不参与流能力绑定。
-		if node.parallel != nil || node.parallelJoin != nil {
-			continue
-		}
 		stream, collect, transform, err := bindRuntimeStreamCapabilities(id, node.component, node.inputType, node.outputType)
 		if err != nil {
 			return nil, err

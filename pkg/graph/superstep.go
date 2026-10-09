@@ -246,7 +246,7 @@ func (g *Graph[I, O]) validateForks() error {
 		return nil
 	}
 	for id, n := range g.nodes {
-		if n.pre == nil && n.parallel == nil && n.parallelJoin == nil {
+		if n.pre == nil {
 			return fmt.Errorf("fork graph node %q requires a PreHandler", id)
 		}
 	}
@@ -307,9 +307,6 @@ func (g *Graph[I, O]) validateForks() error {
 					return fmt.Errorf("cross-branch node %q", id)
 				}
 				owners[id] = owner
-				if g.nodes[id].parallel != nil {
-					return fmt.Errorf("parallel node %q inside a native branch is unsupported", id)
-				}
 				active[id] = true
 				seen[id] = true
 				next := make([]string, 0, len(outgoing[id])+len(routeTargets[id]))
@@ -391,7 +388,7 @@ type taskOutcome struct {
 
 // runTaskBatch 只执行一轮任务，不推进图。任务挂起不阻断领取——同批其余任务
 // 各自推进到自己的边界，所有未答问题聚合后统一收敛；业务失败取消其余任务
-// 并返回首个错误。原生分支和兼容的 ParallelNode 共用此并发入口。
+// 并返回首个错误。扇出/分派组的成员任务共用此并发入口。
 // slots 是共享并发额度：nil 不限；容量即根运行并发上限——批内任务与
 // 受管协程从同一池子取额度，父子合计并发不超过上限。
 func runTaskBatch(ctx context.Context, count int, slots chan struct{}, run func(context.Context, int) taskOutcome) ([]taskOutcome, error) {
@@ -465,14 +462,13 @@ type StepTask struct {
 // StepGroup 保存一次扇出的等待状态，不与下一次经过同一扇出的运行共享。
 // 动态分派组（Dispatch 为真）用 Members 保存本次实例的清单：成员身份
 // 与任务解耦，task.Branch 复用为成员 ID；Registered 表示清单已在检查点
-// 持久化，恢复时不再调用清单生成函数。并行组（Parallel 为真）的成员清单
-// 在声明期冻结，ID 即分支名；成员局部 State 按声明序保存，汇合任务消费。
+// 持久化，恢复时不再调用清单生成函数。静态扇出组的成员清单在调度时按
+// 分支声明序冻结，ID 即分支入口名；成员局部 State 按声明序保存。
 type StepGroup struct {
 	ID         string        `json:"id"`
 	Fork       string        `json:"fork"`
 	Arrived    []string      `json:"arrived,omitempty"`
 	Dispatch   bool          `json:"dispatch,omitempty"`
-	Parallel   bool          `json:"parallel,omitempty"`
 	Members    []GroupMember `json:"members,omitempty"`
 	Registered bool          `json:"registered,omitempty"`
 }
@@ -536,18 +532,6 @@ func (g *Graph[I, O]) scheduleNext(ctx context.Context, s *StepSchedule, from, n
 	if spec, ok := g.dispatches[from]; ok {
 		return g.scheduleDispatch(ctx, s, from, spec, runtimeState)
 	}
-	if spec, ok := g.parallelGroups[from]; ok {
-		// 并行入口完成即扇出：成员清单按声明序冻结，成员 ID 就是分支名。
-		s.Sequence++
-		group := &StepGroup{ID: fmt.Sprintf("group-%d", s.Sequence), Fork: from, Parallel: true}
-		for index, branch := range spec.branches {
-			member := GroupMember{ID: branch.name, Seq: index, Node: parallelMemberName(from, branch.name)}
-			group.Members = append(group.Members, member)
-			s.Tasks = append(s.Tasks, s.task(member.Node, group.ID, member.ID))
-		}
-		s.Group = group
-		return nil
-	}
 	if spec, ok := g.forks[from]; ok {
 		// 成员清单按分支声明序冻结，成员 ID 就是分支入口名：成员各自持有
 		// 局部 State 直到汇合，合并只在全部到达后执行一次。
@@ -563,15 +547,10 @@ func (g *Graph[I, O]) scheduleNext(ctx context.Context, s *StepSchedule, from, n
 	if next == End {
 		return nil
 	}
-	if node, ok := g.nodes[next]; ok && node.parallelJoin != nil {
-		// 汇合任务是组生命周期的产物，只能由组内全部成员到达后内部
-		// 调度；普通边解析到汇合意味着拓扑或恢复数据已经不一致。
-		return fmt.Errorf("parallel join %q cannot be scheduled without an active group", next)
-	}
 	task := s.task(next, "", "")
 	// 无 Pre 节点的输入只能来自这条边；开启检查点时在调度时刻冻结为 JSON，
 	// 保证节点执行期间的修改不影响已保存的恢复输入。
-	if node, ok := g.nodes[next]; persist && ok && node.pre == nil && node.parallel == nil {
+	if node, ok := g.nodes[next]; persist && ok && node.pre == nil {
 		data, err := encodeTaskInput(input, node.inputType)
 		if err != nil {
 			return fmt.Errorf("persist input for node %q: %w", next, err)
@@ -645,8 +624,7 @@ func (s *StepSchedule) validate() error {
 				return errors.New("task has no group")
 			}
 		} else {
-			// 并行组的汇合任务带组引用但不属于任何分支（Branch 为空）。
-			if t.GroupID != s.Group.ID || (t.Branch == "" && !s.Group.Parallel) {
+			if t.GroupID != s.Group.ID || t.Branch == "" {
 				return errors.New("task group mismatch")
 			}
 			if len(t.Input) > 0 && !s.Group.Dispatch {
@@ -663,7 +641,7 @@ func (s *StepSchedule) validate() error {
 	if s.Group.ID == "" || s.Group.Fork == "" {
 		return errors.New("invalid group")
 	}
-	if s.Group.Dispatch || s.Group.Parallel {
+	if s.Group.Dispatch || len(s.Group.Members) > 0 {
 		if len(s.Group.Members) == 0 {
 			return errors.New("member group requires a member manifest")
 		}
@@ -699,9 +677,6 @@ func (g *Graph[I, O]) validateSchedule(s *StepSchedule) error {
 	}
 	if s.Group.Dispatch {
 		return g.validateDispatchSchedule(s)
-	}
-	if s.Group.Parallel {
-		return g.validateParallelSchedule(s)
 	}
 	spec, ok := g.forks[s.Group.Fork]
 	if !ok {
@@ -844,88 +819,6 @@ func (g *Graph[I, O]) validateDispatchSchedule(s *StepSchedule) error {
 	return nil
 }
 
-// validateParallelSchedule 校验恢复的并行组：成员引用声明期的分支节点，
-// 在途任务属于成员且仍在其入口到汇合的可达路径内；汇合任务只允许在
-// 全部成员到达后出现，不携带分支身份。
-func (g *Graph[I, O]) validateParallelSchedule(s *StepSchedule) error {
-	spec, ok := g.parallelGroups[s.Group.Fork]
-	if !ok {
-		return fmt.Errorf("%w: parallel group missing", state.ErrInvalidCheckpoint)
-	}
-	declared := map[string]string{}
-	for _, branch := range spec.branches {
-		declared[branch.name] = parallelMemberName(s.Group.Fork, branch.name)
-	}
-	outgoing := map[string][]string{}
-	for _, e := range g.edges {
-		outgoing[e.from] = append(outgoing[e.from], e.to)
-	}
-	members := map[string]string{}
-	for _, m := range s.Group.Members {
-		if entry, ok := declared[m.ID]; !ok || entry != m.Node {
-			return fmt.Errorf("%w: member %q is not a declared branch of %q", state.ErrInvalidCheckpoint, m.ID, s.Group.Fork)
-		}
-		members[m.ID] = m.Node
-	}
-	if len(members) != len(declared) {
-		return fmt.Errorf("%w: parallel group member count mismatch", state.ErrInvalidCheckpoint)
-	}
-	accounted := map[string]bool{}
-	for _, b := range s.Group.Arrived {
-		if _, ok := members[b]; !ok || accounted[b] {
-			return fmt.Errorf("%w: unknown or duplicate member %q", state.ErrInvalidCheckpoint, b)
-		}
-		accounted[b] = true
-	}
-	joins := 0
-	for _, t := range s.Tasks {
-		if t.Node == spec.join {
-			if t.Branch != "" {
-				return fmt.Errorf("%w: join task carries a branch", state.ErrInvalidCheckpoint)
-			}
-			joins++
-			continue
-		}
-		entry, ok := members[t.Branch]
-		if !ok || accounted[t.Branch] {
-			return fmt.Errorf("%w: unknown or duplicate member %q", state.ErrInvalidCheckpoint, t.Branch)
-		}
-		accounted[t.Branch] = true
-		// 续点只能位于该成员入口到汇合点的路径内。
-		reached := map[string]bool{}
-		var visit func(string)
-		visit = func(n string) {
-			if n == spec.join || reached[n] {
-				return
-			}
-			reached[n] = true
-			for _, to := range outgoing[n] {
-				visit(to)
-			}
-			// 成员内部路由与边同样参与可达性：路由续点也属于本成员路径。
-			if route, ok := g.routes[n]; ok {
-				for target := range route.targets {
-					visit(target)
-				}
-			}
-		}
-		visit(entry)
-		if !reached[t.Node] {
-			return fmt.Errorf("%w: task outside its member path", state.ErrInvalidCheckpoint)
-		}
-	}
-	// 汇合任务只在全部成员到达后调度；它与在途成员任务不能共存。
-	if joins > 1 || (joins == 1 && len(s.Group.Arrived) != len(members)) {
-		return fmt.Errorf("%w: join task before all members arrived", state.ErrInvalidCheckpoint)
-	}
-	for id := range members {
-		if !accounted[id] {
-			return fmt.Errorf("%w: missing group member %q", state.ErrInvalidCheckpoint, id)
-		}
-	}
-	return nil
-}
-
 // memberOutputNeeded 报告成员路径任务的边输出是否参与恢复选路：恢复时
 // 已完成任务不重新执行，选路只依赖持久化的输出值与局部 State。出边条件
 // 读 State、后继节点经 PreHandler 接续或直接到达汇合时，原输出不再被
@@ -949,7 +842,7 @@ func (g *Graph[I, O]) memberOutputNeeded(memberID string, outputType reflect.Typ
 			}
 		}
 		target, ok := g.nodes[e.to]
-		if !ok || target.parallelJoin != nil {
+		if !ok {
 			continue
 		}
 		if target.pre == nil {
@@ -1032,10 +925,9 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 	coord := setup.checkpoint.coord
 	frame := setup.checkpoint.frame
 	inputRun, _ := ctx.Value(inputRunKey{}).(*inputRun)
-	// 成员局部态组（静态扇出、动态分派与展开并行组）按成员 ID 持有各自
-	// 局部 State；原生 fork 的成员清单来自分支声明顺序，旧检查点未持久化
-	// 时按声明补齐。
-	if s.Group != nil && !s.Group.Dispatch && !s.Group.Parallel && len(s.Group.Members) == 0 {
+	// 成员局部态组（静态扇出与动态分派）按成员 ID 持有各自局部 State；
+	// 旧检查点的扇出组未持久化成员清单时按分支声明补齐。
+	if s.Group != nil && !s.Group.Dispatch && len(s.Group.Members) == 0 {
 		if spec, ok := g.forks[s.Group.Fork]; ok {
 			for index, branch := range spec.Branches {
 				s.Group.Members = append(s.Group.Members, GroupMember{ID: branch, Seq: index, Node: branch})
@@ -1058,39 +950,6 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		var record *taskProgress
 		if coord != nil {
 			record = coord.findTask(frame, task.ID)
-		}
-		// 并行组的汇合任务不做节点调用：按声明序恢复各成员的局部 State，
-		// 用组的 State merger 一次性并入候选 State——合并时机与旧包装语义
-		// 一致（全部成员完成后恰一次）。
-		if node.parallelJoin != nil {
-			spec := node.parallelJoin
-			states := make([]any, len(s.Group.Members))
-			for i := range s.Group.Members {
-				member := &s.Group.Members[i]
-				switch {
-				case member.live != nil:
-					// 运行内成员终态直接消费内存对象，免快照解码。
-					states[i] = member.live
-				case member.State != nil:
-					restored, rerr := g.restoreRuntimeState(taskCtx, *member.State)
-					if rerr == nil && coord != nil {
-						restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
-					}
-					if rerr != nil {
-						return taskOutcome{err: fmt.Errorf("restore parallel member %q state: %w", member.ID, rerr)}
-					}
-					states[i] = restored
-				default:
-					return taskOutcome{err: fmt.Errorf("parallel group %q member %q state missing at join", s.Group.Fork, member.ID)}
-				}
-			}
-			mergeCtx := withRuntimeState(context.WithoutCancel(taskCtx), candidate)
-			if merr := spec.merger.invoke(mergeCtx, candidate, states); merr != nil {
-				return taskOutcome{err: fmt.Errorf("merge parallel group %q: %w", s.Group.Fork, merr)}
-			}
-			outputs[index] = erasedValue{typ: spec.merger.stateType, value: candidate}
-			results[index] = StepResult[any]{TaskID: task.ID, NodeID: task.Node, GroupID: task.GroupID, Branch: task.Branch, State: candidate}
-			return taskOutcome{}
 		}
 		// 已完成的任务直接复用保存的局部 State 与边输出，不再执行。
 		if record != nil && record.Status == taskStatusCompleted && record.Local != nil {
@@ -1304,7 +1163,7 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			// 条件。条件是 State 驱动、后继经 PreHandler 接续或直达汇合
 			// 时，原输出不再被读取，只保存完成后的局部 State。
 			outputType := node.outputType
-			if s.Group != nil && s.Group.Parallel && task.Branch != "" && !g.memberOutputNeeded(task.Node, node.outputType) {
+			if s.Group != nil && task.Branch != "" && !g.memberOutputNeeded(task.Node, node.outputType) {
 				outputType = nil
 			}
 			if cerr := g.completeTask(taskCtx, coord, frame, record, local, carrier.value.value, outputType); cerr != nil {
@@ -1378,12 +1237,6 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		if e != nil {
 			return nil, nil, nil, fmt.Errorf("route task %q: %w", task.ID, e)
 		}
-		if g.nodes[task.Node].parallelJoin != nil {
-			// 汇合已完成：组生命周期结束，后继作为普通任务继续。
-			next.Group = nil
-			next.Tasks = append(next.Tasks, next.task(target, "", ""))
-			continue
-		}
 		if target == joinNode {
 			next.Group.Arrived = append(next.Group.Arrived, task.Branch)
 		} else {
@@ -1415,11 +1268,7 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		if len(next.Group.Arrived) != memberCount {
 			return nil, nil, nil, errors.New("join is missing members")
 		}
-		if s.Group != nil && s.Group.Parallel {
-			// 组保留到汇合任务执行：成员终态快照随调度进入检查点，
-			// 合并由汇合任务用组的 State merger 执行。
-			next.Tasks = []StepTask{next.task(joinNode, s.Group.ID, "")}
-		} else if s.Group != nil {
+		if s.Group != nil {
 			// 扇出/分派组：全部成员到达后用各自终态一次性合并，
 			// 中间结果不进入主干 State，合并器也只执行这一次。
 			merger := g.stepMerger

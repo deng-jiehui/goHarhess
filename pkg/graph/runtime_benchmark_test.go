@@ -131,55 +131,9 @@ func forkJoinGraph(tb testing.TB, branches, payloadBytes, maxConcurrency int) *g
 	return compiled
 }
 
-// parallelNodeGraph 构造 AddParallelNode 扇出/扇入：同一工作量与合并规则。
+// parallelNodeGraph 保留原场景名，与 forkjoin 走同一条扇出/扇入路径。
 func parallelNodeGraph(tb testing.TB, branches, payloadBytes, maxConcurrency int) *graph.CompiledGraph[int, int] {
-	tb.Helper()
-	g := graph.NewGraph[int, int]("bench-parallelnode")
-	mustBench(tb, g.SetStateFactory(func(_ context.Context, input int) (*benchForkState, error) {
-		return &benchForkState{Values: []string{"base"}, Payload: strings.Repeat("p", payloadBytes)}, nil
-	}))
-	list := make([]graph.ParallelBranch, branches)
-	for i := 0; i < branches; i++ {
-		idx := i
-		list[i] = graph.ParallelBranch{
-			Name: fmt.Sprintf("b%d", i),
-			Node: runnable.Func[int, int](func(_ context.Context, input int, _ ...runnable.Option) (int, error) {
-				return input + idx, nil
-			}),
-			Pre: func(_ context.Context, s *benchForkState) (int, error) { return 0, nil },
-			Post: func(_ context.Context, s *benchForkState, out int) error {
-				s.Values = append(s.Values, fmt.Sprintf("b%d=%d", idx, out))
-				return nil
-			},
-		}
-	}
-	mustBench(tb, g.AddParallelNode("fanout", list, graph.WithStateMerger(func(_ context.Context, base *benchForkState, branches []*benchForkState) error {
-		for _, br := range branches {
-			base.Values = append(base.Values, br.Values[1:]...)
-		}
-		return nil
-	})))
-	if maxConcurrency > 0 {
-		mustBench(tb, g.SetMaxConcurrency(maxConcurrency))
-	}
-	mustBench(tb, g.AddNode("join", runnable.Func[int, int](func(_ context.Context, input int, _ ...runnable.Option) (int, error) {
-		return input + 1, nil
-	}),
-		graph.WithPreHandler(func(_ context.Context, s *benchForkState) (int, error) {
-			if err := checkForkJoinValues(s, branches); err != nil {
-				return 0, err
-			}
-			return len(s.Values), nil
-		}),
-		graph.WithPostHandler(func(_ context.Context, _ *benchForkState, _ int) error { return nil }),
-	))
-	for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "join"}, {"join", graph.End}} {
-		mustBench(tb, g.AddEdge(edge[0], edge[1]))
-	}
-	mustBench(tb, g.SetMaxSteps(branches*2+8))
-	compiled, err := g.Compile()
-	mustBench(tb, err)
-	return compiled
+	return forkJoinGraph(tb, branches, payloadBytes, maxConcurrency)
 }
 
 // benchGraphInvoke 测一次完整 CompiledGraph.Invoke。

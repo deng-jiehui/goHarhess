@@ -119,8 +119,8 @@ func TestStateNodeInterruptAndResume(t *testing.T) {
 	}
 }
 
-// State 节点直接进入并行分支：不写 Pre/Post，分支在独立 State 副本上修改，
-// 轮末由 State merger 合并。
+// State 节点直接进入分支：不写 Pre/Post，分支在独立 State 副本上修改，
+// 到达汇合点由 fork merger 一次性合并。
 func TestStateNodeInParallelBranch(t *testing.T) {
 	g := graph.NewGraph[string, []string]("state-parallel")
 	if err := graph.SetStateFactory(g, func(_ context.Context, input string) (*typedAPIState, error) {
@@ -128,24 +128,16 @@ func TestStateNodeInParallelBranch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	branches := []graph.ParallelBranch{
-		{Name: "first", Node: graph.StateNode(func(_ context.Context, s *typedAPIState) error {
-			s.Values = append(s.Values, "one")
-			return nil
-		})},
-		{Name: "second", Node: graph.StateNode(func(_ context.Context, s *typedAPIState) error {
-			s.Values = append(s.Values, "two")
-			return nil
-		})},
+	if err := g.AddNode("first", graph.StateNode(func(_ context.Context, s *typedAPIState) error {
+		s.Values = append(s.Values, "one")
+		return nil
+	})); err != nil {
+		t.Fatal(err)
 	}
-	if err := g.AddParallelNode("fanout", branches, graph.WithStateMerger(
-		func(_ context.Context, base *typedAPIState, states []*typedAPIState) error {
-			for _, s := range states {
-				base.Values = append(base.Values, s.Values[len(s.Values)-1])
-			}
-			return nil
-		},
-	)); err != nil {
+	if err := g.AddNode("second", graph.StateNode(func(_ context.Context, s *typedAPIState) error {
+		s.Values = append(s.Values, "two")
+		return nil
+	})); err != nil {
 		t.Fatal(err)
 	}
 	finish := runnable.InvokableLambda(func(_ context.Context, input []string) ([]string, error) { return input, nil })
@@ -154,10 +146,26 @@ func TestStateNodeInParallelBranch(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "finish"}, {"finish", graph.End}} {
+	for _, edge := range [][2]string{{"first", "finish"}, {"second", "finish"}, {"finish", graph.End}} {
 		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := g.AddFork(graph.Start, "first", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddJoin(graph.Start, "finish"); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.SetForkMerger(g, graph.Start,
+		func(_ context.Context, base *typedAPIState, results []graph.StepResult[*typedAPIState]) error {
+			for _, r := range results {
+				base.Values = append(base.Values, r.State.Values[len(r.State.Values)-1])
+			}
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
 	}
 	out, err := mustCompileGraph(t, g).Invoke(context.Background(), "base")
 	if err != nil || fmt.Sprint(out) != "[base one two]" {

@@ -52,9 +52,9 @@ func runNode(ctx context.Context, node runtimeNode, in streamCarrier, input any,
 }
 
 // consumesStream 报告节点能否直接消费上游输出流；不能时调度循环先物化。
-// PreHandler 从 State 重建输入、并行节点以 State 为输入，二者都是物化屏障。
+// PreHandler 从 State 重建输入，是物化屏障。
 func consumesStream(node runtimeNode, mode execMode) bool {
-	return mode == execModeStream && node.pre == nil && node.parallel == nil && (node.transform != nil || node.collect != nil)
+	return mode == execModeStream && node.pre == nil && (node.transform != nil || node.collect != nil)
 }
 
 func materializeStream(ctx context.Context, carrier *streamCarrier, pending *[]pendingStreamNode) error {

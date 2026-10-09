@@ -695,7 +695,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 	if progress != nil && progress.Schedule != nil {
 		schedule = progress.Schedule.clone()
 	}
-	if progress != nil && (len(g.forks) > 0 || len(g.dispatches) > 0 || len(g.parallelGroups) > 0) && progress.Schedule == nil {
+	if progress != nil && (len(g.forks) > 0 || len(g.dispatches) > 0) && progress.Schedule == nil {
 		return zero, fmt.Errorf("%w: missing task schedule", state.ErrInvalidCheckpoint)
 	}
 	if err := g.validateSchedule(schedule); err != nil {
@@ -858,9 +858,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		if !ok {
 			return fail(ctx, &ExecutionError{Code: "graph.resume.node_missing", NodeID: pendingNode, Step: startStep, Err: errors.New("resume node is not present in execution plan")})
 		}
-		// 汇合任务与入口/有 Pre 节点一样由 State 驱动：成员局部态从组内
-		// 快照恢复，不要求任务级冻结输入。
-		if node.parallel != nil || node.parallelJoin != nil || node.pre != nil {
+		// 有 Pre 的节点由 State 重建输入，不要求任务级冻结输入。
+		if node.pre != nil {
 			if runtimeState == nil {
 				return fail(ctx, &ExecutionError{
 					Code: "graph.resume.type_mismatch", NodeID: pendingNode, Step: startStep,
@@ -957,11 +956,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		if !ok {
 			return fail(ctx, &ExecutionError{Code: "node.missing", NodeID: next, Step: step, Err: errors.New("node is not present in execution plan")})
 		}
-		if node.parallelJoin != nil && schedule.Group == nil {
-			// 汇合节点是框架内部节点，不携带组件：恢复数据或调度产生
-			// 无活跃组的汇合任务时给出明确错误，不进入空组件调用。
-			return fail(ctx, &ExecutionError{Code: "parallel.join.schedule", NodeID: next, Step: step, Err: errors.New("parallel join requires an active group schedule")})
-		}
 		if request, interrupted := control.AsInterrupt(context.Cause(ctx)); interrupted {
 			return suspend(ctx, request, InterruptPointBeforeNode, next, step)
 		}
@@ -1023,8 +1017,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 			step += taskCount - 1
 			continue
 		}
-		transactional = g.stepMerger != nil || node.parallel != nil
-		if transactional && node.parallel == nil {
+		if transactional {
 			copies, err := g.cloneStepStates(ctx, committedState, 1)
 			if err != nil {
 				return fail(ctx, err)
@@ -1047,7 +1040,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		interaction := &inputSession{node: next, step: step, visits: cloneVisits(visits)}
 		inputRun, _ := ctx.Value(inputRunKey{}).(*inputRun)
 		switch {
-		case (inputRun.nested && setup.checkpoint.coord == nil) || node.parallel != nil || node.nestedGraph || node.pre == nil:
+		case (inputRun.nested && setup.checkpoint.coord == nil) || node.nestedGraph || node.pre == nil:
 			interaction.disabled = ErrInterruptUnsupported
 		case !setup.configured:
 			interaction.disabled = ErrCheckpointRequired
@@ -1229,10 +1222,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		var routed string
 		var routeErr error
 		_, isDispatch := g.dispatches[next]
-		_, isParallelEntry := g.parallelGroups[next]
-		if isDispatch || isParallelEntry {
-			// 动态分派与并行组入口都没有静态出边：路由由调度层接管——
-			// 分派按清单生成，并行入口按声明扇出到成员任务。
+		if isDispatch {
+			// 动态分派没有静态出边：路由由调度层按清单生成接管。
 			if schedErr := g.scheduleNext(nodeCtx, nextSchedule, next, "", current.value.value, runtimeState, setup.configured); schedErr != nil {
 				return fail(nodeCtx, &ExecutionError{Code: "schedule.dispatch", NodeID: next, Step: step, Err: schedErr})
 			}
@@ -1241,9 +1232,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 			}
 		} else {
 			routed, routeErr = g.selectRuntimeNext(commitCtx, next, current.value, runtimeState, edges)
-		}
-		if routeErr == nil {
-			if !isDispatch && !isParallelEntry {
+			if routeErr == nil {
 				if schedErr := g.scheduleNext(nodeCtx, nextSchedule, next, routed, current.value.value, runtimeState, setup.configured); schedErr != nil {
 					return fail(nodeCtx, &ExecutionError{Code: "schedule.input", NodeID: routed, Step: step, Err: schedErr})
 				}

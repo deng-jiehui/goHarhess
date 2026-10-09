@@ -12,8 +12,7 @@ import (
 // 每个节点的最终选项遵循固定顺序：建图绑定 → 本次调用的同类组件广播 →
 // 指定该节点的定向选项；同级内部按声明顺序。
 type optionDispatch struct {
-	// options 保存可直接传给节点调用的组件配置选项；并行组成员以
-	// 「组名/分支名」的节点身份占据同一份映射。
+	// options 保存可直接传给节点调用的组件配置选项。
 	options map[string][]runnable.Option
 	// config 是当前 Graph 自身消费的条目。
 	config []runnable.OptionSpec
@@ -30,8 +29,7 @@ func newOptionDispatch() *optionDispatch {
 // 合法目标位于未执行的条件分支不算未消费。
 func (g *Graph[I, O]) dispatchOptions(options []runnable.Option) (*optionDispatch, error) {
 	dispatch := newOptionDispatch()
-	// 建图时绑定的节点默认选项先进入各自节点的列表。展开后的并行成员
-	// 是普通节点，其节点 options 即分支绑定选项，不单独登记。
+	// 建图时绑定的节点默认选项先进入各自节点的列表。
 	for id, node := range g.nodes {
 		if len(node.options) > 0 {
 			bound, err := runnable.FlattenOptions(node.options)
@@ -113,13 +111,7 @@ func (g *Graph[I, O]) dispatchTargeted(dispatch *optionDispatch, spec runnable.O
 	if !ok {
 		return fmt.Errorf("option %s targets unknown node %q in graph %q", spec.Describe(), target, g.Name())
 	}
-	if node.parallelJoin != nil {
-		return fmt.Errorf("option %s targets internal join %q of parallel group", spec.Describe(), target)
-	}
 	if len(spec.Path) == 1 {
-		if node.parallel != nil {
-			return g.dispatchToParallelNode(dispatch, node, spec)
-		}
 		// 声明了类型的节点在入口校验已知的不匹配；未声明的延迟到组件入口检查。
 		// 转发型节点（ToolsNode/AgentNode）把选项原样交给内部组件自行解析，
 		// 其声明类型只描述自身消费的配置，不限制透传内容。
@@ -136,61 +128,9 @@ func (g *Graph[I, O]) dispatchTargeted(dispatch *optionDispatch, spec runnable.O
 		// 嵌套图与转发型节点（如挂载子 Agent 的节点）在下一层入口继续消费剩余路径。
 		dispatch.options[target] = append(dispatch.options[target], runnable.OptionsFromSpecs([]runnable.OptionSpec{residual})...)
 		return nil
-	case node.parallel != nil:
-		branch := residual.Path[0]
-		residual.Path = residual.Path[1:]
-		return g.dispatchToBranch(dispatch, node, branch, residual)
 	default:
 		return fmt.Errorf("option %s cannot continue path %v: node %q is not a composite", spec.Describe(), spec.Path, target)
 	}
-}
-
-// dispatchToParallelNode 把定向到并行组的选项按分支声明类型分发到成员节点。
-func (g *Graph[I, O]) dispatchToParallelNode(dispatch *optionDispatch, node runtimeNode, spec runnable.OptionSpec) error {
-	receivers := 0
-	for index := range node.parallel.branches {
-		branch := node.parallel.branches[index]
-		if !slices.Contains(branch.optionTypes, spec.ConfigType) {
-			continue
-		}
-		receivers++
-		member := parallelMemberName(node.id, branch.name)
-		dispatch.options[member] = append(dispatch.options[member], deliver(spec)...)
-	}
-	if receivers == 0 {
-		return fmt.Errorf("option %s for %s has no receiver in parallel node %q", spec.Describe(), spec.ConfigType, node.id)
-	}
-	return nil
-}
-
-// dispatchToBranch 把定向到并行分支的选项送达成员节点作用域；更深路径要求
-// 分支是嵌套图或转发型组件，剩余路径由下一层入口继续消费，不提前剥离。
-func (g *Graph[I, O]) dispatchToBranch(dispatch *optionDispatch, node runtimeNode, branchName string, spec runnable.OptionSpec) error {
-	var branch *runtimeParallelBranch
-	for index := range node.parallel.branches {
-		if node.parallel.branches[index].name == branchName {
-			branch = &node.parallel.branches[index]
-			break
-		}
-	}
-	if branch == nil {
-		return fmt.Errorf("option %s targets unknown branch %q in parallel node %q", spec.Describe(), branchName, node.id)
-	}
-	member := parallelMemberName(node.id, branchName)
-	if len(spec.Path) > 0 {
-		memberNode := g.nodes[member]
-		if !memberNode.nestedGraph && !isOptionRelay(memberNode.component) {
-			return fmt.Errorf("option %s cannot continue path: branch %q is not a composite", spec.Describe(), branchName)
-		}
-		dispatch.options[member] = append(dispatch.options[member], passThrough(spec)...)
-		return nil
-	}
-	// 声明了类型的分支在入口校验已知的不匹配。
-	if len(branch.optionTypes) > 0 && !slices.Contains(branch.optionTypes, spec.ConfigType) {
-		return fmt.Errorf("option %s for %s is not accepted by branch %q", spec.Describe(), spec.ConfigType, branchName)
-	}
-	dispatch.options[member] = append(dispatch.options[member], deliver(spec)...)
-	return nil
 }
 
 // optionRelay 是可选的复合组件标记：节点自身不是嵌套图，但内部还有
@@ -205,10 +145,6 @@ func isOptionRelay(component any) bool {
 }
 
 // nodeAcceptsOption 判断无目标组件选项在当前作用域是否被节点接收。
-// 并行组成员是普通节点，按自身声明类型参与；入口与汇合不接收组件选项。
 func nodeAcceptsOption(node runtimeNode, configType reflect.Type) bool {
-	if node.parallel != nil || node.parallelJoin != nil {
-		return false
-	}
 	return slices.Contains(node.optionTypes, configType)
 }

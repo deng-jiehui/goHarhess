@@ -14,14 +14,7 @@ import (
 )
 
 type revisionNode struct {
-	ID       string           `json:"id"`
-	Input    string           `json:"input"`
-	Output   string           `json:"output"`
-	Parallel []revisionBranch `json:"parallel,omitempty"`
-}
-
-type revisionBranch struct {
-	Name   string `json:"name"`
+	ID     string `json:"id"`
 	Input  string `json:"input"`
 	Output string `json:"output"`
 }
@@ -77,7 +70,7 @@ func (g *Graph[I, O]) compileRecoveryMetadata() error {
 	} else {
 		for _, id := range g.nodeOrder {
 			node := g.nodes[id]
-			if node.parallel != nil || node.parallelJoin != nil || node.pre != nil {
+			if node.pre != nil {
 				continue
 			}
 			// 无 Pre 节点可恢复的前提是任务输入类型能经 JSON 往返恢复；
@@ -112,15 +105,7 @@ func (g *Graph[I, O]) compileRecoveryMetadata() error {
 	}
 	for _, nodeID := range g.nodeOrder {
 		node := g.nodes[nodeID]
-		item := revisionNode{ID: nodeID, Input: typeName(node.inputType), Output: typeName(node.outputType)}
-		if node.parallel != nil {
-			for _, branch := range node.parallel.branches {
-				item.Parallel = append(item.Parallel, revisionBranch{
-					Name: branch.name, Input: typeName(branch.inputType), Output: typeName(branch.outputType),
-				})
-			}
-		}
-		contract.Nodes = append(contract.Nodes, item)
+		contract.Nodes = append(contract.Nodes, revisionNode{ID: nodeID, Input: typeName(node.inputType), Output: typeName(node.outputType)})
 	}
 	for _, edge := range g.edges {
 		item := revisionEdge{From: edge.from, To: edge.to, Label: edge.label, Conditional: edge.condition != nil}
@@ -128,17 +113,6 @@ func (g *Graph[I, O]) compileRecoveryMetadata() error {
 			item.Input = typeName(edge.condition.inputType)
 		}
 		contract.Edges = append(contract.Edges, item)
-		// 并行汇合的出边同时按组名投影一份边界条目：展开前的契约中
-		// 并行节点的出边记为「组名→后继」，展开后以同一份条目保持
-		// 旧检查点的边界比较语义；新现场再经「汇合→后继」的完整
-		// 条目校验组内拓扑。
-		for name, spec := range g.parallelGroups {
-			if edge.from == spec.join {
-				alias := item
-				alias.From = name
-				contract.Edges = append(contract.Edges, alias)
-			}
-		}
 	}
 	for from, spec := range g.dispatches {
 		item := revisionDispatch{Join: spec.join, Targets: append([]string(nil), spec.targets...)}

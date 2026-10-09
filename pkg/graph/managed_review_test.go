@@ -386,16 +386,14 @@ func TestManagedSharedConcurrencyQuota(t *testing.T) {
 		}
 		return input + ":a", nil
 	})
-	branch := func(name string) graph.ParallelBranch {
-		return graph.ParallelBranch{
-			Name: name,
-			Node: runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
-				defer timed()()
-				time.Sleep(60 * time.Millisecond)
-				return input + ":" + name, nil
-			}),
-			Pre:  func(_ context.Context, s *managedState) (string, error) { return s.In, nil },
-			Post: func(_ context.Context, _ *managedState, _ string) error { return nil },
+	branch := func(name string) {
+		if err := g.AddNode(name, runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
+			defer timed()()
+			time.Sleep(60 * time.Millisecond)
+			return input + ":" + name, nil
+		}), graph.WithPreHandler(func(_ context.Context, s *managedState) (string, error) { return s.In, nil }),
+			graph.WithPostHandler(func(_ context.Context, _ *managedState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if err := g.AddNode("a", spawner,
@@ -403,11 +401,8 @@ func TestManagedSharedConcurrencyQuota(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddParallelNode("fan", []graph.ParallelBranch{branch("b1"), branch("b2")},
-		graph.WithStateMerger(func(_ context.Context, base *managedState, _ []*managedState) error { return nil }),
-	); err != nil {
-		t.Fatal(err)
-	}
+	branch("b1")
+	branch("b2")
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 		return input, nil
 	})
@@ -416,10 +411,19 @@ func TestManagedSharedConcurrencyQuota(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	for _, edge := range [][2]string{{graph.Start, "a"}, {"a", "fan"}, {"fan", "finish"}, {"finish", graph.End}} {
+	for _, edge := range [][2]string{{graph.Start, "a"}, {"b1", "finish"}, {"b2", "finish"}, {"finish", graph.End}} {
 		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := g.AddFork("a", "b1", "b2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddJoin("a", "finish"); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.SetForkMerger(g, "a", func(_ context.Context, _ *managedState, _ []graph.StepResult[*managedState]) error { return nil }); err != nil {
+		t.Fatal(err)
 	}
 	compiled := mustCompile(t, g)
 	if _, err := compiled.Invoke(context.Background(), "x",
@@ -722,23 +726,18 @@ func TestReviewManagedParallelSubgraphQuota(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	branch := func(name string) graph.ParallelBranch {
-		return graph.ParallelBranch{
-			Name: name,
-			Node: runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
-				ran.Add(1)
-				time.Sleep(40 * time.Millisecond)
-				return input + ":" + name, nil
-			}),
-			Pre:  func(_ context.Context, s *managedState) (string, error) { return s.In, nil },
-			Post: func(_ context.Context, _ *managedState, _ string) error { return nil },
+	branch := func(name string) {
+		if err := inner.AddNode(name, runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
+			ran.Add(1)
+			time.Sleep(40 * time.Millisecond)
+			return input + ":" + name, nil
+		}), graph.WithPreHandler(func(_ context.Context, s *managedState) (string, error) { return s.In, nil }),
+			graph.WithPostHandler(func(_ context.Context, _ *managedState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if err := inner.AddParallelNode("fan", []graph.ParallelBranch{branch("b1"), branch("b2")},
-		graph.WithStateMerger(func(_ context.Context, base *managedState, _ []*managedState) error { return nil }),
-	); err != nil {
-		t.Fatal(err)
-	}
+	branch("b1")
+	branch("b2")
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 		return "inner-done", nil
 	})
@@ -747,10 +746,19 @@ func TestReviewManagedParallelSubgraphQuota(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	for _, edge := range [][2]string{{graph.Start, "fan"}, {"fan", "finish"}, {"finish", graph.End}} {
+	for _, edge := range [][2]string{{"b1", "finish"}, {"b2", "finish"}, {"finish", graph.End}} {
 		if err := inner.AddEdge(edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := inner.AddFork(graph.Start, "b1", "b2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inner.AddJoin(graph.Start, "finish"); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.SetForkMerger(inner, graph.Start, func(_ context.Context, _ *managedState, _ []graph.StepResult[*managedState]) error { return nil }); err != nil {
+		t.Fatal(err)
 	}
 	innerCompiled := mustCompile(t, inner)
 	innerRunner := func(_ context.Context, spec graph.ManagedSpec) (graph.ManagedRunner, error) {

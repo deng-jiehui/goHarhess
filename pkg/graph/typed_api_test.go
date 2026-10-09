@@ -151,69 +151,59 @@ func TestTypedBranchPredicates(t *testing.T) {
 	}
 }
 
-// 泛型并行分支与 State merger 等价于 ParallelBranch 字面量写法。
+// 泛型 fork 成员与 State merger：SetForkMerger 泛型函数按声明序收到成员终态。
 func TestTypedParallelBranchAndMerger(t *testing.T) {
-	build := func(typed bool) *graph.Graph[string, []string] {
-		g := graph.NewGraph[string, []string]("typed-parallel")
-		if err := graph.SetStateFactory(g, func(_ context.Context, input string) (*typedAPIState, error) {
-			return &typedAPIState{Values: []string{input}}, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		pre := func(_ context.Context, s *typedAPIState) (string, error) { return s.Values[0], nil }
-		post := func(_ context.Context, s *typedAPIState, output string) error {
-			s.Values = append(s.Values, output)
-			return nil
-		}
-		var branches []graph.ParallelBranch
-		for _, name := range []string{"first", "second"} {
-			node := runnable.InvokableLambda(func(_ context.Context, input string) (string, error) {
-				return input + ":" + name, nil
-			})
-			if typed {
-				branches = append(branches, graph.NewParallelBranch(name, node, pre, post))
-			} else {
-				branches = append(branches, graph.ParallelBranch{Name: name, Node: node, Pre: pre, Post: post})
-			}
-		}
-		merger := func(_ context.Context, base *typedAPIState, states []*typedAPIState) error {
-			for _, s := range states {
-				base.Values = append(base.Values, s.Values[len(s.Values)-1])
-			}
-			return nil
-		}
-		var err error
-		if typed {
-			err = g.AddParallelNode("fanout", branches, graph.WithStateMerger(merger))
-		} else {
-			err = g.AddParallelNode("fanout", branches, graph.WithStateMerger(merger))
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		finish := runnable.InvokableLambda(func(_ context.Context, input []string) ([]string, error) { return input, nil })
-		if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, s *typedAPIState) ([]string, error) {
-			return append([]string(nil), s.Values...), nil
-		})); err != nil {
-			t.Fatal(err)
-		}
-		for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "finish"}, {"finish", graph.End}} {
-			if err := g.AddEdge(edge[0], edge[1]); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return g
+	g := graph.NewGraph[string, []string]("typed-parallel")
+	if err := graph.SetStateFactory(g, func(_ context.Context, input string) (*typedAPIState, error) {
+		return &typedAPIState{Values: []string{input}}, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	want, err := mustCompileGraph(t, build(false)).Invoke(context.Background(), "base")
+	pre := func(_ context.Context, s *typedAPIState) (string, error) { return s.Values[0], nil }
+	post := func(_ context.Context, s *typedAPIState, output string) error {
+		s.Values = append(s.Values, output)
+		return nil
+	}
+	for _, name := range []string{"first", "second"} {
+		node := runnable.InvokableLambda(func(_ context.Context, input string) (string, error) {
+			return input + ":" + name, nil
+		})
+		if err := g.AddNode(name, node, graph.WithPreHandler(pre), graph.WithPostHandler(post)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	merger := func(_ context.Context, base *typedAPIState, results []graph.StepResult[*typedAPIState]) error {
+		for _, r := range results {
+			base.Values = append(base.Values, r.State.Values[len(r.State.Values)-1])
+		}
+		return nil
+	}
+	finish := runnable.InvokableLambda(func(_ context.Context, input []string) ([]string, error) { return input, nil })
+	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, s *typedAPIState) ([]string, error) {
+		return append([]string(nil), s.Values...), nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range [][2]string{{"first", "finish"}, {"second", "finish"}, {"finish", graph.End}} {
+		if err := g.AddEdge(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.AddFork(graph.Start, "first", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddJoin(graph.Start, "finish"); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.SetForkMerger(g, graph.Start, merger); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mustCompileGraph(t, g).Invoke(context.Background(), "base")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := mustCompileGraph(t, build(true)).Invoke(context.Background(), "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(want) != fmt.Sprint(got) || len(got) != 3 {
-		t.Fatalf("want=%v got=%v", want, got)
+	if fmt.Sprint(got) != "[base base:first base:second]" {
+		t.Fatalf("got=%v", got)
 	}
 }
 

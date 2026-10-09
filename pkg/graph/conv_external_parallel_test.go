@@ -71,60 +71,65 @@ func (s *convState) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// 并行分支复制的 StepStates 在持久化开启后会被外部化：分支解码副本必须
-// 被回填会话，否则分支看到空历史。该缺陷只在 checkpoint 开启时出现。
+// 分支复制的 StepStates 在持久化开启后会被外部化：成员解码副本必须
+// 被回填会话，否则成员看到空历史。该缺陷只在 checkpoint 开启时出现。
 func TestParallelBranchStatesGetHydratedConversation(t *testing.T) {
 	store := state.NewMemoryStore()
 	var seen atomic.Int32
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	g := graph.NewGraph[string, string]("parallel-conv")
-	if err := g.SetStateFactory(func(_ context.Context, input string) (*convState, error) {
+	must(g.SetStateFactory(func(_ context.Context, input string) (*convState, error) {
 		return &convState{History: []schema.Message{schema.UserMessage(input)}}, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	branch := func(name string) graph.ParallelBranch {
-		return graph.ParallelBranch{
-			Name: name,
-			Node: runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+	}))
+	member := func(name string) {
+		must(g.AddNode(name,
+			runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 				return input + "-" + name, nil
 			}),
-			Pre: func(_ context.Context, s *convState) (string, error) {
+			graph.WithPreHandler(func(_ context.Context, s *convState) (string, error) {
 				if len(s.History) != 1 {
 					return "", fmt.Errorf("branch %s saw %d history", name, len(s.History))
 				}
 				seen.Add(1)
 				return "hi", nil
-			},
-			Post: func(_ context.Context, s *convState, output string) error {
+			}),
+			graph.WithPostHandler(func(_ context.Context, s *convState, output string) error {
 				s.Out += ";" + output
 				return nil
-			},
-		}
+			})))
 	}
-	if err := g.AddParallelNode("fanout", []graph.ParallelBranch{branch("a"), branch("b")},
-		graph.WithStateMerger(func(_ context.Context, base *convState, branches []*convState) error {
-			base.Out = branches[0].Out + branches[1].Out
-			return nil
-		}),
-	); err != nil {
-		t.Fatal(err)
-	}
+	member("a")
+	member("b")
+	must(g.AddNode("q", runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+		return input, nil
+	}), graph.WithPreHandler(func(_ context.Context, _ *convState) (string, error) {
+		return "hi", nil
+	})))
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 		return input, nil
 	})
-	if err := g.AddNode("finish", finish,
+	must(g.AddNode("finish", finish,
 		graph.WithPreHandler(func(_ context.Context, s *convState) (string, error) {
 			return s.Out, nil
 		}),
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "finish"}, {"finish", graph.End}} {
-		if err := g.AddEdge(edge[0], edge[1]); err != nil {
-			t.Fatal(err)
-		}
-	}
+	))
+	must(g.AddEdge(graph.Start, "q"))
+	must(g.AddFork("q", "a", "b"))
+	must(g.AddJoin("q", "finish"))
+	must(g.AddEdge("a", "finish"))
+	must(g.AddEdge("b", "finish"))
+	must(g.AddEdge("finish", graph.End))
+	must(graph.SetForkMerger(g, "q",
+		func(_ context.Context, base *convState, rs []graph.StepResult[*convState]) error {
+			base.Out = rs[0].State.Out + rs[1].State.Out
+			return nil
+		}))
 	compiled := mustCompile(t, g)
 	for _, persist := range []bool{false, true} {
 		var opts []runnable.Option

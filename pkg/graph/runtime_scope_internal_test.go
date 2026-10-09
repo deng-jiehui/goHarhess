@@ -93,6 +93,7 @@ func TestSetNodeOptionsDoesNotExecuteOptionCode(t *testing.T) {
 	}
 }
 
+// 扇出成员在各自上下文中看到的是成员局部 State，不是主干入口对象。
 func TestParallelBranchesCarryTheirOwnedStateInContext(t *testing.T) {
 	g := NewGraph[string, string]("parallel-context-scope")
 	var base *runtimeScopeState
@@ -103,29 +104,32 @@ func TestParallelBranchesCarryTheirOwnedStateInContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
-	branch := func(name string) ParallelBranch {
-		return ParallelBranch{
-			Name: name,
-			Node: node,
-			Pre: func(ctx context.Context, current *runtimeScopeState) (string, error) {
-				scoped, ok := runtimeStateFromContext(ctx)
-				if !ok || scoped != current || current == base {
-					t.Fatalf("branch %s Context State=%#v current=%p base=%p", name, scoped, current, base)
-				}
-				return current.Value, nil
-			},
-			Post: func(_ context.Context, _ *runtimeScopeState, _ string) error { return nil },
+	member := func(name string) {
+		if err := g.AddNode(name, node, WithPreHandler(func(ctx context.Context, current *runtimeScopeState) (string, error) {
+			scoped, ok := runtimeStateFromContext(ctx)
+			if !ok || scoped != current || current == base {
+				t.Fatalf("member %s Context State=%#v current=%p base=%p", name, scoped, current, base)
+			}
+			return current.Value, nil
+		}), WithPostHandler(func(_ context.Context, _ *runtimeScopeState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if err := g.AddParallelNode("fanout", []ParallelBranch{branch("one"), branch("two")}, WithStateMerger(func(_ context.Context, _ *runtimeScopeState, _ []*runtimeScopeState) error { return nil })); err != nil {
+	member("one")
+	member("two")
+	if err := g.AddNode("q", node, WithPreHandler(func(_ context.Context, current *runtimeScopeState) (string, error) { return current.Value, nil })); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.AddNode("finish", node, WithPreHandler(func(_ context.Context, current *runtimeScopeState) (string, error) { return current.Value, nil })); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddEdge(Start, "fanout")
-	_ = g.AddEdge("fanout", "finish")
+	_ = g.AddEdge(Start, "q")
+	_ = g.AddFork("q", "one", "two")
+	_ = g.AddJoin("q", "finish")
+	_ = g.AddEdge("one", "finish")
+	_ = g.AddEdge("two", "finish")
 	_ = g.AddEdge("finish", End)
+	_ = SetForkMerger(g, "q", func(_ context.Context, _ *runtimeScopeState, _ []StepResult[*runtimeScopeState]) error { return nil })
 	compiled, err := g.Compile()
 	if err != nil {
 		t.Fatal(err)

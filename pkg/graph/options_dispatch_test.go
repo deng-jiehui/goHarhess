@@ -76,25 +76,36 @@ func TestDeepTargetedPathReachesOnlyFinalNode(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddParallelNode("fanout", []graph.ParallelBranch{{
-		Name: "nested", Node: compiledChild,
-		Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-		Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil },
-	}}, graph.WithStateMerger(func(_ context.Context, _ *runtimeParallelState, _ []*runtimeParallelState) error { return nil })); err != nil {
-		t.Fatal(err)
+	member := func(name string, node runnable.Runnable[string, string]) {
+		if err := g.AddNode(name, node,
+			graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil }),
+			graph.WithPostHandler(func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
+		}
 	}
+	member("nested", compiledChild)
+	member("plain", runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+		return input, nil
+	}))
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
 	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) {
 		return current.Values[0], nil
 	})); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddEdge(graph.Start, "fanout")
-	_ = g.AddEdge("fanout", "finish")
+	_ = g.AddFork(graph.Start, "nested", "plain")
+	_ = g.AddJoin(graph.Start, "finish")
+	_ = g.AddEdge("nested", "finish")
+	_ = g.AddEdge("plain", "finish")
 	_ = g.AddEdge("finish", graph.End)
+	if err := graph.SetForkMerger(g, graph.Start, func(_ context.Context, _ *runtimeParallelState, _ []graph.StepResult[*runtimeParallelState]) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := mustCompile(t, g).Invoke(context.Background(), "base",
-		runnable.ForPath([]string{"fanout", "nested", "first"}, withProbeTag("hit")),
+		runnable.ForPath([]string{"nested", "first"}, withProbeTag("hit")),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -168,16 +179,15 @@ func TestParallelBranchMetadataIsolationViaDerivedContext(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddParallelNode("fanout", []graph.ParallelBranch{
-		{Name: "relayed", Node: relay,
-			Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-			Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil }},
-		{Name: "plain", Node: plain,
-			Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-			Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil }},
-	}, graph.WithStateMerger(func(_ context.Context, _ *runtimeParallelState, _ []*runtimeParallelState) error { return nil })); err != nil {
-		t.Fatal(err)
+	member := func(name string, node runnable.Runnable[string, string]) {
+		if err := g.AddNode(name, node,
+			graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil }),
+			graph.WithPostHandler(func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
+		}
 	}
+	member("relayed", relay)
+	member("plain", plain)
 	finish := runnable.Func[string, string](func(ctx context.Context, input string, _ ...runnable.Option) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -191,9 +201,16 @@ func TestParallelBranchMetadataIsolationViaDerivedContext(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddEdge(graph.Start, "fanout")
-	_ = g.AddEdge("fanout", "finish")
+	_ = g.AddFork(graph.Start, "relayed", "plain")
+	_ = g.AddJoin(graph.Start, "finish")
+	_ = g.AddEdge("relayed", "finish")
+	_ = g.AddEdge("plain", "finish")
 	_ = g.AddEdge("finish", graph.End)
+	if err := graph.SetForkMerger(g, graph.Start, func(_ context.Context, _ *runtimeParallelState, _ []graph.StepResult[*runtimeParallelState]) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	runCtx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "global"})
 	if _, err := mustCompile(t, g).Invoke(runCtx, "base"); err != nil {
 		t.Fatal(err)
@@ -220,29 +237,35 @@ func TestParallelBranchRelayConsumesDeeperPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaf := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
-	if err := g.AddParallelNode("fanout", []graph.ParallelBranch{
-		{Name: "relayed", Node: relay,
-			Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-			Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil }},
-		{Name: "plain", Node: leaf,
-			Pre:  func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil },
-			Post: func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil }},
-	}, graph.WithStateMerger(func(_ context.Context, _ *runtimeParallelState, _ []*runtimeParallelState) error { return nil })); err != nil {
-		t.Fatal(err)
+	member := func(name string, node runnable.Runnable[string, string]) {
+		if err := g.AddNode(name, node,
+			graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) { return current.Values[0], nil }),
+			graph.WithPostHandler(func(_ context.Context, _ *runtimeParallelState, _ string) error { return nil })); err != nil {
+			t.Fatal(err)
+		}
 	}
+	member("relayed", relay)
+	member("plain", leaf)
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
 	if err := g.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, current *runtimeParallelState) (string, error) {
 		return current.Values[0], nil
 	})); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddEdge(graph.Start, "fanout")
-	_ = g.AddEdge("fanout", "finish")
+	_ = g.AddFork(graph.Start, "relayed", "plain")
+	_ = g.AddJoin(graph.Start, "finish")
+	_ = g.AddEdge("relayed", "finish")
+	_ = g.AddEdge("plain", "finish")
 	_ = g.AddEdge("finish", graph.End)
+	if err := graph.SetForkMerger(g, graph.Start, func(_ context.Context, _ *runtimeParallelState, _ []graph.StepResult[*runtimeParallelState]) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	compiled := mustCompile(t, g)
 
 	if _, err := compiled.Invoke(context.Background(), "base",
-		runnable.ForPath([]string{"fanout", "relayed", "inner"}, withProbeTag("deep")),
+		runnable.ForPath([]string{"relayed", "inner"}, withProbeTag("deep")),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +273,7 @@ func TestParallelBranchRelayConsumesDeeperPath(t *testing.T) {
 		t.Fatalf("relay inner tags=%v", tags)
 	}
 	if _, err := compiled.Invoke(context.Background(), "base",
-		runnable.ForPath([]string{"fanout", "plain", "inner"}, withProbeTag("nope")),
+		runnable.ForPath([]string{"plain", "inner"}, withProbeTag("nope")),
 	); err == nil || !strings.Contains(err.Error(), "not a composite") {
 		t.Fatalf("Invoke error = %v", err)
 	}

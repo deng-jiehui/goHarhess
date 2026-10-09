@@ -439,25 +439,22 @@ func TestModeParityParallelNode(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				branch := func(name string) graph.ParallelBranch {
-					return graph.ParallelBranch{
-						Name: name,
-						Node: runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
-							return input + "-" + name, nil
-						}),
-						Pre: func(_ context.Context, state *parallelCheckpointState) (string, error) { return state.Values[0], nil },
-						Post: func(_ context.Context, state *parallelCheckpointState, output string) error {
+				member := func(name string) {
+					if err := g.AddNode(name, runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+						return input + "-" + name, nil
+					}), graph.WithPreHandler(func(_ context.Context, state *parallelCheckpointState) (string, error) { return state.Values[0], nil }),
+						graph.WithPostHandler(func(_ context.Context, state *parallelCheckpointState, output string) error {
 							state.Values = append(state.Values, output)
 							return nil
-						},
+						})); err != nil {
+						t.Fatal(err)
 					}
 				}
-				if err := g.AddParallelNode("fanout", []graph.ParallelBranch{branch("a"), branch("b")},
-					graph.WithStateMerger(func(_ context.Context, base *parallelCheckpointState, branches []*parallelCheckpointState) error {
-						base.Values = []string{base.Values[0], branches[0].Values[1], branches[1].Values[1]}
-						return nil
-					}),
-				); err != nil {
+				member("a")
+				member("b")
+				if err := g.AddNode("q", runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+					return input, nil
+				}), graph.WithPreHandler(func(_ context.Context, state *parallelCheckpointState) (string, error) { return state.Values[0], nil })); err != nil {
 					t.Fatal(err)
 				}
 				finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) { return input, nil })
@@ -466,8 +463,17 @@ func TestModeParityParallelNode(t *testing.T) {
 				})); err != nil {
 					t.Fatal(err)
 				}
-				for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "finish"}, {"finish", graph.End}} {
-					_ = g.AddEdge(edge[0], edge[1])
+				_ = g.AddEdge(graph.Start, "q")
+				_ = g.AddFork("q", "a", "b")
+				_ = g.AddJoin("q", "finish")
+				_ = g.AddEdge("a", "finish")
+				_ = g.AddEdge("b", "finish")
+				_ = g.AddEdge("finish", graph.End)
+				if err := graph.SetForkMerger(g, "q", func(_ context.Context, base *parallelCheckpointState, rs []graph.StepResult[*parallelCheckpointState]) error {
+					base.Values = []string{base.Values[0], rs[0].State.Values[1], rs[1].State.Values[1]}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
 				}
 				var options []runnable.Option
 				if withCheckpoint {

@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/goharness/goharness/pkg/state"
 	"io"
 	"testing"
+
+	"github.com/goharness/goharness/pkg/state"
 
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -493,28 +494,33 @@ func TestInputSuspensionLifecycleAndFailedSave(t *testing.T) {
 func TestInputParallelBranchSuspendsAndResumes(t *testing.T) {
 	g := graph.NewGraph[string, string]("parallel-input")
 	_ = g.SetStateFactory(func(context.Context, string) (*inputState, error) { return &inputState{}, nil })
-	err := g.AddParallelNode("fanout", []graph.ParallelBranch{{Name: "ask", Node: runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
+	_ = g.AddNode("q", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) { return s, nil }),
+		graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }))
+	_ = g.AddNode("ask", runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
 		v, err := graph.Interrupt(ctx, "parallel question")
 		if err != nil {
 			return "", err
 		}
 		return v.(string), nil
-	}),
-		Pre: func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }, Post: func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }}},
-		graph.WithStateMerger(func(_ context.Context, s *inputState, branches []*inputState) error {
-			s.Text = branches[0].Text
-			return nil
-		}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }))
+	_ = g.AddNode("other", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) { return s, nil }),
+		graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }))
 	_ = g.AddNode("end", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) { return s, nil }), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }))
-	_ = g.AddEdge(graph.Start, "fanout")
-	_ = g.AddEdge("fanout", "end")
+	_ = g.AddEdge(graph.Start, "q")
+	_ = g.AddFork("q", "ask", "other")
+	_ = g.AddJoin("q", "end")
+	_ = g.AddEdge("ask", "end")
+	_ = g.AddEdge("other", "end")
 	_ = g.AddEdge("end", graph.End)
+	_ = graph.SetForkMerger(g, "q", func(_ context.Context, s *inputState, rs []graph.StepResult[*inputState]) error {
+		s.Text = rs[0].State.Text
+		return nil
+	})
 	c := mustCompile(t, g)
 	option := graph.WithCheckpoint(&byteCheckpointStore{}, "parallel")
-	_, err = c.Invoke(context.Background(), "", option)
+	_, err := c.Invoke(context.Background(), "", option)
 	var suspended *graph.InterruptedError
 	if !errors.As(err, &suspended) {
 		t.Fatal(err)

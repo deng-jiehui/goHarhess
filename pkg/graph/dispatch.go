@@ -174,12 +174,11 @@ func (g *Graph[I, O]) validateDispatches() error {
 				if id == End {
 					return fmt.Errorf("dispatch %q member path from %q does not reach join %q", from, target, spec.join)
 				}
-				node, ok := g.nodes[id]
-				if !ok {
+				if _, ok := g.nodes[id]; !ok {
 					return fmt.Errorf("dispatch %q: node %q on member path is not registered", from, id)
 				}
-				if node.parallel != nil {
-					return fmt.Errorf("dispatch %q: parallel node %q inside a member path is unsupported", from, id)
+				if _, isFork := g.forks[id]; isFork {
+					return fmt.Errorf("dispatch %q: fork source %q inside a member path is unsupported", from, id)
 				}
 				next := make([]string, 0, len(outgoing[id])+len(routeTargets[id]))
 				for _, e := range outgoing[id] {
@@ -228,13 +227,6 @@ func (g *Graph[I, O]) validateDispatches() error {
 // groupJoin 返回组的汇合节点与成员总数，供 runNativeStep 泛化处理
 // 静态扇出与动态分派两种组。
 func (g *Graph[I, O]) groupJoin(group *StepGroup) (join string, members int, err error) {
-	if group.Parallel {
-		spec, ok := g.parallelGroups[group.Fork]
-		if !ok {
-			return "", 0, fmt.Errorf("%w: parallel group %q missing", ErrResumeIncompatible, group.Fork)
-		}
-		return spec.join, len(group.Members), nil
-	}
 	if group.Dispatch {
 		spec, ok := g.dispatches[group.Fork]
 		if !ok {

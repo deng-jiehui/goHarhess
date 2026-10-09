@@ -625,40 +625,45 @@ func TestExecTreeParallelBranchKeepsCompletedWork(t *testing.T) {
 		}
 	}
 	must(g.SetStateFactory(func(_ context.Context, text string) (*inputState, error) { return &inputState{Text: text}, nil }))
-	must(g.AddParallelNode("fan", []graph.ParallelBranch{
-		{Name: "fast", Node: runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
-			fastRuns.Add(1)
-			return s + ":fast", nil
-		}), Pre: func(_ context.Context, s *inputState) (string, error) { return s.Text, nil },
-			Post: func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }},
-		{Name: "slow", Node: runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
-			slowRuns.Add(1)
-			answer, err := graph.Interrupt(ctx, "slow approval")
-			if err != nil {
-				return "", err
-			}
-			return s + ":" + fmt.Sprint(answer), nil
-		}), Pre: func(_ context.Context, s *inputState) (string, error) { return s.Text, nil },
-			Post: func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }},
-	}, graph.WithStateMerger(func(_ context.Context, s *inputState, branches []*inputState) error {
-		for _, b := range branches {
-			s.Text += "|" + b.Text
+	must(g.AddNode("q", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
+		return s, nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil })))
+	must(g.AddNode("fast", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
+		fastRuns.Add(1)
+		return s + ":fast", nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil })))
+	must(g.AddNode("slow", runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
+		slowRuns.Add(1)
+		answer, err := graph.Interrupt(ctx, "slow approval")
+		if err != nil {
+			return "", err
 		}
-		return nil
-	})))
+		return s + ":" + fmt.Sprint(answer), nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil })))
 	must(g.AddNode("end", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) { return s, nil }),
 		graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil })))
-	must(g.AddEdge(graph.Start, "fan"))
-	must(g.AddEdge("fan", "end"))
+	must(g.AddEdge(graph.Start, "q"))
+	must(g.AddFork("q", "fast", "slow"))
+	must(g.AddJoin("q", "end"))
+	must(g.AddEdge("fast", "end"))
+	must(g.AddEdge("slow", "end"))
 	must(g.AddEdge("end", graph.End))
+	must(graph.SetForkMerger(g, "q", func(_ context.Context, s *inputState, rs []graph.StepResult[*inputState]) error {
+		for _, r := range rs {
+			s.Text += "|" + r.State.Text
+		}
+		return nil
+	}))
 	compiled := mustCompile(t, g)
 
 	store := state.NewMemoryStore()
 	opt := graph.WithCheckpoint(store, "parallel-tree")
 	_, err := compiled.Invoke(context.Background(), "root", opt)
 	pending := interruptedPending(t, err)
-	// 展开拓扑中未答问题归属成员节点「组名/分支名」。
-	if len(pending) != 1 || pending[0].Node != "fan/slow" {
+	// 扇出组内未答问题归属成员入口节点。
+	if len(pending) != 1 || pending[0].Node != "slow" {
 		t.Fatalf("pending=%v", pending)
 	}
 	// 两个分支都有任务记录：fast 已完成，slow 挂起待答。
@@ -1242,32 +1247,37 @@ func TestExecTreeParallelSubgraphDoesNotWakeWaitingParent(t *testing.T) {
 		}
 	}
 	must(inner.SetStateFactory(func(_ context.Context, text string) (*inputState, error) { return &inputState{Text: text}, nil }))
-	must(inner.AddParallelNode("fan", []graph.ParallelBranch{
-		{Name: "fast", Node: runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
-			fastRuns.Add(1)
-			return s + ":fast", nil
-		}), Pre: func(_ context.Context, s *inputState) (string, error) { return s.Text, nil },
-			Post: func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }},
-		{Name: "slow", Node: runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
-			slowRuns.Add(1)
-			answer, err := graph.Interrupt(ctx, "slow approval")
-			if err != nil {
-				return "", err
-			}
-			return s + ":" + fmt.Sprint(answer), nil
-		}), Pre: func(_ context.Context, s *inputState) (string, error) { return s.Text, nil },
-			Post: func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil }},
-	}, graph.WithStateMerger(func(_ context.Context, s *inputState, branches []*inputState) error {
-		for _, b := range branches {
-			s.Text += "|" + b.Text
+	must(inner.AddNode("q", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
+		return s, nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil })))
+	must(inner.AddNode("fast", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) {
+		fastRuns.Add(1)
+		return s + ":fast", nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil })))
+	must(inner.AddNode("slow", runnable.Func[string, string](func(ctx context.Context, s string, _ ...runnable.Option) (string, error) {
+		slowRuns.Add(1)
+		answer, err := graph.Interrupt(ctx, "slow approval")
+		if err != nil {
+			return "", err
 		}
-		return nil
-	})))
+		return s + ":" + fmt.Sprint(answer), nil
+	}), graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil }),
+		graph.WithPostHandler(func(_ context.Context, s *inputState, out string) error { s.Text = out; return nil })))
 	must(inner.AddNode("end", runnable.Func[string, string](func(_ context.Context, s string, _ ...runnable.Option) (string, error) { return s, nil }),
 		graph.WithPreHandler(func(_ context.Context, s *inputState) (string, error) { return s.Text, nil })))
-	must(inner.AddEdge(graph.Start, "fan"))
-	must(inner.AddEdge("fan", "end"))
+	must(inner.AddEdge(graph.Start, "q"))
+	must(inner.AddFork("q", "fast", "slow"))
+	must(inner.AddJoin("q", "end"))
+	must(inner.AddEdge("fast", "end"))
+	must(inner.AddEdge("slow", "end"))
 	must(inner.AddEdge("end", graph.End))
+	must(graph.SetForkMerger(inner, "q", func(_ context.Context, s *inputState, rs []graph.StepResult[*inputState]) error {
+		for _, r := range rs {
+			s.Text += "|" + r.State.Text
+		}
+		return nil
+	}))
 	compiledInner := mustCompile(t, inner)
 
 	// 外层 fork：A 调用内层固定并行子图，B 独立审批。

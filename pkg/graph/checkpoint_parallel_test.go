@@ -16,6 +16,8 @@ type parallelCheckpointState struct {
 	Values []string
 }
 
+// 并行中断跳过合并、恢复时整节点重放：扇出成员在节点内请求中断时，
+// 不提交中间态、不执行合并；恢复后全部成员任务整体重跑。
 func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 	store := &byteCheckpointStore{}
 	var interrupt atomic.Bool
@@ -25,13 +27,17 @@ func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 	var postCalls atomic.Int32
 	var mergeCalls atomic.Int32
 	secondStarted := make(chan struct{})
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	g := graph.NewGraph[string, string]("parallel-interrupt")
-	if err := g.SetStateFactory(func(_ context.Context, input string) (*parallelCheckpointState, error) {
+	must(g.SetStateFactory(func(_ context.Context, input string) (*parallelCheckpointState, error) {
 		return &parallelCheckpointState{Values: []string{input}}, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	}))
 	first := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 		firstRuns.Add(1)
 		if interrupt.Load() {
@@ -50,45 +56,46 @@ func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 		}
 		return input + "-second", nil
 	})
-	branch := func(name string, node runnable.Func[string, string]) graph.ParallelBranch {
-		return graph.ParallelBranch{
-			Name: name,
-			Node: node,
-			Pre: func(_ context.Context, state *parallelCheckpointState) (string, error) {
+	post := func(_ context.Context, state *parallelCheckpointState, output string) error {
+		postCalls.Add(1)
+		state.Values = append(state.Values, output)
+		return nil
+	}
+	member := func(name string, node runnable.Func[string, string]) {
+		must(g.AddNode(name, node,
+			graph.WithPreHandler(func(_ context.Context, state *parallelCheckpointState) (string, error) {
 				return state.Values[0], nil
-			},
-			Post: func(_ context.Context, state *parallelCheckpointState, output string) error {
-				postCalls.Add(1)
-				state.Values = append(state.Values, output)
-				return nil
-			},
-		}
+			}),
+			graph.WithPostHandler(post)))
 	}
-	if err := g.AddParallelNode("fanout", []graph.ParallelBranch{branch("first", first), branch("second", second)},
-		graph.WithStateMerger(func(_ context.Context, base *parallelCheckpointState, branches []*parallelCheckpointState) error {
-			mergeCalls.Add(1)
-			base.Values = []string{base.Values[0], branches[0].Values[1], branches[1].Values[1]}
-			return nil
-		}),
-	); err != nil {
-		t.Fatal(err)
-	}
+	member("first", first)
+	member("second", second)
+	must(g.AddNode("q", runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
+		return input, nil
+	}), graph.WithPreHandler(func(_ context.Context, state *parallelCheckpointState) (string, error) {
+		return state.Values[0], nil
+	})))
 	finish := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 		return input, nil
 	})
-	if err := g.AddNode("finish", finish,
+	must(g.AddNode("finish", finish,
 		graph.WithPreHandler(func(_ context.Context, state *parallelCheckpointState) (string, error) {
 			return state.Values[1] + "+" + state.Values[2], nil
 		}),
 		graph.WithPostHandler(func(_ context.Context, _ *parallelCheckpointState, _ string) error { return nil }),
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, edge := range [][2]string{{graph.Start, "fanout"}, {"fanout", "finish"}, {"finish", graph.End}} {
-		if err := g.AddEdge(edge[0], edge[1]); err != nil {
-			t.Fatal(err)
-		}
-	}
+	))
+	must(g.AddEdge(graph.Start, "q"))
+	must(g.AddFork("q", "first", "second"))
+	must(g.AddJoin("q", "finish"))
+	must(g.AddEdge("first", "finish"))
+	must(g.AddEdge("second", "finish"))
+	must(g.AddEdge("finish", graph.End))
+	must(graph.SetForkMerger(g, "q",
+		func(_ context.Context, base *parallelCheckpointState, rs []graph.StepResult[*parallelCheckpointState]) error {
+			mergeCalls.Add(1)
+			base.Values = []string{base.Values[0], rs[0].State.Values[1], rs[1].State.Values[1]}
+			return nil
+		}))
 	compiled := mustCompile(t, g)
 
 	done := make(chan error, 1)
@@ -106,8 +113,8 @@ func TestParallelInterruptSkipsMergeAndResumeReplaysWholeNode(t *testing.T) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 	var interrupted *graph.InterruptedError
-	// 展开拓扑中挂起现场落在成员任务上：续点是「组名/分支名」身份。
-	if !errors.As(err, &interrupted) || inspectCheckpoint(t, interrupted.Checkpoint).ResumeNode != "fanout/first" {
+	// 扇出组内挂起现场落在成员任务上：续点是成员入口节点。
+	if !errors.As(err, &interrupted) || inspectCheckpoint(t, interrupted.Checkpoint).ResumeNode != "first" {
 		t.Fatalf("InterruptedError=%#v", interrupted)
 	}
 	if postCalls.Load() != 0 || mergeCalls.Load() != 0 {
