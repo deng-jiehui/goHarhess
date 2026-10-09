@@ -1,0 +1,16 @@
+goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/schema
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkMessageTransport/snapshot         	    1136	   1051572 ns/op	   2124288 wire_bytes/op	 2366745 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1086	   1059618 ns/op	   2124288 wire_bytes/op	 2366751 B/op	    1040 allocs/op
+BenchmarkMessageTransport/snapshot         	    1106	   1048318 ns/op	   2124288 wire_bytes/op	 2366750 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1141	   1050162 ns/op	   2124288 wire_bytes/op	 2366745 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1130	   1043948 ns/op	   2124288 wire_bytes/op	 2366747 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1146	   1051210 ns/op	   2124288 wire_bytes/op	 2366747 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1130	   1051575 ns/op	   2124288 wire_bytes/op	 2366747 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1124	   1045597 ns/op	   2124288 wire_bytes/op	 2366748 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1128	   1055628 ns/op	   2124288 wire_bytes/op	 2366748 B/op	    1039 allocs/op
+BenchmarkMessageTransport/snapshot         	    1150	   1084938 ns/op	   2124288 wire_bytes/op	 2366748 B/op	    1039 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/schema	12.984s
