@@ -254,8 +254,9 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 	go func() {
 		defer release(s.runtime.workers)
 		result, err := s.runtime.invoke(control, s.semaphore, binding, input, options, &track)
+		// finished 在 invoke 的收尾 defer 中、终态事件发射前就已领取；
+		// 这里只需读放弃标记并投递结果。
 		track.mu.Lock()
-		track.finished = true
 		wasAbandoned := track.abandoned
 		completed <- executionResult{result: result, err: err}
 		track.mu.Unlock()
@@ -403,8 +404,12 @@ func (r *Runtime) invoke(
 		observe.EmitPayload(ctx, event, input)
 	}
 	defer func() {
+		// 终态领取先于观察者调用：正常完成与超时放弃在同一临界区
+		// 互斥裁决，同一 SpanID 只会收到一条终态事件；观察者派发
+		// 仍在锁外，慢观察者不会推迟领取。
 		track.mu.Lock()
 		wasAbandoned := track.abandoned
+		track.finished = true
 		track.mu.Unlock()
 		if wasAbandoned {
 			// 原 span 已在放弃判定时以错误收尾：补退出事件保留后台

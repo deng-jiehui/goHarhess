@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,61 @@ func TestRuntimeAbandonClosesOriginalSpan(t *testing.T) {
 	case extra := <-events:
 		t.Fatalf("unexpected extra terminal/duplicate event after exit: %+v", extra)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// 复核点：终态领取必须先于观察者调用——工具已完成、成功 end 事件正在
+// 慢观察者里派发时，超时分支不得再登记放弃：同一 SpanID 只能收到一条
+// 终态，Execute 应返回真实结果。
+func TestRuntimeTerminalClaimedBeforeObserverDispatch(t *testing.T) {
+	allow := make(chan struct{})
+	var events []observe.Event
+	var mu sync.Mutex
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind != observe.KindTool {
+			return
+		}
+		if event.Phase == observe.PhaseEnd {
+			<-allow // 模拟慢观察者：终态事件派发被拖住
+		}
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	})
+	ctx := observe.With(context.Background(), observer)
+	runtime := mustRuntime(t, nil)
+	binding := registerTool(t, runtime, NewFunctionTool(Spec{Name: "quick"}, func(context.Context, CallInput) (Result, error) {
+		return TextResult("done"), nil
+	}))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := runtime.NewScope(1, 30*time.Millisecond).Execute(ctx, binding, CallInput{})
+		done <- err
+	}()
+	// 工具立即完成，end 事件在观察者里阻塞；越过超时时刻后再放行。
+	time.Sleep(80 * time.Millisecond)
+	close(allow)
+	if err := <-done; err != nil {
+		t.Fatalf("Execute error = %v, want real result after finished-claim", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	terminal := 0
+	for _, event := range events {
+		if event.Phase == observe.PhaseEnd || event.Phase == observe.PhaseError {
+			terminal++
+			var abandoned *AbandonedError
+			if errors.As(event.Err, &abandoned) {
+				t.Fatalf("abandon emitted alongside success: %#v", event)
+			}
+		}
+	}
+	if terminal != 1 {
+		t.Fatalf("terminal events = %d, want 1", terminal)
+	}
+	if got := runtime.abandonedCount("quick"); got != 0 {
+		t.Fatalf("abandoned count = %d, want 0", got)
 	}
 }
 
