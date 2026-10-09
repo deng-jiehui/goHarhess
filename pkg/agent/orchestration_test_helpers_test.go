@@ -29,6 +29,22 @@ func routingCall(name string) schema.Message {
 		schema.NewFunctionToolCallBlock("call-"+name, name, `{"task":"go"}`))
 }
 
+// memberName/memberDescription 经 runnable.Named 取成员命名：Agent 接口已
+// 缩减为 Invoke/Stream，编排成员仍普遍是带命名的内置实现。
+func memberName(a agent.Agent) string {
+	if n, ok := a.(runnable.Named); ok {
+		return n.Name()
+	}
+	return ""
+}
+
+func memberDescription(a agent.Agent) string {
+	if n, ok := a.(runnable.Named); ok {
+		return n.Description()
+	}
+	return ""
+}
+
 // newSupervisorApp 用图门面 + AddNode(AgentNode) 组一个最小主管编排图，
 // 替代已下线的 RoutingAgent 作为嵌套执行语义的测试壳：
 // decide →(路由)→ agent:<name> → decide（Supervisor）或 finish（Router）。
@@ -41,8 +57,8 @@ func newSupervisorApp(t *testing.T, name string, model llm.ChatModel, router boo
 	functions := make([]schema.FunctionDefinition, 0, len(members))
 	for _, m := range members {
 		functions = append(functions, schema.FunctionDefinition{
-			Name:        m.Name(),
-			Description: m.Description(),
+			Name:        memberName(m),
+			Description: memberDescription(m),
 			Parameters:  map[string]any{"type": "object", "additionalProperties": true},
 		})
 	}
@@ -71,7 +87,7 @@ func newSupervisorApp(t *testing.T, name string, model llm.ChatModel, router boo
 	targets := make([]string, 0, len(members)+1)
 	for _, member := range members {
 		member := member
-		nodeID := "agent:" + member.Name()
+		nodeID := "agent:" + memberName(member)
 		agentNode, err := agent.NewAgentNode(member)
 		if err != nil {
 			t.Fatal(err)
@@ -89,7 +105,7 @@ func newSupervisorApp(t *testing.T, name string, model llm.ChatModel, router boo
 				failed := oc.Err != nil
 				text := joinMemberOutput(oc.Value)
 				if failed {
-					text = fmt.Sprintf("Sub-agent %q failed: %v", member.Name(), oc.Err)
+					text = fmt.Sprintf("Sub-agent %q failed: %v", memberName(member), oc.Err)
 				}
 				s.Messages = append(s.Messages, schema.NewMessage(schema.RoleTool,
 					schema.NewFunctionToolResultBlock(call.ID, call.Name, failed, schema.NewTextBlock(text))))
@@ -119,9 +135,9 @@ func newSupervisorApp(t *testing.T, name string, model llm.ChatModel, router boo
 	}, targets...)
 	for _, member := range members {
 		if router {
-			builder.Edge("agent:"+member.Name(), "finish")
+			builder.Edge("agent:"+memberName(member), "finish")
 		} else {
-			builder.Edge("agent:"+member.Name(), "decide")
+			builder.Edge("agent:"+memberName(member), "decide")
 		}
 	}
 	builder.Edge("finish", graph.End)

@@ -221,11 +221,11 @@ Graph 自身类型，在当前图入口消费，不会转发给纯节点。
 - Basic: one `chat_model` node.
 - ReAct：`chat_model -> tools -> chat_model`，受模型调用和 Graph
   step limits.
-- Routing: `decide(chat_model) -> agent:<name> -> decide` in Supervisor mode;
-  Router 模式执行一个选定的 Agent 节点后结束。
-- GroupChat: `select -> agent:<name> -> select`, bounded by round count.
+Routing 与 GroupChat 不再是公开配方类型，基于图门面与 `AgentNode` 的可运行
+实现见 `examples/routing`（`decide(chat_model) -> members -> supervisor`
+循环）与 `examples/groupchat`（`pick -> speak -> pick`，按轮数收口）。
 
-每种配方有独立的 State（`ToolState`、`RoutingState`、`GroupState`，公共部分为 Input/Messages/Response），
+每种配方有独立的 State（`ToolState`，公共部分为 Input/Messages/Response），
 这是运行状态的唯一真相源：Handler 直接读写 State，纯节点只通过 PreHandler 取输入。
 Context 只携带按配方实例隔离的只读运行配置（原始输入、模型调用预算、完成回调），
 因此嵌套的子 Agent 无法读到父级配方的状态。ReAct 的模型调用预算在首次运行时写入 State，恢复时沿用。

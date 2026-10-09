@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/state"
 )
 
 type builderState struct {
@@ -354,5 +357,185 @@ func TestBuilderPropagatesNodeError(t *testing.T) {
 	_, err = app.Invoke(context.Background(), builderState{})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected sentinel, got %v", err)
+	}
+}
+
+// Parallel 的 merge 只作用于本次扇出的批内汇合：图内其他顺序步骤不再
+// 经过合并函数——此前 merge 经全局 stepMerger 安装，每个节点都会调用一次。
+func TestBuilderParallelMergeScoped(t *testing.T) {
+	var calls atomic.Int32
+	merge := func(_ context.Context, base *builderState, results []graph.StepResult[*builderState]) error {
+		calls.Add(1)
+		for _, r := range results {
+			base.Docs = append(base.Docs, r.State.Docs[len(r.State.Docs)-1])
+		}
+		return nil
+	}
+	app, err := graph.NewState[builderState]("scoped-merge").
+		Node("prep", func(_ context.Context, s *builderState) error {
+			s.Docs = []string{s.Query}
+			return nil
+		}).
+		Node("a", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "a")
+			return nil
+		}).
+		Node("b", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "b")
+			return nil
+		}).
+		Node("join", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "joined")
+			return nil
+		}).
+		Node("tail", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "tail")
+			return nil
+		}).
+		Start("prep").
+		Parallel("prep", []string{"a", "b"}, "join", merge).
+		Edge("join", "tail").
+		Edge("tail", graph.End).
+		Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.Invoke(context.Background(), builderState{Query: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("merge invoked %d times, want exactly 1 (join batch)", calls.Load())
+	}
+	if fmt.Sprint(out.Docs) != "[q a b joined tail]" {
+		t.Fatalf("output=%+v", out)
+	}
+}
+
+// 并行成员自行声明 Branch 路由时不再补默认汇合边：成员路由按声明到达
+// 本分支内的接续节点再回到汇合。fork 语义下成员接续节点见到的是合并后
+// 的主干 State（fork 组不做成员局部态，这与既有 AddFork 行为一致）。
+func TestBuilderParallelMemberRoute(t *testing.T) {
+	var merges atomic.Int32
+	app, err := graph.NewState[builderState]("member-route").
+		Node("prep", func(_ context.Context, s *builderState) error {
+			s.Docs = []string{s.Query}
+			return nil
+		}).
+		Node("a", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "a")
+			return nil
+		}).
+		Node("a2", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "a2")
+			return nil
+		}).
+		Node("b", func(_ context.Context, s *builderState) error {
+			s.Docs = append(s.Docs, "b")
+			return nil
+		}).
+		Node("join", func(_ context.Context, s *builderState) error {
+			s.Done = true
+			return nil
+		}).
+		Start("prep").
+		Parallel("prep", []string{"a", "b"}, "join",
+			func(_ context.Context, base *builderState, results []graph.StepResult[*builderState]) error {
+				merges.Add(1)
+				for _, r := range results {
+					base.Docs = append(base.Docs, r.State.Docs[len(r.State.Docs)-1])
+				}
+				return nil
+			}).
+		Branch("a", func(_ context.Context, _ *builderState) (string, error) {
+			return "a2", nil
+		}, "a2", "join").
+		Edge("a2", "join").
+		Edge("join", graph.End).
+		Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.Invoke(context.Background(), builderState{Query: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 两轮批内合并：首轮 a,b 的成员结果；第二轮 a 经路由走到 a2 的接续结果。
+	if merges.Load() != 2 {
+		t.Fatalf("merge invoked %d times, want 2", merges.Load())
+	}
+	if !out.Done || fmt.Sprint(out.Docs) != "[q a b a2]" {
+		t.Fatalf("output=%+v", out)
+	}
+}
+
+// 路由目标做类型校验：State 节点路由到原始组件时按普通边同一套规则
+// 检查源输出与目标输入的可赋值性。
+func TestBuilderRouteTargetTypeChecked(t *testing.T) {
+	b := graph.NewState[builderState]("route-type")
+	b.Node("plan", func(_ context.Context, _ *builderState) error { return nil })
+	if err := b.Graph().AddNode("raw", runnable.Func[int, *builderState](func(_ context.Context, _ int, _ ...runnable.Option) (*builderState, error) {
+		return &builderState{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Graph().AddEdge("raw", graph.End); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.Start("plan").
+		Branch("plan", func(_ context.Context, _ *builderState) (string, error) {
+			return "raw", nil
+		}, "raw").
+		Compile()
+	if err == nil || !strings.Contains(err.Error(), "route.target.type_mismatch") {
+		t.Fatalf("expected route.target.type_mismatch, got %v", err)
+	}
+}
+
+// Checkpointer 在编译期绑定存储，Thread 在运行期选择线程；两者配对生效，
+// 缺绑店时 Thread 报错。
+func TestBuilderCheckpointerThread(t *testing.T) {
+	build := func(name string, options ...graph.CompileOption) *graph.CompiledGraph[builderState, *builderState] {
+		app, err := graph.NewState[builderState](name).
+			Node("work", func(_ context.Context, s *builderState) error {
+				s.Done = true
+				return nil
+			}).
+			Start("work").
+			Edge("work", graph.End).
+			Compile(options...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return app
+	}
+	store := state.NewMemoryStore()
+	app := build("persisted", graph.Checkpointer(store))
+	out, err := app.Invoke(context.Background(), builderState{}, graph.Thread("t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Done {
+		t.Fatalf("output=%+v", out)
+	}
+	record, found, err := store.Load(context.Background(), "t1")
+	if err != nil || !found {
+		t.Fatalf("checkpoint not persisted: found=%v err=%v", found, err)
+	}
+	if record.Status == "" {
+		t.Fatalf("checkpoint record missing status: %+v", record)
+	}
+	// 只有 Thread 没有绑店：Store 为空，finalize 拒绝。
+	plain := build("plain")
+	if _, err := plain.Invoke(context.Background(), builderState{}, graph.Thread("t9")); err == nil ||
+		!strings.Contains(err.Error(), "checkpoint store") {
+		t.Fatalf("expected checkpoint store error, got %v", err)
+	}
+	// 绑店但不传 Thread：不启用持久化，存储保持空。
+	if _, err := build("another", graph.Checkpointer(store)).Invoke(context.Background(), builderState{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Load(context.Background(), "another-run"); err != nil || found {
+		t.Fatalf("unexpected checkpoint write: found=%v err=%v", found, err)
 	}
 }

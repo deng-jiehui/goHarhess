@@ -27,6 +27,9 @@ type StepResult[S any] struct {
 type forkSpec struct {
 	Branches []string
 	Join     string
+	// merger 是本组专属的批内合并器：设置后汇合写回不再走全局
+	// stepMerger，也不会影响图内其他步骤。nil 时回退全局合并器。
+	merger *runtimeStepMerger
 }
 type runtimeStepMerger struct {
 	stateType reflect.Type
@@ -165,11 +168,46 @@ func SetStepMerger[I, O, S any](g *Graph[I, O], handler func(context.Context, *S
 	if g == nil {
 		return errors.New("graph cannot be nil")
 	}
+	merger, err := newRuntimeStepMerger(handler)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stepMerger = merger
+	return nil
+}
+
+// SetForkMerger 为指定扇出登记组级合并函数，签名与 SetStepMerger 相同。
+// 组级合并器只在 from 扇出的批内汇合时调用，不接管整图每步合并；
+// 未登记时该 fork 回退到全局 SetStepMerger。
+func SetForkMerger[I, O, S any](g *Graph[I, O], fork string, handler func(context.Context, *S, []StepResult[*S]) error) error {
+	if g == nil {
+		return errors.New("graph cannot be nil")
+	}
+	merger, err := newRuntimeStepMerger(handler)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	spec, ok := g.forks[fork]
+	if !ok {
+		return fmt.Errorf("fork %q is not declared", fork)
+	}
+	spec.merger = merger
+	g.forks[fork] = spec
+	return nil
+}
+
+// newRuntimeStepMerger 校验合并函数签名并生成直接调用闭包；反射与类型化
+// 入口共用同一份 panic 包装语义。
+func newRuntimeStepMerger[S any](handler func(context.Context, *S, []StepResult[*S]) error) (*runtimeStepMerger, error) {
 	if handler == nil {
-		return errors.New("step merger must be a function")
+		return nil, errors.New("step merger must be a function")
 	}
 	if typeOf[*S]().Elem().Kind() != reflect.Struct {
-		return errors.New("step merger must have signature func(context.Context, *State, []StepResult[*State]) error")
+		return nil, errors.New("step merger must have signature func(context.Context, *State, []StepResult[*State]) error")
 	}
 	merger := &runtimeStepMerger{stateType: typeOf[*S]()}
 	merger.invoke = func(ctx context.Context, base any, results []StepResult[any]) (err error) {
@@ -184,21 +222,28 @@ func SetStepMerger[I, O, S any](g *Graph[I, O], handler func(context.Context, *S
 		}
 		return handler(ctx, typedArgument[*S](base), typed)
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.stepMerger = merger
-	return nil
+	return merger, nil
 }
 
 func (g *Graph[I, O]) validateForks() error {
 	if g.stepMerger != nil && g.stepMerger.stateType != g.stateType {
 		return errors.New("step merger State does not match graph State")
 	}
+	for from, spec := range g.forks {
+		// 组级合并器优先于全局：两者都缺时才拒绝该扇出。
+		merger := spec.merger
+		if merger == nil {
+			merger = g.stepMerger
+		}
+		if merger == nil {
+			return fmt.Errorf("fork %q requires a step merger", from)
+		}
+		if merger.stateType != g.stateType {
+			return fmt.Errorf("fork %q merger State does not match graph State", from)
+		}
+	}
 	if len(g.forks) == 0 {
 		return nil
-	}
-	if g.stepMerger == nil {
-		return errors.New("native forks require a step merger")
 	}
 	for id, n := range g.nodes {
 		if n.pre == nil && n.parallel == nil && n.parallelJoin == nil {
@@ -208,6 +253,14 @@ func (g *Graph[I, O]) validateForks() error {
 	outgoing := map[string][]runtimeEdge{}
 	for _, e := range g.edges {
 		outgoing[e.from] = append(outgoing[e.from], e)
+	}
+	// 成员路径上的路由目标与普通边同等参与分支校验：到达汇合、
+	// 不跨分支、不接组外来路。
+	routeTargets := map[string][]string{}
+	for from, route := range g.routes {
+		for target := range route.targets {
+			routeTargets[from] = append(routeTargets[from], target)
+		}
 	}
 	type branchOwner struct{ fork, branch string }
 	owners := map[string]branchOwner{}
@@ -247,7 +300,7 @@ func (g *Graph[I, O]) validateForks() error {
 				if _, ok := g.forks[id]; ok {
 					return fmt.Errorf("nested fork %q is unsupported", id)
 				}
-				if id == End || len(outgoing[id]) == 0 {
+				if id == End || (len(outgoing[id]) == 0 && len(routeTargets[id]) == 0) {
 					return fmt.Errorf("branch %q does not reach join %q", branch, spec.Join)
 				}
 				if old, ok := owners[id]; ok && old != owner {
@@ -259,8 +312,13 @@ func (g *Graph[I, O]) validateForks() error {
 				}
 				active[id] = true
 				seen[id] = true
+				next := make([]string, 0, len(outgoing[id])+len(routeTargets[id]))
 				for _, e := range outgoing[id] {
-					if err := walk(e.to); err != nil {
+					next = append(next, e.to)
+				}
+				next = append(next, routeTargets[id]...)
+				for _, to := range next {
+					if err := walk(to); err != nil {
 						return err
 					}
 				}
@@ -294,6 +352,25 @@ func (g *Graph[I, O]) validateForks() error {
 			}
 			if !valid {
 				return fmt.Errorf("edge %q -> %q enters join outside its group", e.from, e.to)
+			}
+		}
+	}
+	for from, targets := range routeTargets {
+		for _, target := range targets {
+			if owner, owned := owners[target]; owned && owners[from] != owner {
+				return fmt.Errorf("route %q -> %q enters another branch", from, target)
+			}
+			if fork, ok := joins[target]; ok {
+				owner := owners[from]
+				valid := false
+				for _, b := range g.forks[fork].Branches {
+					if owner == (branchOwner{fork, b}) {
+						valid = true
+					}
+				}
+				if !valid {
+					return fmt.Errorf("route %q -> %q enters join outside its group", from, target)
+				}
 			}
 		}
 	}
@@ -654,6 +731,12 @@ func (g *Graph[I, O]) validateSchedule(s *StepSchedule) error {
 			for _, e := range g.edges {
 				if e.from == n {
 					visit(e.to)
+				}
+			}
+			// 成员内部路由与边同样参与可达性：路由续点也属于本分支。
+			if route, ok := g.routes[n]; ok {
+				for target := range route.targets {
+					visit(target)
 				}
 			}
 		}
@@ -1211,9 +1294,19 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 	// 并行组不做每轮公共合并：成员各自持有局部 State 直到统一汇合，
 	// 合并由汇合任务用组的 State merger 执行。
 	if s.Group == nil || !s.Group.Parallel {
-		mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
-		if err = g.stepMerger.invoke(mergeCtx, candidate, results); err != nil {
-			return nil, nil, nil, fmt.Errorf("merge step: %w", err)
+		// 扇出登记了组级合并器时优先使用，避免把某次 Parallel 的合并
+		// 规则扩散到整图；未登记的组仍回落全局合并器。
+		merger := g.stepMerger
+		if s.Group != nil {
+			if spec, ok := g.forks[s.Group.Fork]; ok && spec.merger != nil {
+				merger = spec.merger
+			}
+		}
+		if merger != nil {
+			mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
+			if err = merger.invoke(mergeCtx, candidate, results); err != nil {
+				return nil, nil, nil, fmt.Errorf("merge step: %w", err)
+			}
 		}
 	}
 	// 任务记录与子调用的回收不在此处执行——它们随调用方的进度提交进入

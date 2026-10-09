@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -25,11 +26,11 @@ type routeState struct {
 
 func main() {
 	ctx := context.Background()
-	worker := mustAgent("worker", "worker completed: evidence attached")
-	members := map[string]agent.Agent{worker.Name(): worker}
+	worker := mustAgent("worker", "worker member agent", "worker completed: evidence attached")
+	members := map[string]agent.Agent{"worker": worker}
 	functions := []schema.FunctionDefinition{{
-		Name:        worker.Name(),
-		Description: worker.Description(),
+		Name:        "worker",
+		Description: "worker member agent",
 		Parameters:  map[string]any{"type": "object", "additionalProperties": true},
 	}}
 	// 主管模型：第一轮决定调用 worker，第二轮总结后不再调用。
@@ -59,7 +60,8 @@ func main() {
 			if !ok {
 				return fmt.Errorf("routed agent %q is not registered", c.Name)
 			}
-			out, err := member.Invoke(ctx, s.Messages)
+			// 成员只收任务本体，不接含未配对工具调用的会话原文。
+			out, err := member.Invoke(ctx, []schema.Message{schema.UserMessage(taskPrompt(c.Arguments))})
 			content := joinText(out)
 			if err != nil {
 				content = fmt.Sprintf("Sub-agent %q failed", c.Name)
@@ -96,6 +98,17 @@ func main() {
 	}
 }
 
+// taskPrompt 把调用参数还原成成员的用户指令；解析失败时原样透传 JSON。
+func taskPrompt(arguments string) string {
+	var args struct {
+		Task string `json:"task"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err == nil && args.Task != "" {
+		return args.Task
+	}
+	return arguments
+}
+
 func joinText(messages []schema.Message) string {
 	parts := make([]string, 0, len(messages))
 	for _, m := range messages {
@@ -106,11 +119,11 @@ func joinText(messages []schema.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-func mustAgent(name, response string) agent.Agent {
+func mustAgent(name, description, response string) agent.Agent {
 	value, err := agent.New(
 		llm.NewScriptedModel([]schema.Message{schema.AssistantMessage(response)}),
 		agent.WithName(name),
-		agent.WithDescription(name+" member agent"),
+		agent.WithDescription(description),
 	)
 	must(err)
 	return value

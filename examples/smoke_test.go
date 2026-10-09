@@ -21,6 +21,7 @@ var wantOutput = map[string][]string{
 	"subagent":    {"sub-agent results:", "completed", "cancelled"},
 	"routing":     {"routing done"},
 	"groupchat":   {"analyst:", "critic:"},
+	"react":       {"sunny, 24C"},
 }
 
 // TestExamples 逐个 go run 各示例，要求 2 分钟内退出码为 0 且输出包含预期片段。

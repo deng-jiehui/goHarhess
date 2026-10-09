@@ -13,6 +13,15 @@ import (
 type Builder[S any] struct {
 	g    *Graph[S, *S]
 	errs []error
+	// pendingJoins 是 Parallel 声明的成员默认汇合接线：Compile 时只为
+	// 没有声明任何出边形式（边、路由、扇出）的成员补 member→join 边，
+	// 成员用 Branch 声明内部路由时不会被默认边抢占。
+	pendingJoins []memberJoin
+}
+
+type memberJoin struct {
+	member string
+	join   string
 }
 
 // NewState 创建 State 图门面：图输入即 State 初值，运行结束输出最终 *S。
@@ -67,14 +76,15 @@ func (b *Builder[S]) Branch(from string, router func(context.Context, *S) (strin
 }
 
 // Parallel 声明静态扇出：from 完成后 branches 并行执行，全部到达 join 后
-// 由 merge 把各分支 State 副本写回主干 State。
-// branches 内为单节点分支；链式分支用 Graph() + Merge 手动接线。
+// 由 merge 把各分支 State 副本写回主干 State。merge 只作用于本次扇出的
+// 批内汇合，不影响图内其他步骤；成员节点的默认汇合边在 Compile 时补齐，
+// 成员自行声明出边或 Branch 路由后不再补。
 func (b *Builder[S]) Parallel(from string, branches []string, join string, merge func(context.Context, *S, []StepResult[*S]) error) *Builder[S] {
 	b.record(b.g.AddFork(from, branches...))
 	b.record(b.g.AddJoin(from, join))
-	b.record(SetStepMerger(b.g, merge))
+	b.record(SetForkMerger(b.g, from, merge))
 	for _, branch := range branches {
-		b.record(b.g.AddEdge(branch, join))
+		b.pendingJoins = append(b.pendingJoins, memberJoin{member: branch, join: join})
 	}
 	return b
 }
@@ -100,11 +110,18 @@ func (b *Builder[S]) MaxSteps(limit int) *Builder[S] {
 }
 
 // Compile 聚合累积的建图错误并完成编译；门面登记与引擎校验的问题一并返回。
-func (b *Builder[S]) Compile() (*CompiledGraph[S, *S], error) {
+// 选项为编译期绑定能力，如 Checkpointer(store) 绑定检查点存储，
+// 运行时经 Thread("id") 启用。
+func (b *Builder[S]) Compile(options ...CompileOption) (*CompiledGraph[S, *S], error) {
 	if b == nil || b.g == nil {
 		return nil, errors.New("graph builder is nil")
 	}
-	app, err := b.g.Compile()
+	for _, pj := range b.pendingJoins {
+		if !b.g.hasOutgoing(pj.member) {
+			b.record(b.g.AddEdge(pj.member, pj.join))
+		}
+	}
+	app, err := b.g.Compile(options...)
 	return app, errors.Join(err, errors.Join(b.errs...))
 }
 

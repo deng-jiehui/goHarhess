@@ -342,6 +342,16 @@ func WithCheckpoint(store state.Store, key string) runnable.Option {
 	})
 }
 
+// Thread 选择本次运行的检查点线程 ID。与编译期 Checkpointer(store) 配对：
+// Compile(graph.Checkpointer(store)) 绑店，Invoke/Resume 传 Thread 启用；
+// 未绑定存储时校验拒绝。
+func Thread(key string) runnable.Option {
+	return runnable.WrapOption(func(c *graphRunConfig) {
+		c.checkpoint.Key = key
+		c.hasCheckpoint = true
+	})
+}
+
 func isNilCheckpointStore(store state.Store) bool {
 	if store == nil {
 		return true

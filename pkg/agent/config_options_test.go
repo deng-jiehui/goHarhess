@@ -37,8 +37,9 @@ func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Name() != "configured" || value.Description() != "configured by options" {
-		t.Fatalf("agent identity = %q / %q", value.Name(), value.Description())
+	named, ok := value.(runnable.Named)
+	if !ok || named.Name() != "configured" || named.Description() != "configured by options" {
+		t.Fatalf("agent identity = %#v", value)
 	}
 	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")}); err != nil {
 		t.Fatal(err)

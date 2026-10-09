@@ -37,4 +37,8 @@ Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `
 
 `llm.NewRateLimitedModel` 提供可选的并发限制和最小请求启动间隔。这些装饰器可按任意顺序与应用自己的熔断策略组合。
 
-Agent 初始化配置也可以直接启用两者：`agent.WithModelRetry(llm.RetryConfig{MaxAttempts: 3})` 与 `agent.WithModelRateLimit(llm.RateLimitConfig{...})` 会在构造时包装模型，且始终保证重试在外层、限流在内层（每次真实请求重新占用配额）。框架会检查模型外层的内置策略链：同类策略层重复时拒绝构造；模型已手工包装重试而只配置限流时，会按原重试配置重组为正确顺序，重试层不在最外层则明确拒绝。隔着自定义包装层的策略无法识别，混用时请保持内置策略层连续靠外。需要跨 Agent 实例共享限流配额时，包装同一个底层模型再分发给各 Agent。
+需要重试或限流时由使用方显式包装模型再交给 `agent.New`：
+`llm.NewRetryingModel(llm.NewRateLimitedModel(model, rlCfg), retryCfg)`。
+装饰器组合顺序由使用方保证（重试在外层、限流在内层时，每次真实请求都会
+重新占用配额）；需要跨 Agent 实例共享限流配额时，包装同一个底层模型再分发
+给各 Agent。

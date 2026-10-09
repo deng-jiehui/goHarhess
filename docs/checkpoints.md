@@ -42,6 +42,16 @@ result, err = agent.Resume(ctx, assistant, option)
 
 也可以在构造 Agent 时通过 `agent.WithCheckpointStore` 配置存储，调用时只传 `agent.WithConversationID`。这两种方式使用同一套机制。如果同时指定 `WithCheckpoint` 和 `WithConversationID`，两处 ID 必须一致，存储以本次 `WithCheckpoint` 为准。直接使用 Graph 时传入 `graph.WithCheckpoint(store, id)`。
 
+`graph.NewState` 门面与 `Graph.Compile` 也支持把存储绑定在编译期、把会话 ID 推迟到运行期：
+
+```go
+app, err := g.Compile(graph.Checkpointer(store))
+out, err := app.Invoke(ctx, input, graph.Thread("tenant-a:session-42"))
+out, err = app.Resume(ctx, graph.Thread("tenant-a:session-42"))
+```
+
+`Thread` 只选择线程 ID；未绑定存储（`Compile` 未传 `Checkpointer` 且本次未给 `WithCheckpoint`）时运行参数校验直接报错。同一次调用同时给 `WithCheckpoint` 与 `Thread` 时，`WithCheckpoint` 的完整配置生效。
+
 新一轮输入使用 `Invoke` 或 `Stream`；继续未完成的运行使用 `Resume` 或 `ResumeStream`。同一会话存在未完成运行时，新一轮输入会以 `state.ErrUnfinishedRun` 被拒绝，避免覆盖尚未完成的工作。需要人工输入的挂起流程仍使用 `WithResume(interruptID, value)`，具体见 [通用交互中断](resume-input.md)。
 
 ## 放弃未完成的运行

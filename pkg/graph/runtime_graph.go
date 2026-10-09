@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/state"
 )
 
 var (
@@ -42,12 +43,15 @@ type Graph[I, O any] struct {
 	dispatches     map[string]*dispatchSpec
 	routes         map[string]*runtimeRoute
 	parallelGroups map[string]*runtimeParallelNode
-	stepMerger     *runtimeStepMerger
-	maxConcurrency int
-	built          bool
-	revision       string
-	contract       *revisionContract
-	resumableErr   error
+	// boundCheckpointStore 是 Checkpointer 编译选项绑定的存储；运行入口
+	// 在解析用户选项前作为默认值注入，WithCheckpoint 显式指定时仍覆盖。
+	boundCheckpointStore state.Store
+	stepMerger           *runtimeStepMerger
+	maxConcurrency       int
+	built                bool
+	revision             string
+	contract             *revisionContract
+	resumableErr         error
 }
 
 type runtimeNode struct {
@@ -498,17 +502,80 @@ func (g *Graph[I, O]) Validate() error {
 	return nil
 }
 
+// CompileOption 是编译期绑定能力的选项：能力在 Compile 时落到执行快照，
+// 运行入口经 runnable.Option 逐项启用。当前支持 Checkpointer。
+type CompileOption interface {
+	applyCompile(*compileConfig) error
+}
+
+type compileOptionFunc func(*compileConfig) error
+
+func (f compileOptionFunc) applyCompile(c *compileConfig) error {
+	if f == nil {
+		return errors.New("compile option is nil")
+	}
+	return f(c)
+}
+
+type compileConfig struct {
+	checkpointStore state.Store
+}
+
+// Checkpointer 在编译期绑定检查点存储；运行时以 Thread("id") 启用一次
+// 持久化执行。已有 WithCheckpoint(store, key) 运行选项不受影响。
+func Checkpointer(store state.Store) CompileOption {
+	return compileOptionFunc(func(c *compileConfig) error {
+		if isNilCheckpointStore(store) {
+			return errors.New("checkpointer store cannot be nil")
+		}
+		c.checkpointStore = store
+		return nil
+	})
+}
+
 // Compile validates and freezes one immutable execution snapshot. The Builder
 // remains mutable and can be compiled again.
-func (g *Graph[I, O]) Compile() (*CompiledGraph[I, O], error) {
+func (g *Graph[I, O]) Compile(options ...CompileOption) (*CompiledGraph[I, O], error) {
 	if g == nil {
 		return nil, validationError("graph.nil", "graph", "graph cannot be nil")
 	}
 	runtime := g.cloneBuilder()
+	var config compileConfig
+	for index, option := range options {
+		if option == nil {
+			return nil, validationError("graph.compile.option", fmt.Sprintf("compile_options[%d]", index), "option cannot be nil")
+		}
+		if err := option.applyCompile(&config); err != nil {
+			return nil, validationError("graph.compile.option", fmt.Sprintf("compile_options[%d]", index), "%v", err)
+		}
+	}
+	runtime.boundCheckpointStore = config.checkpointStore
 	if err := runtime.compileGraph(map[uintptr]bool{}); err != nil {
 		return nil, err
 	}
 	return compileRuntimePlans(runtime)
+}
+
+// hasOutgoing 报告节点是否已声明出边形式（普通/条件边、路由、扇出或
+// 动态分派）；门面用它决定是否为并行成员补默认汇合边。
+func (g *Graph[I, O]) hasOutgoing(id string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if _, ok := g.routes[id]; ok {
+		return true
+	}
+	if _, ok := g.forks[id]; ok {
+		return true
+	}
+	if _, ok := g.dispatches[id]; ok {
+		return true
+	}
+	for _, e := range g.edges {
+		if e.from == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {
@@ -569,6 +636,7 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	// 并行组声明先于校验展开为普通拓扑：组名的出入边按成员闭包解析，
 	// 无显式出边的成员补默认汇合边。幂等——重复编译返回同一份视图。
 	g.edges = g.resolvedParallelEdges()
+	g.resolveParallelRoutes()
 	if errs := g.validateRuntimeGraph(); len(errs) > 0 {
 		return errs
 	}
@@ -608,10 +676,14 @@ func (g *Graph[I, O]) resolvedParallelEdges() []runtimeEdge {
 			}
 		}
 	}
-	// 第三阶段：无显式出边的成员补默认汇合边。
+	// 第三阶段：无显式出边的成员补默认汇合边；成员路径上的路由声明
+	// 同样接管出边集合，不再补默认边。
 	outgoing := map[string]bool{}
 	for _, e := range edges {
 		outgoing[e.from] = true
+	}
+	for from := range g.routes {
+		outgoing[from] = true
 	}
 	for name, spec := range g.parallelGroups {
 		for _, branch := range spec.branches {
@@ -624,6 +696,36 @@ func (g *Graph[I, O]) resolvedParallelEdges() []runtimeEdge {
 	return edges
 }
 
+// resolveParallelRoutes 把成员路径闭包内的路由按并行组边界重写：成员路由
+// 以组名为目标等价于到达本组汇合（与边解析同规则）。只作用于编译克隆，
+// Builder 侧的路由声明保持不变；已指向汇合的目标不再改写。
+func (g *Graph[I, O]) resolveParallelRoutes() {
+	if len(g.parallelGroups) == 0 || len(g.routes) == 0 {
+		return
+	}
+	for name, spec := range g.parallelGroups {
+		for id := range g.parallelInnerNodes(name, spec, g.edges) {
+			route := g.routes[id]
+			if route == nil || !route.targets[name] {
+				continue
+			}
+			delete(route.targets, name)
+			route.targets[spec.join] = true
+			delegate := route.invoke
+			route.invoke = func(ctx context.Context, input any) (string, error) {
+				target, err := delegate(ctx, input)
+				if err != nil {
+					return "", err
+				}
+				if target == name {
+					return spec.join, nil
+				}
+				return target, nil
+			}
+		}
+	}
+}
+
 // parallelInnerNodes 收集组成员路径上的内部节点（不含入口与汇合）。
 // 「→组名」的边在遍历时按汇合处理，避免把组外后继误并入成员闭包。
 func (g *Graph[I, O]) parallelInnerNodes(name string, spec *runtimeParallelNode, edges []runtimeEdge) map[string]bool {
@@ -634,6 +736,16 @@ func (g *Graph[I, O]) parallelInnerNodes(name string, spec *runtimeParallelNode,
 			to = spec.join
 		}
 		outgoing[e.from] = append(outgoing[e.from], to)
+	}
+	// 成员路由与边同等参与闭包遍历：路由以组名为目标时按汇合处理。
+	for from, route := range g.routes {
+		for target := range route.targets {
+			to := target
+			if to == name {
+				to = spec.join
+			}
+			outgoing[from] = append(outgoing[from], to)
+		}
 	}
 	inner := map[string]bool{}
 	var walk func(string)
@@ -753,6 +865,21 @@ func (g *Graph[I, O]) validateRuntimeTypes() error {
 		if !matchesOutput && !matchesState {
 			return validationError("route.input.type_mismatch", fmt.Sprintf("routes[%q]", from), "route input %s matches neither source output %s nor State %s", typeName(route.inputType), typeName(sourceType), typeName(g.stateType))
 		}
+		// 目标类型与普通边同一套规则：直接消费时要求源输出可赋给目标
+		// 输入；带 Pre/并行结构的节点自行重建输入，跳过比较；End 按图
+		// 输出类型校验。
+		for target := range route.targets {
+			if target == End {
+				if !sourceType.AssignableTo(g.outputType) {
+					return validationError("route.end.type_mismatch", fmt.Sprintf("routes[%q]", from), "%s output %s is not assignable to graph output %s", from, typeName(sourceType), typeName(g.outputType))
+				}
+				continue
+			}
+			targetNode, exists := g.nodes[target]
+			if exists && targetNode.pre == nil && targetNode.parallel == nil && targetNode.parallelJoin == nil && !sourceType.AssignableTo(targetNode.inputType) {
+				return validationError("route.target.type_mismatch", fmt.Sprintf("routes[%q]", from), "%s output %s is not assignable to %s input %s", from, typeName(sourceType), target, typeName(targetNode.inputType))
+			}
+		}
 	}
 	return nil
 }
@@ -788,6 +915,14 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 	outgoing := map[string][]string{}
 	for _, e := range edges {
 		outgoing[e.from] = append(outgoing[e.from], e.to)
+	}
+	// 路由目标与边同等参与成员路径校验：成员内部的动态路由也受
+	// 必须到达汇合、不跨分支的规则约束。「→组名」的目标按汇合处理。
+	routeTargets := map[string][]string{}
+	for from, route := range g.routes {
+		for target := range route.targets {
+			routeTargets[from] = append(routeTargets[from], target)
+		}
 	}
 	for name, spec := range g.parallelGroups {
 		if _, ok := g.forks[name]; ok {
@@ -825,7 +960,7 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 				if id == name {
 					return fmt.Errorf("parallel branch %q re-enters its own entry", entry)
 				}
-				if id == End || len(outgoing[id]) == 0 {
+				if id == End || (len(outgoing[id]) == 0 && len(routeTargets[id]) == 0) {
 					return fmt.Errorf("parallel branch %q path does not reach join %q", entry, join)
 				}
 				if _, ok := g.forks[id]; ok {
@@ -855,7 +990,14 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 				}
 				active[id] = true
 				seen[id] = true
-				for _, to := range outgoing[id] {
+				next := append([]string(nil), outgoing[id]...)
+				for _, to := range routeTargets[id] {
+					if to == name {
+						to = spec.join
+					}
+					next = append(next, to)
+				}
+				for _, to := range next {
 					if err := walk(to); err != nil {
 						return err
 					}
@@ -875,13 +1017,33 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 				return fmt.Errorf("edge %q -> %q enters join outside its group", e.from, e.to)
 			}
 		}
-		// 成员入口只允许组内扇出到达：任何指向成员入口的边都会制造第二个
-		// 入口点，破坏成员局部 State 的唯一来源。
+		for from, targets := range routeTargets {
+			if !inner[from] {
+				for _, target := range targets {
+					to := target
+					if to == name {
+						to = join
+					}
+					if to == join {
+						return fmt.Errorf("route %q -> %q enters join outside its group", from, target)
+					}
+				}
+			}
+		}
+		// 成员入口只允许组内扇出到达：任何指向成员入口的边或路由都会制造
+		// 第二个入口点，破坏成员局部 State 的唯一来源。
 		for _, branch := range spec.branches {
 			entry := parallelMemberName(name, branch.name)
 			for _, e := range edges {
 				if e.to == entry {
 					return fmt.Errorf("edge %q -> %q enters parallel member directly", e.from, e.to)
+				}
+			}
+			for from, targets := range routeTargets {
+				for _, target := range targets {
+					if target == entry {
+						return fmt.Errorf("route %q -> %q enters parallel member directly", from, target)
+					}
 				}
 			}
 		}
@@ -893,6 +1055,18 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 				continue
 			}
 			return fmt.Errorf("edge %q -> %q enters parallel group %q branch path from outside", e.from, e.to, name)
+		}
+		for from, targets := range routeTargets {
+			for _, target := range targets {
+				to := target
+				if to == name {
+					to = join
+				}
+				if !inner[to] || owners[from] == owners[to] {
+					continue
+				}
+				return fmt.Errorf("route %q -> %q enters parallel group %q branch path from outside", from, target, name)
+			}
 		}
 	}
 	return nil

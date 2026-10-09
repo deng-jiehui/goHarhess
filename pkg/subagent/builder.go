@@ -249,6 +249,22 @@ type bypassRunner struct{ agent.Agent }
 // Recoverable 声明预置配方可由根检查点恢复：内置配方都是 Graph 配方。
 func (bypassRunner) Recoverable() error { return nil }
 
+// Name/Description 满足 Runner 的命名契约：内置 Agent 都实现
+// runnable.Named，自定义最小实现没有命名时给空串。
+func (b bypassRunner) Name() string {
+	if n, ok := b.Agent.(runnable.Named); ok {
+		return n.Name()
+	}
+	return ""
+}
+
+func (b bypassRunner) Description() string {
+	if n, ok := b.Agent.(runnable.Named); ok {
+		return n.Description()
+	}
+	return ""
+}
+
 // Recoverable 是执行器对"可由根检查点恢复"的声明：返回 nil 表示可以，
 // 返回错误说明原因。graph.CompiledGraph 已实现它；包装图的执行器要么嵌入
 // 具体的图类型使方法被提升，要么显式转发，要么用 WithRecovery 声明。

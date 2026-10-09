@@ -46,14 +46,14 @@ func (n *AgentNode) Name() string {
 	if n == nil || isNilAgent(n.agent) {
 		return ""
 	}
-	return n.agent.Name()
+	return agentName(n.agent)
 }
 
 func (n *AgentNode) Description() string {
 	if n == nil || isNilAgent(n.agent) {
 		return ""
 	}
-	return n.agent.Description()
+	return agentDescription(n.agent)
 }
 
 func (*AgentNode) NodeKind() runnable.NodeKind { return runnable.NodeKindAgent }
@@ -93,7 +93,7 @@ func (n *AgentNode) Invoke(ctx context.Context, messages []schema.Message, invoc
 // 后者必须穿透，避免挂起请求被转成模型可见的观察结果而让父级"成功"结束。
 func (n *AgentNode) outcome(ctx context.Context, output []schema.Message, err error) (runnable.Outcome[[]schema.Message], error) {
 	if err != nil && isControlError(ctx, err) {
-		return runnable.Outcome[[]schema.Message]{}, fmt.Errorf("sub-agent %q: %w", n.agent.Name(), err)
+		return runnable.Outcome[[]schema.Message]{}, fmt.Errorf("sub-agent %q: %w", agentName(n.agent), err)
 	}
 	return runnable.Outcome[[]schema.Message]{Value: schema.CloneMessages(output), Err: err}, nil
 }

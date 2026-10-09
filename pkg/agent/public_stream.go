@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/stream"
@@ -16,7 +17,7 @@ func StreamEvents(ctx context.Context, value Agent, input []schema.Message, conf
 	}
 	input = schema.CloneMessages(input)
 	return stream.Run(ctx, func(run context.Context) ([]schema.Message, error) {
-		run = stream.WithNamespace(run, value.Name())
+		run = stream.WithNamespace(run, agentName(value))
 		run, seen := stream.TrackMessages(run)
 		r, err := value.Stream(run, input, options...)
 		if err != nil {

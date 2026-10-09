@@ -141,7 +141,14 @@ func (g *Graph[I, O]) prepareRun(ctx context.Context, options []runnable.Option)
 	if err != nil {
 		return nil, runSetup{}, fmt.Errorf("resolve graph options: %w", err)
 	}
-	config, _, err := runnable.ResolveComponentOptions(graphRunConfig{}, runnable.OptionsFromSpecs(dispatch.config)...)
+	seed := graphRunConfig{}
+	if g.boundCheckpointStore != nil {
+		// 编译期 Checkpointer 绑定的存储先就位：Thread 只补 key，显式
+		// WithCheckpoint 仍可覆盖整套配置。
+		seed.checkpoint.Store = g.boundCheckpointStore
+		seed.checkpoint.Timeout = DefaultCheckpointTimeout
+	}
+	config, _, err := runnable.ResolveComponentOptions(seed, runnable.OptionsFromSpecs(dispatch.config)...)
 	if err != nil {
 		return nil, runSetup{}, fmt.Errorf("resolve graph options: %w", err)
 	}

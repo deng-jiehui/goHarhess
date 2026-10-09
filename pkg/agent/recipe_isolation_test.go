@@ -45,6 +45,20 @@ type outputRecorder struct {
 	outputs [][]schema.Message
 }
 
+func (r *outputRecorder) Name() string {
+	if n, ok := r.Agent.(runnable.Named); ok {
+		return n.Name()
+	}
+	return ""
+}
+
+func (r *outputRecorder) Description() string {
+	if n, ok := r.Agent.(runnable.Named); ok {
+		return n.Description()
+	}
+	return ""
+}
+
 func (r *outputRecorder) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
 	output, err := r.Agent.Invoke(ctx, messages, options...)
 	r.mu.Lock()

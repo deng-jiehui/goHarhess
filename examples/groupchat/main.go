@@ -24,24 +24,25 @@ type chatState struct {
 
 func main() {
 	ctx := context.Background()
+	names := []string{"analyst", "critic"}
 	members := []agent.Agent{
-		mustAgent("analyst", "analyst: finding recorded", "analyst: summary posted"),
-		mustAgent("critic", "critic: risk noted", "critic: follow-up"),
+		mustAgent(names[0], "analyst: finding recorded", "analyst: summary posted"),
+		mustAgent(names[1], "critic: risk noted", "critic: follow-up"),
 	}
 	pick := func(_ context.Context, s *chatState) error {
 		// 轮询选择器：接替上一个发言者。
-		for i, m := range members {
-			if m.Name() == s.Next {
-				s.Next = members[(i+1)%len(members)].Name()
+		for i, name := range names {
+			if name == s.Next {
+				s.Next = names[(i+1)%len(names)]
 				return nil
 			}
 		}
-		s.Next = members[0].Name()
+		s.Next = names[0]
 		return nil
 	}
 	speak := func(ctx context.Context, s *chatState) error {
-		for _, m := range members {
-			if m.Name() == s.Next {
+		for i, m := range members {
+			if names[i] == s.Next {
 				out, err := m.Invoke(ctx, s.Messages)
 				s.Messages = append(s.Messages, out...)
 				s.Round++
