@@ -77,6 +77,61 @@ func TestRuntimeAbandonCountsAndAlerts(t *testing.T) {
 	waitAbandoned(t, runtime, "slow", 0)
 }
 
+// 复核点：放弃判定收尾的是工具原始 span（同一 SpanID，真实耗时到判定
+// 时刻）；worker 随后退出只补退出事件，不再发第二个终态改写超时结论。
+func TestRuntimeAbandonClosesOriginalSpan(t *testing.T) {
+	release := make(chan struct{})
+	runtime := mustRuntime(t, nil)
+	binding := registerTool(t, runtime, stuckTool("slow", release, nil))
+
+	type toolEvent struct {
+		phase  observe.Phase
+		spanID string
+		err    error
+		attrs  map[string]any
+	}
+	events := make(chan toolEvent, 8)
+	observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
+		if event.Kind == observe.KindTool {
+			events <- toolEvent{phase: event.Phase, spanID: event.Trace.SpanID, err: event.Err, attrs: event.Attrs}
+		}
+	})
+	ctx := observe.With(context.Background(), observer)
+
+	_, err := runtime.NewScope(1, 20*time.Millisecond).Execute(ctx, binding, CallInput{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute error = %v, want deadline exceeded", err)
+	}
+
+	start := <-events
+	abandoned := <-events
+	if start.phase != observe.PhaseStart {
+		t.Fatalf("first event phase = %s, want start", start.phase)
+	}
+	var abandonErr *AbandonedError
+	if abandoned.phase != observe.PhaseError || !errors.As(abandoned.err, &abandonErr) {
+		t.Fatalf("second event = %+v, want abandon error", abandoned)
+	}
+	if abandoned.spanID != start.spanID {
+		t.Fatalf("abandon event span %s != tool start span %s: original record must be closed", abandoned.spanID, start.spanID)
+	}
+	if abandoned.attrs["tool.abandoned"] != true {
+		t.Fatalf("abandon attrs = %v", abandoned.attrs)
+	}
+
+	// 放行 worker 退出：补一条退出事件（同 span），随后不应再有终态。
+	close(release)
+	exit := <-events
+	if exit.phase != observe.PhaseEvent || exit.spanID != start.spanID || exit.attrs["tool.abandoned_exit"] != true {
+		t.Fatalf("exit event = %+v", exit)
+	}
+	select {
+	case extra := <-events:
+		t.Fatalf("unexpected extra terminal/duplicate event after exit: %+v", extra)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // 同一工具的未归还执行达到阈值后新调用直接拒绝；归还后自动恢复。
 func TestRuntimeBreakerRejectsAfterAbandonThreshold(t *testing.T) {
 	config := defaultRuntimeConfig()

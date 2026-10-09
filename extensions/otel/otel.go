@@ -40,13 +40,15 @@ type bridge struct {
 	// spans 按 traceID -> 框架 spanID 登记本观测窗口内的全部 span。
 	// 已结束的 span 仍保留映射：节点结束后才发射的子操作（如
 	// checkpoint save）需要真实父上下文才能留在同一条追踪里；
-	// run 收尾时按父链删除以该 run 为根的整棵子树。
+	// run 收尾只回收已结束的子孙记录，仍在执行的后代（如超时后
+	// 未退出的后台工具）保留到其结束事件到达时再收尾并自清。
 	spans map[string]map[string]spanEntry
 }
 
 type spanEntry struct {
 	span   trace.Span
 	parent string
+	ended  bool
 }
 
 func (b *bridge) OnEvent(ctx context.Context, event observe.Event) {
@@ -83,14 +85,24 @@ func (b *bridge) finish(event observe.Event, err error) {
 	b.mu.Lock()
 	traceSpans := b.spans[event.Trace.TraceID]
 	entry, ok := traceSpans[event.Trace.SpanID]
-	// 清理边界：run 收尾删除整棵子树（含自身），祖先与兄弟记录保留到
-	// 各自 run 收尾——嵌套图的子 run 不会误清父级；无父级的独立根操作
-	// （如直接调用模型）也在自身结束时清理，否则记录会随调用次数
-	// 无限累积。先收集完整集合再删除，避免中途断链漏清。
-	if event.Kind == observe.KindRun || event.Trace.ParentSpanID == "" {
+	if ok {
+		entry.ended = true
+		traceSpans[event.Trace.SpanID] = entry
+	}
+	// 清理边界：run 收尾或无父级的独立根操作结束时，只删除已结束的
+	// 子孙记录（先收集完整集合再删除，避免中途断链漏清）；嵌套图的
+	// 子 run 不会误清父级。仍在执行的后代保留登记——其祖先被删除后
+	// 它成为孤儿，结束事件到达时收尾原记录并自清，保证后台操作的
+	// 真实耗时与结果能正确上报。
+	sweep := event.Kind == observe.KindRun || event.Trace.ParentSpanID == ""
+	if !sweep && ok && entry.parent != "" {
+		_, sweep = traceSpans[entry.parent]
+		sweep = !sweep
+	}
+	if sweep {
 		doomed := map[string]bool{}
 		for id, e := range traceSpans {
-			if id == event.Trace.SpanID || descendantOf(traceSpans, e, event.Trace.SpanID) {
+			if e.ended && (id == event.Trace.SpanID || descendantOf(traceSpans, e, event.Trace.SpanID)) {
 				doomed[id] = true
 			}
 		}

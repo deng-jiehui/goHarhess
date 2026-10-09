@@ -199,3 +199,48 @@ func TestNestedRunEndKeepsParentSpans(t *testing.T) {
 		t.Fatalf("save parent=%s want node %s", got, nodeSpan.SpanContext().SpanID())
 	}
 }
+
+// TestBackgroundToolEndAfterRunClosesRealSpan 复核点：图超时先返回、后台
+// 工具随后才退出时，run 收尾只回收已结束记录；工具的结束事件必须收尾
+// 其原始 span（真实耗时、正确父级），而不是补一条瞬时记录。
+func TestBackgroundToolEndAfterRunClosesRealSpan(t *testing.T) {
+	recorder, tracer := newRecorder(t)
+	ctx := observe.With(context.Background(), otel.Observer(tracer))
+
+	base := time.Now()
+	runTrace := observe.Trace{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", RunID: "r1", SpanID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	nodeTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "cccccccccccccccccccccccccccccccc", ParentSpanID: runTrace.SpanID}
+	toolTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "dddddddddddddddddddddddddddddddd", ParentSpanID: nodeTrace.SpanID}
+	toolEnd := observe.Event{Kind: observe.KindTool, Phase: observe.PhaseEnd, Name: "slow", Trace: toolTrace}
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseStart, Name: "g", Trace: runTrace, Time: base})
+	observe.Emit(ctx, event(observe.PhaseStart, nodeTrace))
+	observe.Emit(ctx, observe.Event{Kind: observe.KindTool, Phase: observe.PhaseStart, Name: "slow", Trace: toolTrace, Time: base})
+	observe.Emit(ctx, event(observe.PhaseEnd, nodeTrace))
+	// 图超时先返回：节点与 run 收尾，但工具仍在后台执行。
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseEnd, Name: "g", Trace: runTrace, Time: base.Add(10 * time.Millisecond), Duration: 10 * time.Millisecond})
+	// 工具随后才退出：结束事件必须找到并收尾原始记录。
+	toolEnd.Time = base.Add(25 * time.Millisecond)
+	toolEnd.Duration = 25 * time.Millisecond
+	observe.Emit(ctx, toolEnd)
+
+	var nodeSpan, toolSpan sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		switch s.Name() {
+		case "node:node":
+			nodeSpan = s
+		case "tool:slow":
+			toolSpan = s
+		}
+	}
+	if nodeSpan == nil || toolSpan == nil {
+		t.Fatalf("spans=%v", recorder.Ended())
+	}
+	if got := toolSpan.Parent().SpanID(); got != nodeSpan.SpanContext().SpanID() {
+		t.Fatalf("tool parent=%s want node %s", got, nodeSpan.SpanContext().SpanID())
+	}
+	// 原始 span 收尾：起止时间对应真实执行区间，不是补发的瞬时记录。
+	if got := toolSpan.EndTime().Sub(toolSpan.StartTime()); got != 25*time.Millisecond {
+		t.Fatalf("tool span duration=%v", got)
+	}
+}

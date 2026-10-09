@@ -247,16 +247,13 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 
 	// track 串行化「执行完成」与「登记放弃」的判定：后台 worker 完成时在同一
 	// 临界区确认是否已登记，未登记则不归还；取消路径在同一临界区确认执行尚
-	// 未完成才登记。每次执行最多登记一次、归还一次。
-	var track struct {
-		mu        sync.Mutex
-		finished  bool
-		abandoned bool
-	}
+	// 未完成才登记。每次执行最多登记一次、归还一次。invocation 由 worker
+	// 发布：放弃判定可直接收尾原工具 span，不必另起记录。
+	var track executionTrack
 	completed := make(chan executionResult, 1)
 	go func() {
 		defer release(s.runtime.workers)
-		result, err := s.runtime.invoke(control, s.semaphore, binding, input, options)
+		result, err := s.runtime.invoke(control, s.semaphore, binding, input, options, &track)
 		track.mu.Lock()
 		track.finished = true
 		wasAbandoned := track.abandoned
@@ -275,15 +272,24 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 			return res.result, res.err
 		}
 		track.abandoned = true
+		invocation := track.invocation
 		count := s.runtime.markAbandoned(binding.spec.Name)
 		track.mu.Unlock()
 		if hasObserver {
-			s.runtime.alertAbandoned(ctx, binding.spec, alertInput, count, control.Err())
+			s.runtime.alertAbandoned(ctx, binding.spec, alertInput, count, control.Err(), invocation)
 		}
 		return Result{}, control.Err()
 	case completed := <-completed:
 		return completed.result, completed.err
 	}
+}
+
+// executionTrack 在 Execute 取消路径与后台 worker 之间共享执行状态。
+type executionTrack struct {
+	mu         sync.Mutex
+	finished   bool
+	abandoned  bool
+	invocation observe.Invocation
 }
 
 // abandonedCount 返回该工具当前未归还的执行数。
@@ -310,21 +316,47 @@ func (r *Runtime) settleAbandoned(name string) {
 	r.abandoned[name]--
 }
 
-// alertAbandoned 把放弃事件报告给观测者：载荷携带该工具当前的未归还数
+// alertAbandoned 把放弃判定报告给观测者：载荷携带该工具当前的未归还数
 // 与熔断阈值。调用方 ctx 可能已取消，告警仍在原调用上下文派发。
-func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput, count int, cause error) {
-	metadata := observe.CloneMetadata(input.Metadata)
-	metadata["tool.read_only"] = spec.IsReadOnly
-	metadata["tool.file_access"] = spec.FileAccess
-	alertCtx, invocation := observe.Begin(ctx, "tool", spec.Name, metadata)
+// invocation 非零时直接收尾原工具 span——真实耗时到放弃时刻为止，
+// 不挂着等后台 worker 退出；worker 尚未进入 BeginCallback 时退回
+// 独立告警 span。
+func (r *Runtime) alertAbandoned(ctx context.Context, spec Spec, input CallInput, count int, cause error, invocation observe.Invocation) {
 	alert := &AbandonedError{ToolName: spec.Name, Abandoned: count, Threshold: r.config.MaxAbandoned, Err: cause}
-	event := observe.EventOf(invocation.WithPhase(observe.PhaseError), observe.KindTool, map[string]any{
+	attrs := map[string]any{
 		"tool.abandoned":           true,
 		"tool.abandoned_count":     count,
 		"tool.abandoned_threshold": r.config.MaxAbandoned,
-	})
+	}
+	if invocation.Component != "" {
+		event := observe.EventOf(invocation.WithPhase(observe.PhaseError), observe.KindTool, attrs)
+		event.Err = alert
+		observe.EmitPayload(ctx, event, input)
+		return
+	}
+	metadata := observe.CloneMetadata(input.Metadata)
+	metadata["tool.read_only"] = spec.IsReadOnly
+	metadata["tool.file_access"] = spec.FileAccess
+	alertCtx, standalone := observe.Begin(ctx, "tool", spec.Name, metadata)
+	event := observe.EventOf(standalone.WithPhase(observe.PhaseError), observe.KindTool, attrs)
 	event.Err = alert
 	observe.EmitPayload(alertCtx, event, input)
+}
+
+// emitAbandonedExit 在后台 worker 真正退出时补一条退出事件：原 span 已于
+// 放弃判定时以 AbandonedError 收尾，这里只记录 worker 的最终退出结果，
+// 不再发 end——不能把已上报的超时改写成成功。
+func emitAbandonedExit(ctx context.Context, invocation observe.Invocation, err error) {
+	if invocation.Component == "" {
+		return
+	}
+	event := observe.EventOf(invocation.WithPhase(observe.PhaseEvent), observe.KindTool, map[string]any{
+		"tool.abandoned_exit": true,
+	})
+	if err != nil {
+		event.Err = err
+	}
+	observe.Emit(ctx, event)
 }
 
 func effectiveTimeout(configured time.Duration) time.Duration {
@@ -346,6 +378,7 @@ func (r *Runtime) invoke(
 	binding *Binding,
 	input CallInput,
 	options []runnable.Option,
+	track *executionTrack,
 ) (result Result, err error) {
 	spec := binding.spec
 	state := stateFromContext(control)
@@ -357,7 +390,30 @@ func (r *Runtime) invoke(
 	ctx, cleanup := bindContext(control, control, state)
 	defer cleanup()
 	ctx, invocation := BeginCallback(ctx, spec, input)
-	defer func() { EndCallback(ctx, invocation, spec, input, result, err) }()
+	// 把真实 span 发布给取消路径：放弃判定可直接收尾它。若放弃已先行
+	// （BeginCallback 晚于判定到达），立即收尾刚开的 span。
+	track.mu.Lock()
+	track.invocation = invocation
+	abandoned := track.abandoned
+	track.mu.Unlock()
+	if abandoned && invocation.Component != "" {
+		alert := &AbandonedError{ToolName: spec.Name, Abandoned: r.abandonedCount(spec.Name), Threshold: r.config.MaxAbandoned}
+		event := observe.EventOf(invocation.WithPhase(observe.PhaseError), observe.KindTool, map[string]any{"tool.abandoned": true})
+		event.Err = alert
+		observe.EmitPayload(ctx, event, input)
+	}
+	defer func() {
+		track.mu.Lock()
+		wasAbandoned := track.abandoned
+		track.mu.Unlock()
+		if wasAbandoned {
+			// 原 span 已在放弃判定时以错误收尾：补退出事件保留后台
+			// worker 的最终退出信息，但不能把超时改写成成功。
+			emitAbandonedExit(ctx, invocation, err)
+			return
+		}
+		EndCallback(ctx, invocation, spec, input, result, err)
+	}()
 	defer recoverPanic("user extension zone", &result, &err)
 	result, err = r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
 	if err != nil {
