@@ -122,12 +122,11 @@ assembler, err := contextengine.NewContextBuilder(contextengine.Config{
 将 Context Engine 和 Store 配置到 Agent：
 
 ```go
-value, err := agent.New(agent.BaseConfig{
-    Name:            "support-agent",
-    Model:           model,
-    ContextBuilder:  assembler,
-    CheckpointStore: store,
-})
+value, err := agent.New(model,
+    agent.WithName("support-agent"),
+    agent.WithContextBuilder(assembler),
+    agent.WithCheckpointStore(store),
+)
 ```
 
 运行时提供会话 ID：
@@ -210,9 +209,7 @@ custom := runnable.Func[contextengine.Request, contextengine.Result](func(
     return standard.Invoke(ctx, request)
 })
 
-value, err := agent.NewReactAgent(agent.ReactAgentConfig{
-    BaseConfig: agent.BaseConfig{Model: model},
-}, agent.WithContextBuilder(custom))
+value, err := agent.New(model, agent.WithContextBuilder(custom))
 ```
 
 `Stats` 包含输入/输出 Token、稳定前缀大小、Role 修复数、丢弃 Turn 数、截断消息数和 Prompt Cache 对齐状态。

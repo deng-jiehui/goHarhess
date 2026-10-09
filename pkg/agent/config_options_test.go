@@ -22,22 +22,18 @@ func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
 		gotOptions = opts
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})
-	value, err := agent.NewBasicAgent(
-		agent.BaseConfig{},
-		agent.WithName("configured"),
+	value, err := agent.New(model, agent.WithName("configured"),
 		agent.WithDescription("configured by options"),
 		agent.WithSystemMessage("system policy"),
-		agent.WithModel(model),
 		agent.WithMaxDepth(5),
 		agent.WithTimeout(time.Second),
 		agent.WithMaxConcurrency(2),
-		agent.WithMaxRetries(1),
-		agent.WithRetryBackoff(0),
+		agent.WithToolRetries(1),
+		agent.WithToolRetryBackoff(0),
 		agent.WithMaxTokens(1234),
 		agent.WithMaxLLMCalls(4),
 		agent.WithCheckpointTimeout(time.Second),
-		agent.WithExtraGenerateConfig(llm.GenerateConfig{"temperature": 0.2, "lang": "provider-specific"}),
-	)
+		agent.WithExtraGenerateConfig(llm.GenerateConfig{"temperature": 0.2, "lang": "provider-specific"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +59,7 @@ func TestAgentLanguageDoesNotBecomeProviderGenerateConfig(t *testing.T) {
 		gotOptions = opts
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	value, err := agent.New(model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +83,7 @@ func TestWithContextBuilderLambdaReplacesDefaultContextNode(t *testing.T) {
 		called = true
 		return contextengine.Result{Messages: []schema.Message{schema.UserMessage("custom context")}}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model}, agent.WithContextBuilder(builder))
+	value, err := agent.New(model, agent.WithContextBuilder(builder))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,17 +111,17 @@ func TestAgentInitializationRejectsUnsafeNumericOptions(t *testing.T) {
 		{name: "depth", opt: agent.WithMaxDepth(0)},
 		{name: "timeout", opt: agent.WithTimeout(-time.Second)},
 		{name: "concurrency", opt: agent.WithMaxConcurrency(1000)},
-		{name: "retries", opt: agent.WithMaxRetries(-1)},
-		{name: "backoff", opt: agent.WithRetryBackoff(-time.Second)},
+		{name: "retries", opt: agent.WithToolRetries(-1)},
+		{name: "backoff", opt: agent.WithToolRetryBackoff(-time.Second)},
 		{name: "tokens", opt: agent.WithMaxTokens(0)},
 		{name: "LLM calls", opt: agent.WithMaxLLMCalls(0)},
 		{name: "checkpoint timeout", opt: agent.WithCheckpointTimeout(-time.Second)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := agent.NewBasicAgent(agent.BaseConfig{}, test.opt)
+			_, err := agent.New(nil, test.opt)
 			if err == nil || !strings.Contains(err.Error(), "configure agent") {
-				t.Fatalf("NewBasicAgent error = %v", err)
+				t.Fatalf("agent.New error = %v", err)
 			}
 		})
 	}

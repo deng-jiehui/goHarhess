@@ -44,9 +44,6 @@ func NewRateLimitedModel(model ChatModel, config RateLimitConfig) (*RateLimitedM
 
 func (m *RateLimitedModel) Capabilities() Capabilities { return m.model.Capabilities() }
 
-// UnwrapModel 返回被包装的下层模型，供策略链检查与重组使用。
-func (m *RateLimitedModel) UnwrapModel() ChatModel { return m.model }
-
 // Policy 返回生效中的限流配置。
 func (m *RateLimitedModel) Policy() RateLimitConfig {
 	return RateLimitConfig{MaxConcurrent: m.maxConcurrent, MinInterval: m.minInterval}

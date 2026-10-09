@@ -23,7 +23,7 @@ func TestConversationCheckpointPreservesCallerSystemMessage(t *testing.T) {
 		calls = append(calls, schema.CloneMessages(request.Messages))
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{SystemMessage: "agent policy", Model: model, CheckpointStore: store})
+	value, err := agent.New(model, agent.WithSystemMessage("agent policy"), agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,14 +88,7 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 		}
 		return []schema.Message{schema.AssistantMessage(fmt.Sprintf("answer-%d", call))}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name:            "persistent",
-		SystemMessage:   "stable policy",
-		Model:           model,
-		ContextBuilder:  assembler,
-		CheckpointStore: store,
-		MaxTokens:       100,
-	})
+	value, err := agent.New(model, agent.WithName("persistent"), agent.WithSystemMessage("stable policy"), agent.WithContextBuilder(assembler), agent.WithCheckpointStore(store), agent.WithMaxTokens(100))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +153,7 @@ func TestConversationMetadataFlowsThroughContextNotState(t *testing.T) {
 		mu.Unlock()
 		return []schema.Message{schema.AssistantMessage("ok")}, nil
 	})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{
-		Model: model, CheckpointStore: store,
-	})
+	value, err := agent.New(model, agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +214,7 @@ func TestConversationMetadataFlowsThroughContextNotState(t *testing.T) {
 }
 
 func TestConversationIDRequiresCheckpointStore(t *testing.T) {
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel()})
+	value, err := agent.New(llm.NewScriptedModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,13 +225,7 @@ func TestConversationIDRequiresCheckpointStore(t *testing.T) {
 }
 
 func TestCheckpointWriteIsBoundedAfterSuccessfulRun(t *testing.T) {
-	value, err := agent.NewBasicAgent(
-		agent.BaseConfig{
-			Model:           llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")}),
-			CheckpointStore: blockingCheckpointStore{},
-		},
-		agent.WithCheckpointTimeout(20*time.Millisecond),
-	)
+	value, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")}), agent.WithCheckpointStore(blockingCheckpointStore{}), agent.WithCheckpointTimeout(20*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}

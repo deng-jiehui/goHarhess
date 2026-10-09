@@ -21,29 +21,23 @@ import (
 func TestResumeSkipsCompletedToolCalls(t *testing.T) {
 	var echoRuns, askRuns atomic.Int32
 	var echoKey atomic.Value
-	value, err := agent.New(agent.BaseConfig{
-		Name: "pending-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-echo", "echo", `{}`),
-				schema.NewFunctionToolCallBlock("call-ask", "ask", `{}`))},
-			[]schema.Message{schema.AssistantMessage("finished")}),
-		Tools: []tool.Tool{
-			tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
-				echoRuns.Add(1)
-				echoKey.Store(input.IdempotencyKey)
-				return tool.TextResult("echoed"), nil
-			}),
-			tool.NewFunctionTool(tool.Spec{Name: "ask"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
-				askRuns.Add(1)
-				answer, err := graph.Interrupt(ctx, "approve?")
-				if err != nil {
-					return tool.Result{}, err
-				}
-				return tool.TextResult(fmt.Sprintf("answer:%v", answer)), nil
-			}),
-		},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-echo", "echo", `{}`),
+			schema.NewFunctionToolCallBlock("call-ask", "ask", `{}`))},
+		[]schema.Message{schema.AssistantMessage("finished")}), agent.WithName("pending-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
+		echoRuns.Add(1)
+		echoKey.Store(input.IdempotencyKey)
+		return tool.TextResult("echoed"), nil
+	}),
+		tool.NewFunctionTool(tool.Spec{Name: "ask"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
+			askRuns.Add(1)
+			answer, err := graph.Interrupt(ctx, "approve?")
+			if err != nil {
+				return tool.Result{}, err
+			}
+			return tool.TextResult(fmt.Sprintf("answer:%v", answer)), nil
+		})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,21 +92,17 @@ func TestResumeSkipsCompletedToolCalls(t *testing.T) {
 func TestIdempotencyKeyScopesToRun(t *testing.T) {
 	var mu sync.Mutex
 	var keys []string
-	value, err := agent.New(agent.BaseConfig{
-		Name: "scope-agent",
-		// 两个运行共用同一脚本序列：各自一轮工具调用 + 一轮终结。
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{}`))},
-			[]schema.Message{schema.AssistantMessage("done")},
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{}`))},
-			[]schema.Message{schema.AssistantMessage("done")}),
-		Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			keys = append(keys, input.IdempotencyKey)
-			return tool.TextResult("ok"), nil
-		})},
-	})
+	// 两个运行共用同一脚本序列：各自一轮工具调用 + 一轮终结。
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{}`))},
+		[]schema.Message{schema.AssistantMessage("done")},
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "echo", `{}`))},
+		[]schema.Message{schema.AssistantMessage("done")}), agent.WithName("scope-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		keys = append(keys, input.IdempotencyKey)
+		return tool.TextResult("ok"), nil
+	})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,18 +135,12 @@ func TestResumeReplaysCallJournalsInOrder(t *testing.T) {
 			return tool.TextResult(fmt.Sprintf("%s:%v", name, answer)), nil
 		}
 	}
-	value, err := agent.New(agent.BaseConfig{
-		Name: "journal-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-a", "callA", `{}`),
-				schema.NewFunctionToolCallBlock("call-b", "callB", `{}`))},
-			[]schema.Message{schema.AssistantMessage("finished")}),
-		Tools: []tool.Tool{
-			tool.NewFunctionTool(tool.Spec{Name: "callA"}, approving("A", &aRuns)),
-			tool.NewFunctionTool(tool.Spec{Name: "callB"}, approving("B", &bRuns)),
-		},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-a", "callA", `{}`),
+			schema.NewFunctionToolCallBlock("call-b", "callB", `{}`))},
+		[]schema.Message{schema.AssistantMessage("finished")}), agent.WithName("journal-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "callA"}, approving("A", &aRuns)),
+		tool.NewFunctionTool(tool.Spec{Name: "callB"}, approving("B", &bRuns))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,21 +265,17 @@ func TestResumeContinuesChildExecutionUnderToolCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	var toolRuns atomic.Int32
-	value, err := agent.New(agent.BaseConfig{
-		Name: "child-tool-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-c", "spawn", `{}`))},
-			[]schema.Message{schema.AssistantMessage("finished")}),
-		Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "spawn"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
-			toolRuns.Add(1)
-			out, runErr := child.Invoke(ctx, "seed")
-			if runErr != nil {
-				return tool.Result{}, runErr
-			}
-			return tool.TextResult(out), nil
-		})},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-c", "spawn", `{}`))},
+		[]schema.Message{schema.AssistantMessage("finished")}), agent.WithName("child-tool-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "spawn"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
+		toolRuns.Add(1)
+		out, runErr := child.Invoke(ctx, "seed")
+		if runErr != nil {
+			return tool.Result{}, runErr
+		}
+		return tool.TextResult(out), nil
+	})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,18 +325,12 @@ func TestParallelToolCallsSpawnDistinctChildren(t *testing.T) {
 			return tool.TextResult(out), nil
 		}
 	}
-	value, err := agent.New(agent.BaseConfig{
-		Name: "dup-child-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-a", "spawnA", `{}`),
-				schema.NewFunctionToolCallBlock("call-b", "spawnB", `{}`))},
-			[]schema.Message{schema.AssistantMessage("finished")}),
-		Tools: []tool.Tool{
-			tool.NewFunctionTool(tool.Spec{Name: "spawnA"}, spawn("A")),
-			tool.NewFunctionTool(tool.Spec{Name: "spawnB"}, spawn("B")),
-		},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-a", "spawnA", `{}`),
+			schema.NewFunctionToolCallBlock("call-b", "spawnB", `{}`))},
+		[]schema.Message{schema.AssistantMessage("finished")}), agent.WithName("dup-child-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "spawnA"}, spawn("A")),
+		tool.NewFunctionTool(tool.Spec{Name: "spawnB"}, spawn("B"))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,18 +426,12 @@ func TestUncoordinatedNestedRunsScopeIdempotencyKeys(t *testing.T) {
 			return tool.TextResult(fmt.Sprintf("done:%d", len(out))), nil
 		}
 	}
-	value, err := agent.New(agent.BaseConfig{
-		Name: "uncoord-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-1", "enterOne", `{}`),
-				schema.NewFunctionToolCallBlock("call-2", "enterTwo", `{}`))},
-			[]schema.Message{schema.AssistantMessage("done")}),
-		Tools: []tool.Tool{
-			tool.NewFunctionTool(tool.Spec{Name: "enterOne"}, enter()),
-			tool.NewFunctionTool(tool.Spec{Name: "enterTwo"}, enter()),
-		},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-1", "enterOne", `{}`),
+			schema.NewFunctionToolCallBlock("call-2", "enterTwo", `{}`))},
+		[]schema.Message{schema.AssistantMessage("done")}), agent.WithName("uncoord-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "enterOne"}, enter()),
+		tool.NewFunctionTool(tool.Spec{Name: "enterTwo"}, enter())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,23 +462,19 @@ func TestResumePropagatesChildIdentityMismatch(t *testing.T) {
 	child := newInterruptingChildGraph(t, "inner-approve", "approve?")
 	var mu sync.Mutex
 	current := child
-	value, err := agent.New(agent.BaseConfig{
-		Name: "swap-child-agent",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{schema.NewMessage(schema.RoleAssistant,
-				schema.NewFunctionToolCallBlock("call-1", "spawn", `{}`))},
-			[]schema.Message{schema.AssistantMessage("done")}),
-		Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "spawn"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
-			mu.Lock()
-			target := current
-			mu.Unlock()
-			out, runErr := target.Invoke(ctx, "seed")
-			if runErr != nil {
-				return tool.Result{}, runErr
-			}
-			return tool.TextResult(out), nil
-		})},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{schema.NewMessage(schema.RoleAssistant,
+			schema.NewFunctionToolCallBlock("call-1", "spawn", `{}`))},
+		[]schema.Message{schema.AssistantMessage("done")}), agent.WithName("swap-child-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "spawn"}, func(ctx context.Context, _ tool.CallInput) (tool.Result, error) {
+		mu.Lock()
+		target := current
+		mu.Unlock()
+		out, runErr := target.Invoke(ctx, "seed")
+		if runErr != nil {
+			return tool.Result{}, runErr
+		}
+		return tool.TextResult(out), nil
+	})))
 	if err != nil {
 		t.Fatal(err)
 	}

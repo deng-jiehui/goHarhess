@@ -13,7 +13,7 @@ import (
 )
 
 func TestAgentPublicStreamHasSnapshotAndSingleFinalResult(t *testing.T) {
-	a, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("hello")})})
+	a, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("hello")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestAgentPublicStreamHasSnapshotAndSingleFinalResult(t *testing.T) {
 }
 
 func TestAgentPublicStreamDoesNotPublishResultAfterCommitFailure(t *testing.T) {
-	a, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("answer")}), CheckpointStore: blockingCheckpointStore{}}, agent.WithCheckpointTimeout(10*time.Millisecond))
+	a, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("answer")}), agent.WithCheckpointStore(blockingCheckpointStore{}), agent.WithCheckpointTimeout(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}

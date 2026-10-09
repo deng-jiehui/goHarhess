@@ -40,17 +40,13 @@ func TestReactAgentStartsToolOnlyAfterLLMStreamEnds(t *testing.T) {
 		firstStreamEnded:       firstStreamEnded,
 		secondCallStarted:      secondCallStarted,
 	}
-	value, err := agent.New(agent.BaseConfig{
-		Name:  "early",
-		Model: model,
-		Tools: []tool.Tool{blockingTool(
-			"early-tool",
-			"network",
-			1,
-			toolStarted,
-			allowToolEnd,
-		)},
-	})
+	value, err := agent.New(model, agent.WithName("early"), agent.WithTools(blockingTool(
+		"early-tool",
+		"network",
+		1,
+		toolStarted,
+		allowToolEnd,
+	)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,11 +103,7 @@ func TestToolBatchInterruptExecutesNoTools(t *testing.T) {
 	})
 	hookCalls := 0
 	hookCalled := make(chan struct{}, 1)
-	value, err := agent.New(agent.BaseConfig{
-		Name:  "approval",
-		Model: model,
-		Tools: []tool.Tool{makeTool("read"), makeTool("write")},
-	}, agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
+	value, err := agent.New(model, agent.WithName("approval"), agent.WithTools(makeTool("read"), makeTool("write")), agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(_ context.Context, batch tool.Batch) error {
 		hookCalls++
 		hookCalled <- struct{}{}
 		if len(batch.Calls) != 2 || batch.Calls[0].ID != "read-1" || batch.Calls[1].ID != "write-1" {
@@ -158,17 +150,13 @@ func TestReactAgentToolTimeoutJoinsAsObservation(t *testing.T) {
 		[]schema.Message{functionCallMessage("slow", "slow-1")},
 		[]schema.Message{schema.AssistantMessage("continued")},
 	)
-	value, err := agent.New(agent.BaseConfig{
-		Name:  "timeout",
-		Model: model,
-		Tools: []tool.Tool{blockingTool(
-			"slow",
-			"network",
-			1,
-			toolStarted,
-			neverRelease,
-		)},
-	})
+	value, err := agent.New(model, agent.WithName("timeout"), agent.WithTools(blockingTool(
+		"slow",
+		"network",
+		1,
+		toolStarted,
+		neverRelease,
+	)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,9 +196,7 @@ func TestReactAgentRunsToolBatchConcurrentlyAndPreservesOrder(t *testing.T) {
 		},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.New(agent.BaseConfig{
-		Name: "parallel", Model: model, Tools: []tool.Tool{first, second},
-	})
+	value, err := agent.New(model, agent.WithName("parallel"), agent.WithTools(first, second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,9 +238,7 @@ func TestReactAgentEmitsToolObservationsAsOneBatch(t *testing.T) {
 		[]schema.Message{functionCallMessage("first", "1"), functionCallMessage("second", "2")},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.New(agent.BaseConfig{
-		Name: "batch", Model: model, Tools: []tool.Tool{first, second},
-	})
+	value, err := agent.New(model, agent.WithName("batch"), agent.WithTools(first, second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +280,7 @@ func TestReactAgentHonorsPerRunParallelLimit(t *testing.T) {
 		[]schema.Message{functionCallMessage("first", "1"), functionCallMessage("second", "2")},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.New(agent.BaseConfig{Name: "limited", Model: model, Tools: []tool.Tool{first, second}})
+	value, err := agent.New(model, agent.WithName("limited"), agent.WithTools(first, second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,9 +319,7 @@ func TestReactAgentRunsStructuredToolBatchConcurrently(t *testing.T) {
 		},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.NewReactAgent(agent.ReactAgentConfig{BaseConfig: agent.BaseConfig{
-		Name: "react-parallel", Model: model, Tools: []tool.Tool{first, second},
-	}})
+	value, err := agent.New(model, agent.WithName("react-parallel"), agent.WithTools(first, second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,9 +356,7 @@ func TestAgentRejectsConflictingToolGroupLimits(t *testing.T) {
 	second := tool.NewFunctionTool(tool.Spec{
 		Name: "second", Concurrency: tool.ConcurrencyPolicy{Group: "browser", MaxParallel: 2},
 	}, nil)
-	_, err := agent.New(agent.BaseConfig{
-		Name: "invalid", Model: llm.NewScriptedModel(), Tools: []tool.Tool{first, second},
-	})
+	_, err := agent.New(llm.NewScriptedModel(), agent.WithName("invalid"), agent.WithTools(first, second))
 	if err == nil || !strings.Contains(err.Error(), "concurrency group \"browser\"") {
 		t.Fatalf("agent.New error = %v", err)
 	}
@@ -427,12 +407,7 @@ func TestReactAgentRunsMiddlewareAndCallbackWithSubject(t *testing.T) {
 		[]schema.Message{functionCallMessage("delete", "delete-1")},
 		[]schema.Message{schema.AssistantMessage("denied safely")},
 	)
-	value, err := agent.New(agent.BaseConfig{
-		Name:        "guarded",
-		Model:       model,
-		Tools:       []tool.Tool{deleteTool},
-		Middlewares: []tool.Middleware{rbac},
-	})
+	value, err := agent.New(model, agent.WithName("guarded"), agent.WithTools(deleteTool), agent.WithMiddlewares(rbac))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,14 +473,10 @@ func TestReactAgentIsolatesNestedToolMetadata(t *testing.T) {
 			return tool.TextResult(name), nil
 		})
 	}
-	value, err := agent.New(agent.BaseConfig{
-		Name: "metadata-isolation",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{functionCallMessage("first", "first"), functionCallMessage("second", "second")},
-			[]schema.Message{schema.AssistantMessage("done")},
-		),
-		Tools: []tool.Tool{makeTool("first"), makeTool("second")},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{functionCallMessage("first", "first"), functionCallMessage("second", "second")},
+		[]schema.Message{schema.AssistantMessage("done")},
+	), agent.WithName("metadata-isolation"), agent.WithTools(makeTool("first"), makeTool("second")))
 	if err != nil {
 		t.Fatal(err)
 	}

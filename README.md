@@ -3,15 +3,16 @@
 统一消费消息增量、查询进度和最终结果：[公共运行事件流](docs/public-stream.md)。本地示例：`go run ./examples/stream`。
 
 goHarness 是一个以强类型 Graph 为核心的 Go Agent 编排框架。开发者可以把 ChatModel、
-ToolNode、MCP、Retriever 等 Runnable 节点快速组装成 Agent；标准场景也可直接使用
-Basic、ReAct、Routing 和 GroupChat 预置图配方。
+ToolNode、MCP、Retriever 等 Runnable 节点快速组装成 Agent；标准场景可直接使用
+Basic、ReAct 预置图配方，主管路由与群聊等编排模式见 `examples/routing` 与
+`examples/groupchat` 中的门面实现。
 
 ## 项目特点
 
 - 运行时 State Graph：图边界保持强类型，节点通过 Pre/Post Handler 复用纯 Runnable
 - 统一的 `runnable.Runnable[I, O]`，连接 ChatModel、ToolNode、Agent 与 Graph
 - `llm.ChatModelNode`、`tool.ToolsNode`、Retriever、MCP 和 `agent.AgentNode` 提供可识别的编译期节点类别
-- Basic、ReAct、Routing 和 GroupChat 预置图，减少标准 Agent 样板代码
+- Basic、ReAct 预置图与 `agent.New(model, opts...)` 自动配方选择，减少标准 Agent 样板代码
 - OpenAI-compatible 模型适配、SSE 流式输出和推理内容标准化
 - 本地 Tool、独立 ToolsNode、MCP 动态工具发现与统一函数调用消息协议
 - 工具参数校验、并发调度、Middleware、身份信息和托管 HTTP 客户端
@@ -37,11 +38,10 @@ go run ./examples/basic
 `llm -> tools -> llm` ReAct 图，并输出执行结果。
 
 ```go
-assistant, err := agent.New(agent.BaseConfig{
-    Name:  "assistant",
-    Model: model,
-    Tools: []tool.Tool{echoTool},
-})
+assistant, err := agent.New(model,
+    agent.WithName("assistant"),
+    agent.WithTools(echoTool),
+)
 
 messages, err := assistant.Invoke(ctx, []schema.Message{
     schema.NewMessage(schema.RoleUser, schema.NewTextBlock("please use echo")),
@@ -111,10 +111,10 @@ if errors.Is(err, graph.ErrInterrupted) {
 串行化同一会话。完成后的 Resume 直接读取已保存结果，不再重跑节点。
 使用方式与旧格式边界见 [统一检查点](docs/checkpoints.md)。
 
-需要审批、检索分支、并行任务或领域状态时，使用 `graph.NewGraph[I, O]` 直接组合
-ChatModelNode、ToolsNode、MCP 节点或其他 Runnable。Provider 模型通过
-`llm.NewChatModelNode(model)` 接入图；图只声明公开输入输出，每次运行的
-`*State` 由 State Factory 创建，通过 Pre/Post Handler 与纯节点衔接。完整说明见
+需要审批、检索分支、并行任务或领域状态时，用 `graph.NewState[S]` 门面组合
+ChatModelNode、ToolsNode、MCP 节点或其他 Runnable。State 类型即图输入输出，
+节点、边、单次求值路由、并行与动态分派都是编译期校验的链式调用。
+Provider 模型通过 `llm.NewChatModelNode(model)` 接入图。完整说明见
 [中文使用手册](docs/使用手册.md)。
 
 ## 模块结构
@@ -125,7 +125,7 @@ ChatModelNode、ToolsNode、MCP 节点或其他 Runnable。Provider 模型通过
 | `pkg/runnable` | Runnable、流式、批处理和选项计划 |
 | `pkg/graph` | Graph、运行时 State、节点适配、条件边、并行、编译与执行 |
 | `pkg/llm` | LLM 模型接口、Provider 注册和 OpenAI-compatible 适配器 |
-| `pkg/agent` | Basic、ReAct、Routing 和 GroupChat Agent |
+| `pkg/agent` | `agent.New` 自动配方选择的 Basic、ReAct Agent |
 | `pkg/tool` | 工具接口、公开 Runtime、Middleware、并发策略和 ToolsNode |
 | `pkg/callback` | Context 注册、同步生命周期分发和实时 EventStream |
 | `pkg/contextengine` | Token 预算、上下文裁切和 Prompt Cache 对齐 |

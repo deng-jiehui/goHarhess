@@ -163,11 +163,10 @@ func main() {
 		return nil
 	})
 
-	parent, err := agent.New(agent.BaseConfig{
-		Name:  "lead",
-		Model: parentModel,
-		Tools: append(mgr.Tools(), openGate),
-	}, agent.WithBeforeToolBatch(approval))
+	parent, err := agent.New(parentModel,
+		agent.WithName("lead"),
+		agent.WithTools(append(mgr.Tools(), openGate)...),
+		agent.WithBeforeToolBatch(approval))
 	if err != nil {
 		log.Fatal(err)
 	}

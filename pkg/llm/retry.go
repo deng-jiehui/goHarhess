@@ -48,9 +48,6 @@ func NewRetryingModel(model ChatModel, config RetryConfig) (*RetryingModel, erro
 
 func (m *RetryingModel) Capabilities() Capabilities { return m.model.Capabilities() }
 
-// UnwrapModel 返回被包装的下层模型，供策略链检查与重组使用。
-func (m *RetryingModel) UnwrapModel() ChatModel { return m.model }
-
 // Policy 返回生效中的重试配置，Retryable 回填为实际使用的判定函数。
 func (m *RetryingModel) Policy() RetryConfig {
 	config := m.config

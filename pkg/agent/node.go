@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/graph"
@@ -26,6 +27,19 @@ func NewAgentNode(value Agent) (*AgentNode, error) {
 		return nil, errors.New("agent node requires an agent")
 	}
 	return &AgentNode{agent: value}, nil
+}
+
+func isNilAgent(value Agent) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (n *AgentNode) Name() string {

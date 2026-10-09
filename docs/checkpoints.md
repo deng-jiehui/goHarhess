@@ -40,7 +40,7 @@ result, err := assistant.Invoke(ctx, input, option)
 result, err = agent.Resume(ctx, assistant, option)
 ```
 
-也可以在构造 Agent 时通过 `BaseConfig.CheckpointStore` 配置存储，调用时只传 `agent.WithConversationID`。这两种方式使用同一套机制。如果同时指定 `WithCheckpoint` 和 `WithConversationID`，两处 ID 必须一致，存储以本次 `WithCheckpoint` 为准。直接使用 Graph 时传入 `graph.WithCheckpoint(store, id)`。
+也可以在构造 Agent 时通过 `agent.WithCheckpointStore` 配置存储，调用时只传 `agent.WithConversationID`。这两种方式使用同一套机制。如果同时指定 `WithCheckpoint` 和 `WithConversationID`，两处 ID 必须一致，存储以本次 `WithCheckpoint` 为准。直接使用 Graph 时传入 `graph.WithCheckpoint(store, id)`。
 
 新一轮输入使用 `Invoke` 或 `Stream`；继续未完成的运行使用 `Resume` 或 `ResumeStream`。同一会话存在未完成运行时，新一轮输入会以 `state.ErrUnfinishedRun` 被拒绝，避免覆盖尚未完成的工作。需要人工输入的挂起流程仍使用 `WithResume(interruptID, value)`，具体见 [通用交互中断](resume-input.md)。
 
@@ -76,8 +76,8 @@ result, err := assistant.Invoke(ctx, input, agent.WithConversationID(id), agent.
 ```go
 // Graph
 compiled.Invoke(ctx, input, graph.WithCheckpoint(store, id), graph.WithDurability(graph.DurabilitySync))
-// Agent：BaseConfig.CheckpointDurability 设默认值，WithDurability 按次覆盖
-assistant, _ := agent.NewBasicAgent(agent.BaseConfig{CheckpointStore: store, CheckpointDurability: graph.DurabilitySync})
+// Agent：WithCheckpointDurability 设默认值，WithDurability 按次覆盖
+assistant, _ := agent.New(model, agent.WithCheckpointStore(store), agent.WithCheckpointDurability(graph.DurabilitySync))
 assistant.Invoke(ctx, input, agent.WithConversationID(id), agent.WithDurability(graph.DurabilityAsync))
 ```
 

@@ -186,8 +186,7 @@ Graph 为每个节点创建独立子 Span；节点事件的 `Name` 是节点 ID�
 ## Agent 装配
 
 ```go
-reactAgent, err := agent.NewReactAgent(
-    agent.ReactAgentConfig{BaseConfig: agent.BaseConfig{Model: model}},
+reactAgent, err := agent.New(model,
     agent.WithName("document-agent"),
     agent.WithTools(tools...),
     agent.WithMiddlewares(rbac, masking, approval),
@@ -197,12 +196,11 @@ reactAgent, err := agent.NewReactAgent(
     agent.WithMaxConcurrency(4),
     agent.WithToolRetries(2),
     agent.WithToolRetryBackoff(100*time.Millisecond),
-    agent.WithModelRetry(llm.RetryConfig{MaxAttempts: 3, InitialDelay: 200 * time.Millisecond}),
     agent.WithMaxTokens(4096),
     agent.WithMaxLLMCalls(20),
 )
 ```
 
-`WithToolRetries`/`WithToolRetryBackoff` 只作用于只读工具的自动重试；废弃的 `WithMaxRetries`/`WithRetryBackoff` 保留为别名，两侧同时提供且值不同（含显式零值）会被拒绝——`WithToolRetries(0)` 可显式关闭重试，不会被旧字段重新启用。模型重试与限流是独立配置：`WithModelRetry` 接受 `llm.RetryConfig`（`MaxAttempts ≥ 2` 才生效），`WithModelRateLimit` 接受 `llm.RateLimitConfig`，框架保证「重试外层、限流内层」——每次真实请求都重新占用配额。构造前会检查模型外层连续的内置策略链：同类策略层已存在时拒绝重复配置；已有手工重试层且只配置限流时，若重试层正是最外层则剥下重组（保留原重试配置），否则明确拒绝。
+`WithToolRetries`/`WithToolRetryBackoff` 只作用于只读工具的自动重试；`WithToolRetries(0)` 显式关闭重试。模型重试与限流不是 Agent 配置：需要时在构造前手工包装模型，`llm.NewRetryingModel(model, llm.RetryConfig{...})` 与 `llm.NewRateLimitedModel(model, llm.RateLimitConfig{...})` 可自由嵌套组合——例如 `NewRetryingModel(NewRateLimitedModel(inner))` 得到「重试外层、限流内层」，每次真实请求都重新占用配额。
 
 Observer 注册不属于 Agent 配置；它只从运行 Context 解析。`WithMaxConcurrency` 限制工具批次并发，与观测执行模型无关。

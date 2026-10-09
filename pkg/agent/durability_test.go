@@ -27,16 +27,15 @@ func (s *gatedAgentStore) Save(ctx context.Context, c state.Checkpoint) (state.C
 }
 
 // modelStartsBeforeWrite 报告模型是否在初始进度写入被阻塞时就已开始调用。
-func modelStartsBeforeWrite(t *testing.T, cfg agent.BaseConfig, options ...runnable.Option) bool {
+func modelStartsBeforeWrite(t *testing.T, agentOpts []agent.Option, options ...runnable.Option) bool {
 	t.Helper()
 	store := &gatedAgentStore{MemoryStore: state.NewMemoryStore(), gate: make(chan struct{})}
 	started := make(chan struct{}, 1)
-	cfg.CheckpointStore = store
-	cfg.Model = llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+	model := llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 		started <- struct{}{}
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
 	})
-	a, err := agent.NewBasicAgent(cfg)
+	a, err := agent.New(model, append(agentOpts, agent.WithCheckpointStore(store))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,13 +69,13 @@ func modelStartsBeforeWrite(t *testing.T, cfg agent.BaseConfig, options ...runna
 }
 
 func TestAgentCheckpointDurabilityDefaultsToAsync(t *testing.T) {
-	if !modelStartsBeforeWrite(t, agent.BaseConfig{}) {
+	if !modelStartsBeforeWrite(t, nil) {
 		t.Fatal("default durability waited for the checkpoint write")
 	}
 }
 
 func TestAgentCheckpointDurabilityConfigAndRunOverride(t *testing.T) {
-	syncConfig := agent.BaseConfig{CheckpointDurability: graph.DurabilitySync}
+	syncConfig := []agent.Option{agent.WithCheckpointDurability(graph.DurabilitySync)}
 	if modelStartsBeforeWrite(t, syncConfig) {
 		t.Fatal("sync durability did not wait for the checkpoint write")
 	}
@@ -86,10 +85,7 @@ func TestAgentCheckpointDurabilityConfigAndRunOverride(t *testing.T) {
 }
 
 func TestAgentRejectsUnknownCheckpointDurability(t *testing.T) {
-	_, err := agent.NewBasicAgent(agent.BaseConfig{
-		Model:                llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("x")}),
-		CheckpointDurability: "eventually",
-	})
+	_, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("x")}), agent.WithCheckpointDurability("eventually"))
 	if err == nil {
 		t.Fatal("unknown durability accepted")
 	}

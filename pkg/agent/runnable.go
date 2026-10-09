@@ -55,41 +55,7 @@ func (a *ReactAgent) Transform(ctx context.Context, input *runnable.StreamReader
 	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
 }
 
-func (a *RoutingAgent) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
-	return invokeAgent(ctx, a.stream, messages, options...)
-}
-
-func (a *RoutingAgent) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	return streamAgent(ctx, a.stream, messages, options...)
-}
-
-func (a *RoutingAgent) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
-	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
-}
-
-func (a *RoutingAgent) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
-}
-
-func (a *GroupChat) Invoke(ctx context.Context, messages []schema.Message, options ...runnable.Option) ([]schema.Message, error) {
-	return invokeAgent(ctx, a.stream, messages, options...)
-}
-
-func (a *GroupChat) Stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	return streamAgent(ctx, a.stream, messages, options...)
-}
-
-func (a *GroupChat) Collect(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) ([]schema.Message, error) {
-	return runnable.CollectFromInvoke(ctx, input, a.Invoke, options...)
-}
-
-func (a *GroupChat) Transform(ctx context.Context, input *runnable.StreamReader[[]schema.Message], options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	return runnable.TransformFromInvoke(ctx, input, a.Invoke, options...)
-}
-
 var (
 	_ Agent = (*BasicAgent)(nil)
 	_ Agent = (*ReactAgent)(nil)
-	_ Agent = (*RoutingAgent)(nil)
-	_ Agent = (*GroupChat)(nil)
 )

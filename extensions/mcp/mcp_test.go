@@ -179,7 +179,7 @@ func TestMCPToolsRunInReactAgentAppendOnlyLoop(t *testing.T) {
 		}
 		return []schema.Message{schema.AssistantMessage("final:value:alpha")}, nil
 	})
-	value, err := agent.New(agent.BaseConfig{Name: "mcp-agent", Model: model, Tools: tools})
+	value, err := agent.New(model, agent.WithName("mcp-agent"), agent.WithTools(tools...))
 	if err != nil {
 		t.Fatal(err)
 	}

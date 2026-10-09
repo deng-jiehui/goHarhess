@@ -24,13 +24,11 @@ func TestAgentResumeInputControlsToolAdmission(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
 			denied := errors.New("input rejected by application")
-			value, err := agent.New(agent.BaseConfig{Name: "interactive-agent", Model: llm.NewScriptedModel(
-				[]schema.Message{functionCallMessage("echo", "call-1")}, []schema.Message{schema.AssistantMessage("finished")}),
-				Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
-					calls.Add(1)
-					return tool.TextResult("done"), nil
-				})},
-			}, agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
+			value, err := agent.New(llm.NewScriptedModel(
+				[]schema.Message{functionCallMessage("echo", "call-1")}, []schema.Message{schema.AssistantMessage("finished")}), agent.WithName("interactive-agent"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+				calls.Add(1)
+				return tool.TextResult("done"), nil
+			})), agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
 				input, err := graph.Interrupt(ctx, map[string]any{"calls": batch.Calls})
 				if err != nil {
 					return err

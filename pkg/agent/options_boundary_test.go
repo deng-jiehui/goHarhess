@@ -108,7 +108,7 @@ func (m *probeModel) Transform(ctx context.Context, in *runnable.StreamReader[ll
 func TestComponentOptionsDispatchByType(t *testing.T) {
 	builder := &probeBuilder{}
 	model := &probeModel{}
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model, ContextBuilder: builder})
+	value, err := agent.New(model, agent.WithContextBuilder(builder))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestComponentOptionsDispatchByType(t *testing.T) {
 // 无接收者的未声明类型在入口明确报错，而不是被静默吞掉。
 func TestUnknownOptionTypeFailsAtEntry(t *testing.T) {
 	type unknownConfig struct{ V int }
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")})})
+	value, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestUnknownOptionTypeFailsAtEntry(t *testing.T) {
 // 定向选项按节点路径到达配方图内部节点。
 func TestForNodeReachesRecipeModelNode(t *testing.T) {
 	model := &probeModel{}
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	value, err := agent.New(model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,13 +202,10 @@ func (t *probeTool) Stream(ctx context.Context, input tool.CallInput, opts ...ru
 
 func TestTargetedOptionsReachToolCalls(t *testing.T) {
 	valueTool := &probeTool{}
-	value, err := agent.New(agent.BaseConfig{
-		Model: llm.NewScriptedModel(
-			[]schema.Message{functionCallMessage("probe-tool", "call-1")},
-			[]schema.Message{schema.AssistantMessage("done")},
-		),
-		Tools: []tool.Tool{valueTool},
-	})
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{functionCallMessage("probe-tool", "call-1")},
+		[]schema.Message{schema.AssistantMessage("done")},
+	), agent.WithTools(valueTool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,9 +245,7 @@ func (b *budgetBuilder) Transform(ctx context.Context, in *runnable.StreamReader
 func TestContextBudgetUsesEffectiveModelConfig(t *testing.T) {
 	builder := &budgetBuilder{}
 	model := &probeModel{}
-	value, err := agent.NewBasicAgent(agent.BaseConfig{
-		Model: model, ContextBuilder: builder, MaxTokens: 32,
-	})
+	value, err := agent.New(model, agent.WithContextBuilder(builder), agent.WithMaxTokens(32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +310,7 @@ func (*providerModel) ModelInfo() llm.ModelInfo       { return llm.ModelInfo{Nam
 
 func TestProviderExtensionOptionsReachCustomModel(t *testing.T) {
 	model := &providerModel{}
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	value, err := agent.New(model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +330,7 @@ func TestProviderExtensionOptionsReachCustomModel(t *testing.T) {
 // 模型节点应用同一份快照，非幂等设置函数不会在节点端重放第二次。
 func TestTargetedModelOptionAppliesSnapshotOnce(t *testing.T) {
 	model := &probeModel{}
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	value, err := agent.New(model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,24 +362,12 @@ func TestTargetedModelOptionAppliesSnapshotOnce(t *testing.T) {
 // 自己的模型节点，子 Agent 保留自己的派生配置。
 func TestParentModelOptionsDoNotReachSubAgents(t *testing.T) {
 	childModel := &probeModel{}
-	worker, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "worker", Model: childModel, MaxTokens: 32,
-	})
+	worker, err := agent.New(childModel, agent.WithName("worker"), agent.WithMaxTokens(32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:  "router",
-			Model: llm.NewScriptedModel([]schema.Message{routingCall("worker")}),
-		},
-		SubAgents:     []agent.Agent{worker},
-		ReturnControl: false,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := router.Invoke(context.Background(), []schema.Message{schema.UserMessage("delegate")},
+	router := newSupervisorApp(t, "router", llm.NewScriptedModel([]schema.Message{routingCall("worker")}), true, 0, worker)
+	if _, err := router.Invoke(context.Background(), supervisorState{Messages: []schema.Message{schema.UserMessage("delegate")}},
 		llm.WithMaxTokens(128),
 	); err != nil {
 		t.Fatal(err)

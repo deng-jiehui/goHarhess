@@ -60,7 +60,7 @@ func TestAgentEmitsGraphLLMAndToolEventsWithSharedTrace(t *testing.T) {
 	})
 	search := tool.NewFunctionTool(tool.Spec{Name: "search", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("found"), nil })
 	model := llm.NewScriptedModel([]schema.Message{functionCallMessage("search", "call-1")}, []schema.Message{schema.AssistantMessage("answer")})
-	value, err := agent.New(agent.BaseConfig{Name: "assistant", Model: model, Tools: []tool.Tool{search}})
+	value, err := agent.New(model, agent.WithName("assistant"), agent.WithTools(search))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestAgentLLMErrorEventDoesNotReplaceBusinessError(t *testing.T) {
 		}
 	})
 	model := llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) { return nil, reason })
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: model})
+	value, err := agent.New(model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestAgentLLMUsageReachesEndEvent(t *testing.T) {
 		}
 	})
 	ctx := observe.With(context.Background(), collector)
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: usageEventModel{}})
+	value, err := agent.New(usageEventModel{})
 	if err != nil {
 		t.Fatal(err)
 	}

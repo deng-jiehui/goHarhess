@@ -36,14 +36,8 @@ func TestObserveReactParallelToolTree(t *testing.T) {
 		[]schema.Message{calls},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.NewReactAgent(agent.ReactAgentConfig{BaseConfig: agent.BaseConfig{
-		Name:  "react",
-		Model: model,
-		Tools: []tool.Tool{
-			tool.NewFunctionTool(tool.Spec{Name: "search", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("found"), nil }),
-			tool.NewFunctionTool(tool.Spec{Name: "fetch", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("page"), nil }),
-		},
-	}})
+	value, err := agent.New(model, agent.WithName("react"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "search", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("found"), nil }),
+		tool.NewFunctionTool(tool.Spec{Name: "fetch", IsReadOnly: true}, func(context.Context, tool.CallInput) (tool.Result, error) { return tool.TextResult("page"), nil })))
 	if err != nil {
 		t.Fatal(err)
 	}

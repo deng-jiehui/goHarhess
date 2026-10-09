@@ -67,16 +67,11 @@ func TestAgentGraphResumeUsesOneStoreForConversationAndExecution(t *testing.T) {
 	executionStore := &agentExecutionStore{}
 	conversationStore := executionStore
 	started := make(chan struct{})
-	first, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name:          "recoverable-basic",
-		SystemMessage: "old policy",
-		Model: llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
-			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}),
-		CheckpointStore: conversationStore,
-	})
+	first, err := agent.New(llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}), agent.WithName("recoverable-basic"), agent.WithSystemMessage("old policy"), agent.WithCheckpointStore(conversationStore))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,17 +102,12 @@ func TestAgentGraphResumeUsesOneStoreForConversationAndExecution(t *testing.T) {
 		t.Fatalf("conversation checkpoint=%#v found=%t err=%v", checkpoint, found, loadErr)
 	}
 
-	resumed, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name:          "recoverable-basic",
-		SystemMessage: "replacement policy",
-		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-			if len(request.Messages) != 2 || request.Messages[0].JoinedText("") != "replacement policy\n\ncaller policy" || request.Messages[1].JoinedText("") != "continue" {
-				t.Fatalf("restored messages=%#v", request.Messages)
-			}
-			return []schema.Message{schema.AssistantMessage("resumed")}, nil
-		}),
-		CheckpointStore: conversationStore,
-	})
+	resumed, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if len(request.Messages) != 2 || request.Messages[0].JoinedText("") != "replacement policy\n\ncaller policy" || request.Messages[1].JoinedText("") != "continue" {
+			t.Fatalf("restored messages=%#v", request.Messages)
+		}
+		return []schema.Message{schema.AssistantMessage("resumed")}, nil
+	}), agent.WithName("recoverable-basic"), agent.WithSystemMessage("replacement policy"), agent.WithCheckpointStore(conversationStore))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,14 +141,10 @@ func TestAgentPreToolResumeRunsApprovalAgainBeforeTool(t *testing.T) {
 		toolCalls.Add(1)
 		return tool.TextResult("tool-result"), nil
 	})
-	value, err := agent.New(agent.BaseConfig{
-		Name: "recoverable-react",
-		Model: llm.NewScriptedModel(
-			[]schema.Message{functionCallMessage("echo", "call-1")},
-			[]schema.Message{schema.AssistantMessage("final")},
-		),
-		Tools: []tool.Tool{echo},
-	}, agent.WithBeforeToolBatch(hook))
+	value, err := agent.New(llm.NewScriptedModel(
+		[]schema.Message{functionCallMessage("echo", "call-1")},
+		[]schema.Message{schema.AssistantMessage("final")},
+	), agent.WithName("recoverable-react"), agent.WithTools(echo), agent.WithBeforeToolBatch(hook))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,10 +174,7 @@ func TestAgentPreToolResumeUsesCurrentReactPrompt(t *testing.T) {
 	echo := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})
-	first, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{Name: "prompt-stable", Model: llm.NewScriptedModel([]schema.Message{functionCallMessage("echo", "call-1")}), Tools: []tool.Tool{echo}},
-		Prompt:     "old react prompt",
-	}, agent.WithBeforeToolBatch(hook))
+	first, err := agent.New(llm.NewScriptedModel([]schema.Message{functionCallMessage("echo", "call-1")}), agent.WithName("prompt-stable"), agent.WithTools(echo), agent.WithPrompt("old react prompt"), agent.WithBeforeToolBatch(hook))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,19 +183,12 @@ func TestAgentPreToolResumeUsesCurrentReactPrompt(t *testing.T) {
 		t.Fatalf("Invoke error=%v", err)
 	}
 	approved.Store(true)
-	second, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:  "prompt-stable",
-			Tools: []tool.Tool{echo},
-			Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-				if len(request.Messages) == 0 || !strings.Contains(request.Messages[0].JoinedText(""), "new react prompt") || strings.Contains(request.Messages[0].JoinedText(""), "old react prompt") {
-					t.Fatalf("resume model messages=%#v", request.Messages)
-				}
-				return []schema.Message{schema.AssistantMessage("final")}, nil
-			}),
-		},
-		Prompt: "new react prompt",
-	}, agent.WithBeforeToolBatch(hook))
+	second, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if len(request.Messages) == 0 || !strings.Contains(request.Messages[0].JoinedText(""), "new react prompt") || strings.Contains(request.Messages[0].JoinedText(""), "old react prompt") {
+			t.Fatalf("resume model messages=%#v", request.Messages)
+		}
+		return []schema.Message{schema.AssistantMessage("final")}, nil
+	}), agent.WithName("prompt-stable"), agent.WithTools(echo), agent.WithPrompt("new react prompt"), agent.WithBeforeToolBatch(hook))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,46 +200,31 @@ func TestAgentPreToolResumeUsesCurrentReactPrompt(t *testing.T) {
 func TestAgentRoutingResumeDoesNotRepeatCompletedChild(t *testing.T) {
 	executionStore := &agentExecutionStore{}
 	var childCalls atomic.Int32
-	worker, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "worker",
-		Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
-			childCalls.Add(1)
-			return []schema.Message{schema.AssistantMessage("worker result")}, nil
-		}),
-	})
+	worker, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+		childCalls.Add(1)
+		return []schema.Message{schema.AssistantMessage("worker result")}, nil
+	}), agent.WithName("worker"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var supervisorCalls atomic.Int32
 	modelStarted := make(chan struct{})
-	supervisor, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{
-			Name: "recoverable-routing",
-			Model: llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
-				switch supervisorCalls.Add(1) {
-				case 1:
-					return []schema.Message{routingCall("worker")}, nil
-				case 2:
-					close(modelStarted)
-					<-ctx.Done()
-					return nil, ctx.Err()
-				default:
-					return []schema.Message{schema.AssistantMessage("final")}, nil
-				}
-			}),
-		},
-		SubAgents:     []agent.Agent{worker},
-		Mode:          agent.RoutingModeSupervisor,
-		ReturnControl: true,
-		MaxSteps:      3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	supervisor := newSupervisorApp(t, "recoverable-routing", llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		switch supervisorCalls.Add(1) {
+		case 1:
+			return []schema.Message{routingCall("worker")}, nil
+		case 2:
+			close(modelStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		default:
+			return []schema.Message{schema.AssistantMessage("final")}, nil
+		}
+	}), false, 3, worker)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := supervisor.Invoke(ctx, []schema.Message{schema.UserMessage("route")}, agent.WithCheckpoint(executionStore, "routing-run"))
+		_, runErr := supervisor.Invoke(ctx, supervisorState{Messages: []schema.Message{schema.UserMessage("route")}}, graph.WithCheckpoint(executionStore, "routing-run"))
 		done <- runErr
 	}()
 	select {
@@ -275,78 +236,31 @@ func TestAgentRoutingResumeDoesNotRepeatCompletedChild(t *testing.T) {
 	if runErr := <-done; !errors.Is(runErr, graph.ErrInterrupted) {
 		t.Fatalf("Invoke error=%v", runErr)
 	}
-	output, err := agent.Resume(context.Background(), supervisor, agent.WithCheckpoint(executionStore, "routing-run"))
+	output, err := supervisor.Resume(context.Background(), graph.WithCheckpoint(executionStore, "routing-run"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if childCalls.Load() != 1 || len(output) == 0 || output[len(output)-1].JoinedText("") != "final" {
-		t.Fatalf("resume output=%#v child calls=%d", output, childCalls.Load())
-	}
-}
-
-func TestAgentGroupResumeKeepsCompletedRound(t *testing.T) {
-	executionStore := &agentExecutionStore{}
-	alpha := &recordingAgent{name: "alpha"}
-	beta := &recordingAgent{name: "beta"}
-	var approved atomic.Bool
-	selector := agent.AgentSelectorFunc(func(_ context.Context, agents []agent.Agent, state agent.SelectionState) (agent.Agent, error) {
-		if state.Round == 1 && !approved.Load() {
-			return nil, control.RequestInterrupt("approve next round", map[string]any{"round": state.Round})
-		}
-		return agents[state.Round%len(agents)], nil
-	})
-	group, err := agent.NewGroupChat(agent.GroupChatConfig{
-		BaseConfig: agent.BaseConfig{Name: "recoverable-group"},
-		Agents:     []agent.Agent{alpha, beta},
-		Selector:   selector,
-		MaxRounds:  2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = group.Invoke(context.Background(), []schema.Message{schema.UserMessage("start")}, agent.WithCheckpoint(executionStore, "group-run"))
-	if !errors.Is(err, graph.ErrInterrupted) {
-		t.Fatalf("Invoke error=%v", err)
-	}
-	if len(alpha.Calls()) != 1 || len(beta.Calls()) != 0 {
-		t.Fatalf("before resume alpha=%d beta=%d", len(alpha.Calls()), len(beta.Calls()))
-	}
-	approved.Store(true)
-	output, err := agent.Resume(context.Background(), group, agent.WithCheckpoint(executionStore, "group-run"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(alpha.Calls()) != 1 || len(beta.Calls()) != 1 || len(output) != 2 || output[0].Extra["agent_name"] != "alpha" || output[1].Extra["agent_name"] != "beta" {
-		t.Fatalf("resume output=%#v alpha=%d beta=%d", output, len(alpha.Calls()), len(beta.Calls()))
+	if childCalls.Load() != 1 || len(output.Messages) == 0 || output.Messages[len(output.Messages)-1].JoinedText("") != "final" {
+		t.Fatalf("resume output=%#v child calls=%d", output.Messages, childCalls.Load())
 	}
 }
 
 func TestAgentRoutingChildCannotOverwriteRootCheckpoint(t *testing.T) {
 	executionStore := &agentExecutionStore{}
 	childStarted := make(chan struct{})
-	worker, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "blocking-worker",
-		Model: llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
-			close(childStarted)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}),
-	})
+	worker, err := agent.New(llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		close(childStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}), agent.WithName("blocking-worker"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{Name: "root-router", Model: llm.NewScriptedModel([]schema.Message{routingCall("blocking-worker")})},
-		SubAgents:  []agent.Agent{worker},
-		Mode:       agent.RoutingModeRouter,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	router := newSupervisorApp(t, "root-router", llm.NewScriptedModel([]schema.Message{routingCall("blocking-worker")}), true, 0, worker)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := router.Invoke(ctx, []schema.Message{schema.UserMessage("route")}, agent.WithCheckpoint(executionStore, "nested-run"))
+		_, runErr := router.Invoke(ctx, supervisorState{Messages: []schema.Message{schema.UserMessage("route")}}, graph.WithCheckpoint(executionStore, "nested-run"))
 		done <- runErr
 	}()
 	select {
@@ -394,14 +308,11 @@ func TestAgentInterruptCheckpointFailureIsReturned(t *testing.T) {
 	saveErr := errors.New("agent checkpoint unavailable")
 	executionStore := &agentExecutionStore{saveErr: saveErr, failAfter: 1}
 	started := make(chan struct{})
-	value, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "checkpoint-failure",
-		Model: llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
-			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}),
-	})
+	value, err := agent.New(llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}), agent.WithName("checkpoint-failure"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,16 +346,11 @@ func TestAgentResumeRejectsTypedNil(t *testing.T) {
 func TestAgentCheckpointExternalizesConversationHistory(t *testing.T) {
 	executionStore := &agentExecutionStore{}
 	started := make(chan struct{})
-	first, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name:          "externalized",
-		SystemMessage: "policy",
-		Model: llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
-			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}),
-		CheckpointStore: executionStore,
-	})
+	first, err := agent.New(llm.NewHandlerModel(func(ctx context.Context, _ llm.Request, _ llm.Options) ([]schema.Message, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}), agent.WithName("externalized"), agent.WithSystemMessage("policy"), agent.WithCheckpointStore(executionStore))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,11 +22,7 @@ func TestReactAgentCallsToolAndContinues(t *testing.T) {
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
 
-	a, err := agent.New(agent.BaseConfig{
-		Name:  "tester",
-		Model: model,
-		Tools: []tool.Tool{echo},
-	})
+	a, err := agent.New(model, agent.WithName("tester"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +57,7 @@ func TestReactAgentAcceptsBlankArgumentsForNoArgumentTool(t *testing.T) {
 	})
 	call := schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("ping-1", "ping", `{}`))
 	model := llm.NewScriptedModel([]schema.Message{call}, []schema.Message{schema.AssistantMessage("done")})
-	value, err := agent.New(agent.BaseConfig{Model: model, Tools: []tool.Tool{ping}})
+	value, err := agent.New(model, agent.WithTools(ping))
 	if err != nil {
 		t.Fatal(err)
 	}

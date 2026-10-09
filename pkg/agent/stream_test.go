@@ -15,9 +15,7 @@ import (
 
 func TestAgentStreamPublishesLiveOutputBeforeFinalResultIsConsumed(t *testing.T) {
 	model := &burstModel{produced: make(chan struct{})}
-	value, err := agent.NewBasicAgent(
-		agent.BaseConfig{Name: "async", Model: model},
-	)
+	value, err := agent.New(model, agent.WithName("async"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +45,7 @@ func TestAgentStreamPublishesLiveOutputBeforeFinalResultIsConsumed(t *testing.T)
 }
 
 func TestBasicAgentRejectsModelStreamWithoutDone(t *testing.T) {
-	value, err := agent.NewBasicAgent(agent.BaseConfig{Model: incompleteModel{}})
+	value, err := agent.New(incompleteModel{})
 	if err != nil {
 		t.Fatal(err)
 	}

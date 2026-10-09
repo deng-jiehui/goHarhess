@@ -47,12 +47,11 @@ func main() {
 		return nil
 	})
 
-	a, err := agent.New(agent.BaseConfig{
-		Name:          "assistant",
-		SystemMessage: "You are a helpful assistant.",
-		Model:         model,
-		Tools:         []tool.Tool{echoTool},
-	}, agent.WithBeforeToolBatch(approval))
+	a, err := agent.New(model,
+		agent.WithName("assistant"),
+		agent.WithSystemMessage("You are a helpful assistant."),
+		agent.WithTool(echoTool),
+		agent.WithBeforeToolBatch(approval))
 	if err != nil {
 		log.Fatal(err)
 	}

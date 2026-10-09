@@ -43,7 +43,7 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 		}
 		return []schema.Message{schema.AssistantMessage("done")}, nil
 	})
-	value, err := agent.New(agent.BaseConfig{Name: "auto", Model: model}, agent.WithTool(echo))
+	value, err := agent.New(model, agent.WithName("auto"), agent.WithTool(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,20 +74,11 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 }
 
 func TestNewAgentWithoutToolsUsesBasicRecipe(t *testing.T) {
-	value, err := agent.New(agent.BaseConfig{Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")})})
+	value, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("ok")}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := value.(*agent.BasicAgent); !ok {
 		t.Fatalf("agent.New returned %T, want *agent.BasicAgent", value)
-	}
-}
-
-func TestBasicAgentRejectsIgnoredTools(t *testing.T) {
-	value := tool.NewFunctionTool(tool.Spec{Name: "unused"}, func(context.Context, tool.CallInput) (tool.Result, error) {
-		return tool.TextResult("unused"), nil
-	})
-	if _, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel(), Tools: []tool.Tool{value}}); err == nil {
-		t.Fatal("NewBasicAgent accepted tools it cannot execute")
 	}
 }

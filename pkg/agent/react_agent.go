@@ -29,15 +29,6 @@ Action Input: <valid JSON arguments>
 After a tool call, the framework will provide an Observation. You may repeat the cycle as needed.
 When no more tools are needed, provide the final answer directly.`
 
-type ReactAgentConfig struct {
-	BaseConfig
-	Prompt string
-	// TextReAct 显式开启文本 ReAct 兼容模式：请求中不再携带原生 Functions，
-	// 改为在提示中列出工具文本协议，并解析模型正文中的 Action/Action Input。
-	// 默认（false）只发送原生工具定义，只执行结构化 tool calls。
-	TextReAct bool
-}
-
 type ReactAgent struct {
 	*base
 	prompt    string
@@ -45,8 +36,9 @@ type ReactAgent struct {
 	recipe    *agentrecipe.Recipe
 }
 
-func NewReactAgent(cfg ReactAgentConfig, opts ...Option) (*ReactAgent, error) {
-	base, err := newBase(cfg.BaseConfig, opts...)
+// newReactAgent 构造工具驱动的 ReAct Agent；cfg 须已解析。
+func newReactAgent(cfg baseConfig) (*ReactAgent, error) {
+	base, err := newBase(cfg)
 	if err != nil {
 		return nil, err
 	}

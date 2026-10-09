@@ -56,12 +56,7 @@ tools, err := client.Tools(ctx)
 if err != nil {
     return err
 }
-agentValue, err := agent.NewReactAgent(agent.ReactAgentConfig{
-    BaseConfig: agent.BaseConfig{
-        Model: llmModel,
-        Tools: tools,
-    },
-})
+agentValue, err := agent.New(llmModel, agent.WithTools(tools...))
 ```
 
 生成的配方包含有界的 `llm -> tools -> llm` 循环。用户无需手动注册第二个工具节点。

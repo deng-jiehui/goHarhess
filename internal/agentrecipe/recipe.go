@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/stream"

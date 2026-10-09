@@ -21,12 +21,12 @@ func TestNewInputCanAbandonFailedRun(t *testing.T) {
 	store := state.NewMemoryStore()
 	var fail atomic.Bool
 	fail.Store(true)
-	a, err := agent.NewBasicAgent(agent.BaseConfig{CheckpointStore: store, Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+	a, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
 		if fail.Load() {
 			return nil, errors.New("provider rejected input")
 		}
 		return []schema.Message{schema.AssistantMessage("answer to " + request.Messages[len(request.Messages)-1].JoinedText(""))}, nil
-	})})
+	}), agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,19 +53,15 @@ func TestNewInputCanAbandonPendingInterrupt(t *testing.T) {
 	ctx := context.Background()
 	store := state.NewMemoryStore()
 	var toolCalls atomic.Int32
-	value, err := agent.New(agent.BaseConfig{
-		CheckpointStore: store,
-		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-			if request.Messages[len(request.Messages)-1].JoinedText("") == "run tool" {
-				return []schema.Message{functionCallMessage("echo", "call-1")}, nil
-			}
-			return []schema.Message{schema.AssistantMessage("plain answer")}, nil
-		}),
-		Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
-			toolCalls.Add(1)
-			return tool.TextResult("ok"), nil
-		})},
-	}, agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
+	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if request.Messages[len(request.Messages)-1].JoinedText("") == "run tool" {
+			return []schema.Message{functionCallMessage("echo", "call-1")}, nil
+		}
+		return []schema.Message{schema.AssistantMessage("plain answer")}, nil
+	}), agent.WithCheckpointStore(store), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		toolCalls.Add(1)
+		return tool.TextResult("ok"), nil
+	})), agent.WithBeforeToolBatch(tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) error {
 		_, err := graph.Interrupt(ctx, map[string]any{"approve": len(batch.Calls)})
 		return err
 	})))

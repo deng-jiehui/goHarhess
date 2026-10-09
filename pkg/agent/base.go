@@ -20,8 +20,10 @@ import (
 
 var ErrMissingModel = errors.New("agent requires an llm model")
 
-// BaseConfig contains behavior shared by all built-in Agent implementations.
-type BaseConfig struct {
+// baseConfig 是内置 Agent 实现的共享配置。公开入口只有 Option：
+// agent.New(model, opts...) 把位置参数写入 Model 后逐项应用 Option，
+// 「显式配置为 0」与「未配置」由 Option 的调用与否天然区分。
+type baseConfig struct {
 	Name          string
 	Description   string
 	SystemMessage string
@@ -45,31 +47,16 @@ type BaseConfig struct {
 	MaxDepth       int
 	Timeout        time.Duration
 	MaxConcurrency int
-	// Deprecated: MaxRetries 历史上只作用于工具，请改用 ToolRetries；
-	// 与 ToolRetries 同时设置且值不同（含显式零值）时会被拒绝。
-	MaxRetries int
-	// Deprecated: 请改用 ToolRetryBackoff。
-	RetryBackoff time.Duration
 	// ToolRetries 是只读工具的自动重试次数，ToolRetryBackoff 是重试间隔。
-	ToolRetries      int
-	ToolRetryBackoff time.Duration
-	// ModelRetry 非空时把 Model 包装为 llm.RetryingModel：MaxAttempts 至少为 2
-	// 才启用，默认只重试网络错误与 408/425/429/5xx。模型外层已存在内置重试层
-	// 时与本字段互斥。
-	ModelRetry llm.RetryConfig
-	// ModelRateLimit 非空时把 Model 包装为 llm.RateLimitedModel，限制该 Agent
-	// 实例的模型并发与最小请求间隔。模型外层已存在内置限流层时与本字段互斥；
-	// 跨实例共享配额请手工包装同一个底层模型。
-	ModelRateLimit      llm.RateLimitConfig
+	ToolRetries         int
+	ToolRetryBackoff    time.Duration
 	MaxTokens           int
 	MaxLLMCalls         int
 	ExtraGenerateConfig llm.GenerateConfig
-	// 选项存在性标记：With* 选项置位，区分「未配置」与「显式配置为 0」。
-	// 结构体字面量无法置位，其零值沿用原默认与别名约定。
-	toolRetriesSet      bool
-	toolRetryBackoffSet bool
-	legacyRetriesSet    bool
-	legacyBackoffSet    bool
+	// Prompt 与 TextReAct 只作用于 ReAct 配方：自定义提示模板，
+	// 或退回文本协议解析而不发送原生 Functions。
+	Prompt    string
+	TextReAct bool
 }
 
 // base provides common model, tool and extension behavior to concrete Agents.
@@ -90,12 +77,9 @@ type base struct {
 }
 
 // newBase validates shared configuration and registers all configured tools.
-func newBase(cfg BaseConfig, opts ...Option) (*base, error) {
-	resolved, err := resolveBaseConfig(cfg, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("configure agent %q: %w", cfg.Name, err)
-	}
-	cfg = resolved
+// cfg 必须是经 resolveBaseConfig 解析过的配置，本函数不再重复解析。
+func newBase(cfg baseConfig) (*base, error) {
+	var err error
 	if cfg.ContextBuilder == nil {
 		cfg.ContextBuilder, err = contextengine.NewContextBuilder(contextengine.Config{})
 		if err != nil {
@@ -104,12 +88,7 @@ func newBase(cfg BaseConfig, opts ...Option) (*base, error) {
 	}
 	var modelNode *llm.ChatModelNode
 	if cfg.Model != nil {
-		// 限流在内层、重试在外层：每次重试重新占用配额，与手工组合
-		// NewRetryingModel(NewRateLimitedModel(m)) 的行为一致。
-		cfg.Model, err = wrapModelPolicy(cfg.Model, cfg.ModelRetry, cfg.ModelRateLimit)
-		if err != nil {
-			return nil, fmt.Errorf("configure agent %q model policy: %w", cfg.Name, err)
-		}
+		// 重试/限流等模型策略由调用方自行组合装饰器，Agent 不再代为包装。
 		modelNode, err = llm.NewChatModelNode(cfg.Model)
 		if err != nil {
 			return nil, fmt.Errorf("configure agent %q model node: %w", cfg.Name, err)

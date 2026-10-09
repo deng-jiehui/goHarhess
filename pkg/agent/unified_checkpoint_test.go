@@ -18,10 +18,10 @@ func TestUnifiedCheckpointCompletesConversationAndReusesResult(t *testing.T) {
 	ctx := context.Background()
 	store := state.NewMemoryStore()
 	calls := 0
-	a, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+	a, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 		calls++
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
-	}), CheckpointStore: store})
+	}), agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +64,10 @@ func TestAgentFailedCompletionResumesWithoutRepeatingModelOrMessages(t *testing.
 	ctx := context.Background()
 	store := &completionFailureStore{MemoryStore: state.NewMemoryStore(), fail: true}
 	calls := 0
-	a, err := agent.NewBasicAgent(agent.BaseConfig{CheckpointStore: store, Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+	a, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 		calls++
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
-	})})
+	}), agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestAgentFailedCompletionResumesWithoutRepeatingModelOrMessages(t *testing.
 }
 
 func TestCheckpointConfigurationRejectsEmptyID(t *testing.T) {
-	a, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("unexpected")})})
+	a, err := agent.New(llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("unexpected")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,12 +105,12 @@ func TestModelContextTransformationPreservesCompleteHistory(t *testing.T) {
 	builder := runnable.Func[contextengine.Request, contextengine.Result](func(context.Context, contextengine.Request, ...runnable.Option) (contextengine.Result, error) {
 		return contextengine.Result{Messages: []schema.Message{schema.UserMessage("summary only")}}, nil
 	})
-	a, err := agent.NewBasicAgent(agent.BaseConfig{CheckpointStore: store, ContextBuilder: builder, Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+	a, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
 		if len(request.Messages) != 1 || request.Messages[0].JoinedText("") != "summary only" {
 			t.Fatalf("model context=%v", request.Messages)
 		}
 		return []schema.Message{schema.AssistantMessage("answer")}, nil
-	})})
+	}), agent.WithCheckpointStore(store), agent.WithContextBuilder(builder))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +127,10 @@ func TestModelContextTransformationPreservesCompleteHistory(t *testing.T) {
 
 func TestAgentPausedBeforeFirstNodeSavesCheckpoint(t *testing.T) {
 	calls := 0
-	a, err := agent.NewBasicAgent(agent.BaseConfig{Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+	a, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
 		calls++
 		return nil, nil
-	})})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}

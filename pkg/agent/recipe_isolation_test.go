@@ -38,29 +38,6 @@ func messageTexts(messages []schema.Message) []string {
 	return texts
 }
 
-// 子 Agent 必须拥有独立的配方 State，不能继承父级 GroupChat 已累计的响应。
-func TestGroupChatMemberDoesNotInheritParentResponse(t *testing.T) {
-	first, err := agent.NewBasicAgent(agent.BaseConfig{Name: "first", Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("one")})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := agent.NewBasicAgent(agent.BaseConfig{Name: "second", Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage("two")})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	group, err := agent.NewGroupChat(agent.GroupChatConfig{Agents: []agent.Agent{first, second}, MaxRounds: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := group.Invoke(context.Background(), []schema.Message{schema.UserMessage("discuss")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if texts := messageTexts(output); fmt.Sprint(texts) != "[one two]" {
-		t.Fatalf("group output=%q, want [one two]", texts)
-	}
-}
-
 // outputRecorder 记录被包装 Agent 每次运行的原始输出。
 type outputRecorder struct {
 	agent.Agent
@@ -83,35 +60,21 @@ func (r *outputRecorder) Stream(ctx context.Context, messages []schema.Message, 
 // 子 Agent 必须拥有独立的配方 State，不能继承父级 Supervisor 已累计的观察结果。
 func TestSupervisorChildDoesNotInheritParentResponse(t *testing.T) {
 	var childCalls atomic.Int32
-	basic, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name: "worker",
-		Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
-			return []schema.Message{schema.AssistantMessage(fmt.Sprintf("worker result %d", childCalls.Add(1)))}, nil
-		}),
-	})
+	basic, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+		return []schema.Message{schema.AssistantMessage(fmt.Sprintf("worker result %d", childCalls.Add(1)))}, nil
+	}), agent.WithName("worker"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker := &outputRecorder{Agent: basic}
 	var supervisorCalls atomic.Int32
-	supervisor, err := agent.NewRoutingAgent(agent.SupervisorConfig{
-		BaseConfig: agent.BaseConfig{
-			Name: "supervisor",
-			Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
-				if supervisorCalls.Add(1) <= 2 {
-					return []schema.Message{routingCall("worker")}, nil
-				}
-				return []schema.Message{schema.AssistantMessage("final")}, nil
-			}),
-		},
-		SubAgents: []agent.Agent{worker},
-		Mode:      agent.RoutingModeSupervisor,
-		MaxSteps:  3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := supervisor.Invoke(context.Background(), []schema.Message{schema.UserMessage("route twice")})
+	supervisor := newSupervisorApp(t, "supervisor", llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+		if supervisorCalls.Add(1) <= 2 {
+			return []schema.Message{routingCall("worker")}, nil
+		}
+		return []schema.Message{schema.AssistantMessage("final")}, nil
+	}), false, 3, worker)
+	output, err := supervisor.Invoke(context.Background(), supervisorState{Messages: []schema.Message{schema.UserMessage("route twice")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +86,9 @@ func TestSupervisorChildDoesNotInheritParentResponse(t *testing.T) {
 			t.Fatalf("worker run %d raw output=%q", index+1, texts)
 		}
 	}
-	if texts := messageTexts(output); fmt.Sprint(texts) != "[worker result 1 worker result 2 final]" {
-		t.Fatalf("supervisor output=%q", texts)
+	last := output.Messages[len(output.Messages)-1].JoinedText("")
+	if last != "final" {
+		t.Fatalf("supervisor output=%q", messageTexts(output.Messages))
 	}
 }
 
@@ -143,13 +107,9 @@ func TestReactResumeKeepsPersistedLLMCallBudget(t *testing.T) {
 		toolCalls.Add(1)
 		return tool.TextResult("ok"), nil
 	})
-	value, err := agent.New(agent.BaseConfig{
-		Name: "budgeted-react",
-		Model: llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
-			return []schema.Message{functionCallMessage("echo", fmt.Sprintf("call-%d", modelCalls.Add(1)))}, nil
-		}),
-		Tools: []tool.Tool{echo},
-	}, agent.WithBeforeToolBatch(hook))
+	value, err := agent.New(llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+		return []schema.Message{functionCallMessage("echo", fmt.Sprintf("call-%d", modelCalls.Add(1)))}, nil
+	}), agent.WithName("budgeted-react"), agent.WithTools(echo), agent.WithBeforeToolBatch(hook))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,18 +132,14 @@ func TestConcurrentReactRunsKeepIndependentState(t *testing.T) {
 	echo := tool.NewFunctionTool(tool.Spec{Name: "echo", IsReadOnly: true}, func(_ context.Context, input tool.CallInput) (tool.Result, error) {
 		return tool.TextResult("ok"), nil
 	})
-	value, err := agent.New(agent.BaseConfig{
-		Name: "concurrent-react",
-		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-			if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
-				return []schema.Message{schema.AssistantMessage("done:" + request.Messages[len(request.Messages)-2].Extra["run"].(string))}, nil
-			}
-			call := functionCallMessage("echo", "call-1")
-			call.Extra = map[string]any{"run": request.Messages[len(request.Messages)-1].JoinedText("")}
-			return []schema.Message{call}, nil
-		}),
-		Tools: []tool.Tool{echo},
-	})
+	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
+			return []schema.Message{schema.AssistantMessage("done:" + request.Messages[len(request.Messages)-2].Extra["run"].(string))}, nil
+		}
+		call := functionCallMessage("echo", "call-1")
+		call.Extra = map[string]any{"run": request.Messages[len(request.Messages)-1].JoinedText("")}
+		return []schema.Message{call}, nil
+	}), agent.WithName("concurrent-react"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,17 +173,13 @@ func TestReactRunDoesNotMutateCallerInput(t *testing.T) {
 		return tool.TextResult("ok"), nil
 	})
 	var calls atomic.Int32
-	value, err := agent.New(agent.BaseConfig{
-		Name: "immutable-input",
-		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-			if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
-				return []schema.Message{schema.AssistantMessage("done")}, nil
-			}
-			calls.Add(1)
-			return []schema.Message{functionCallMessage("echo", "call-1")}, nil
-		}),
-		Tools: []tool.Tool{echo},
-	})
+	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
+			return []schema.Message{schema.AssistantMessage("done")}, nil
+		}
+		calls.Add(1)
+		return []schema.Message{functionCallMessage("echo", "call-1")}, nil
+	}), agent.WithName("immutable-input"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,18 +199,15 @@ func TestMutatedOutputDoesNotCorruptConversation(t *testing.T) {
 	store := state.NewMemoryStore()
 	var runs atomic.Int32
 	var sawHistory []string
-	value, err := agent.New(agent.BaseConfig{
-		Name: "output-isolation",
-		Model: llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-			run := runs.Add(1)
-			if run == 2 {
-				for _, message := range request.Messages {
-					sawHistory = append(sawHistory, message.JoinedText(""))
-				}
+	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		run := runs.Add(1)
+		if run == 2 {
+			for _, message := range request.Messages {
+				sawHistory = append(sawHistory, message.JoinedText(""))
 			}
-			return []schema.Message{schema.AssistantMessage(fmt.Sprintf("answer-%d", run))}, nil
-		}),
-	})
+		}
+		return []schema.Message{schema.AssistantMessage(fmt.Sprintf("answer-%d", run))}, nil
+	}), agent.WithName("output-isolation"))
 	if err != nil {
 		t.Fatal(err)
 	}

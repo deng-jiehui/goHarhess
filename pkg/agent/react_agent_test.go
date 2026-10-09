@@ -24,14 +24,7 @@ func TestReactAgentTextActionLoop(t *testing.T) {
 		[]schema.Message{schema.AssistantMessage("Thought: The tool returned the answer.\nFinal Answer: done")},
 	)
 
-	react, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:  "react",
-			Model: model,
-			Tools: []tool.Tool{echo},
-		},
-		TextReAct: true,
-	})
+	react, err := agent.New(model, agent.WithName("react"), agent.WithTools(echo), agent.WithTextReAct(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,13 +53,7 @@ func TestReactAgentAcceptsStructuredFunctionCall(t *testing.T) {
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
 
-	react, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{
-			Name:  "react",
-			Model: model,
-			Tools: []tool.Tool{echo},
-		},
-	})
+	react, err := agent.New(model, agent.WithName("react"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,9 +86,7 @@ func TestReactAgentNativeModeIgnoresTextAction(t *testing.T) {
 		functions = len(request.Functions)
 		return []schema.Message{schema.AssistantMessage("Thought: try text\nAction: echo\nAction Input: {\"text\":\"x\"}")}, nil
 	})
-	react, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{Name: "react", Model: model, Tools: []tool.Tool{echo}},
-	})
+	react, err := agent.New(model, agent.WithName("react"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +119,7 @@ func TestReactAgentTextModeOmitsFunctions(t *testing.T) {
 		}
 		return []schema.Message{schema.AssistantMessage("Final Answer: done")}, nil
 	})
-	react, err := agent.NewReactAgent(agent.ReactAgentConfig{
-		BaseConfig: agent.BaseConfig{Name: "react", Model: model, Tools: []tool.Tool{echo}},
-		TextReAct:  true,
-	})
+	react, err := agent.New(model, agent.WithName("react"), agent.WithTools(echo), agent.WithTextReAct(true))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -168,13 +168,12 @@ func (m *Manager) defaultBuild(_ context.Context, spec ResolvedSpec) (Runner, er
 	if description == "" {
 		description = "sub-agent"
 	}
-	built, err := agent.New(agent.BaseConfig{
-		Name:          "subagent",
-		Description:   description,
-		SystemMessage: spec.Instructions,
-		Model:         inboxModel{m.cfg.Models[spec.Model]},
-		Tools:         tools,
-	})
+	built, err := agent.New(inboxModel{m.cfg.Models[spec.Model]},
+		agent.WithName("subagent"),
+		agent.WithDescription(description),
+		agent.WithSystemMessage(spec.Instructions),
+		agent.WithTools(tools...),
+	)
 	if err != nil {
 		return nil, err
 	}

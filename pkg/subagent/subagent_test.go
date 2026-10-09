@@ -108,7 +108,7 @@ func newParent(t *testing.T, m *subagent.Manager, run *parentRun, steps ...step)
 		}
 		return []schema.Message{schema.AssistantMessage("done")}, nil
 	})
-	a, err := agent.New(agent.BaseConfig{Name: "parent", Model: model, Tools: m.Tools()})
+	a, err := agent.New(model, agent.WithName("parent"), agent.WithTools(m.Tools()...))
 	if err != nil {
 		t.Fatal(err)
 	}

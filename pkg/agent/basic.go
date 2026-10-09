@@ -15,8 +15,9 @@ type BasicAgent struct {
 	recipe *agentrecipe.Recipe
 }
 
-func NewBasicAgent(cfg BaseConfig, opts ...Option) (*BasicAgent, error) {
-	base, err := newBase(cfg, opts...)
+// newBasicAgent 构造无工具的最小 Agent；cfg 须已解析。
+func newBasicAgent(cfg baseConfig) (*BasicAgent, error) {
+	base, err := newBase(cfg)
 	if err != nil {
 		return nil, err
 	}

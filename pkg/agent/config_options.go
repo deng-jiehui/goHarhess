@@ -33,134 +33,115 @@ const (
 )
 
 // Option configures one Agent-wide numeric or behavioral setting at initialization.
-type Option func(*BaseConfig)
+type Option func(*baseConfig)
 
 func WithName(value string) Option {
-	return func(config *BaseConfig) { config.Name = value }
+	return func(config *baseConfig) { config.Name = value }
 }
 
 func WithDescription(value string) Option {
-	return func(config *BaseConfig) { config.Description = value }
+	return func(config *baseConfig) { config.Description = value }
 }
 
 func WithSystemMessage(value string) Option {
-	return func(config *BaseConfig) { config.SystemMessage = value }
-}
-
-func WithModel(value llm.ChatModel) Option {
-	return func(config *BaseConfig) { config.Model = value }
+	return func(config *baseConfig) { config.SystemMessage = value }
 }
 
 func WithTools(values ...tool.Tool) Option {
-	return func(config *BaseConfig) { config.Tools = append([]tool.Tool(nil), values...) }
+	return func(config *baseConfig) { config.Tools = append([]tool.Tool(nil), values...) }
 }
 
 func WithTool(value tool.Tool) Option {
-	return func(config *BaseConfig) { config.Tools = append(config.Tools, value) }
+	return func(config *baseConfig) { config.Tools = append(config.Tools, value) }
 }
 
 // WithBeforeToolBatch replaces the synchronous whole-batch admission hooks.
 // Hooks run after the model stream completes and before any tool starts.
 func WithBeforeToolBatch(values ...tool.BeforeBatchHook) Option {
-	return func(config *BaseConfig) {
+	return func(config *baseConfig) {
 		config.BeforeToolBatch = append([]tool.BeforeBatchHook(nil), values...)
 	}
 }
 
 func WithMiddlewares(values ...tool.Middleware) Option {
-	return func(config *BaseConfig) { config.Middlewares = append([]tool.Middleware(nil), values...) }
+	return func(config *baseConfig) { config.Middlewares = append([]tool.Middleware(nil), values...) }
 }
 
 func WithMiddleware(value tool.Middleware) Option {
-	return func(config *BaseConfig) { config.Middlewares = append(config.Middlewares, value) }
+	return func(config *baseConfig) { config.Middlewares = append(config.Middlewares, value) }
 }
 
 // WithContextBuilder replaces the default context assembly Runnable.
 func WithContextBuilder(value runnable.Runnable[contextengine.Request, contextengine.Result]) Option {
-	return func(config *BaseConfig) { config.ContextBuilder = value }
+	return func(config *baseConfig) { config.ContextBuilder = value }
 }
 
 // WithCheckpointStore 为指定会话 ID 的运行配置统一检查点存储。
 func WithCheckpointStore(value state.Store) Option {
-	return func(config *BaseConfig) { config.CheckpointStore = value }
+	return func(config *baseConfig) { config.CheckpointStore = value }
 }
 
 // WithCheckpointTimeout bounds one durable checkpoint write. Writes detach
 // from request cancellation so a completed turn can still be persisted.
 func WithCheckpointTimeout(value time.Duration) Option {
-	return func(config *BaseConfig) { config.CheckpointTimeout = value }
+	return func(config *baseConfig) { config.CheckpointTimeout = value }
 }
 
 // WithCheckpointDurability 设置检查点持久化模式的默认值（async 或 sync）。
 func WithCheckpointDurability(value graph.Durability) Option {
-	return func(config *BaseConfig) { config.CheckpointDurability = value }
+	return func(config *baseConfig) { config.CheckpointDurability = value }
 }
 
 func WithExtraGenerateConfig(value llm.GenerateConfig) Option {
-	return func(config *BaseConfig) {
+	return func(config *baseConfig) {
 		config.ExtraGenerateConfig = llm.MergeGenerateConfig(value, nil)
 	}
 }
 
 // WithMaxDepth sets the maximum nested tool-call depth.
 func WithMaxDepth(value int) Option {
-	return func(config *BaseConfig) { config.MaxDepth = value }
+	return func(config *baseConfig) { config.MaxDepth = value }
 }
 
 // WithTimeout sets the maximum duration of one tool invocation, including retries.
 func WithTimeout(value time.Duration) Option {
-	return func(config *BaseConfig) { config.Timeout = value }
+	return func(config *baseConfig) { config.Timeout = value }
 }
 
 // WithMaxConcurrency sets the maximum parallel tool calls per batch.
 func WithMaxConcurrency(value int) Option {
-	return func(config *BaseConfig) { config.MaxConcurrency = value }
-}
-
-// WithMaxRetries sets retries for failed read-only tools.
-// Deprecated: 该选项只作用于工具重试，请改用 WithToolRetries。
-func WithMaxRetries(value int) Option {
-	return func(config *BaseConfig) { config.MaxRetries = value; config.legacyRetriesSet = true }
-}
-
-// WithRetryBackoff sets the delay between automatic retries.
-// Deprecated: 该选项只作用于工具重试，请改用 WithToolRetryBackoff。
-func WithRetryBackoff(value time.Duration) Option {
-	return func(config *BaseConfig) { config.RetryBackoff = value; config.legacyBackoffSet = true }
+	return func(config *baseConfig) { config.MaxConcurrency = value }
 }
 
 // WithToolRetries sets retries for failed read-only tools.
 func WithToolRetries(value int) Option {
-	return func(config *BaseConfig) { config.ToolRetries = value; config.toolRetriesSet = true }
+	return func(config *baseConfig) { config.ToolRetries = value }
 }
 
 // WithToolRetryBackoff sets the delay between automatic tool retries.
 func WithToolRetryBackoff(value time.Duration) Option {
-	return func(config *BaseConfig) { config.ToolRetryBackoff = value; config.toolRetryBackoffSet = true }
-}
-
-// WithModelRetry wraps the configured model with llm.NewRetryingModel.
-// MaxAttempts must be at least 2 to enable retrying; retryable errors and
-// stream semantics follow the llm decorator.
-func WithModelRetry(value llm.RetryConfig) Option {
-	return func(config *BaseConfig) { config.ModelRetry = value }
-}
-
-// WithModelRateLimit wraps the configured model with llm.NewRateLimitedModel.
-// The limit applies per Agent instance; wrap the underlying model manually to
-// share one quota across instances.
-func WithModelRateLimit(value llm.RateLimitConfig) Option {
-	return func(config *BaseConfig) { config.ModelRateLimit = value }
+	return func(config *baseConfig) { config.ToolRetryBackoff = value }
 }
 
 // WithMaxTokens sets the model-facing max_tokens generation limit.
 func WithMaxTokens(value int) Option {
-	return func(config *BaseConfig) { config.MaxTokens = value }
+	return func(config *baseConfig) { config.MaxTokens = value }
 }
 
 // WithMaxLLMCalls sets the maximum model calls in one Agent run.
 func WithMaxLLMCalls(value int) Option {
-	return func(config *BaseConfig) { config.MaxLLMCalls = value }
+	return func(config *baseConfig) { config.MaxLLMCalls = value }
+}
+
+// WithPrompt 替换 ReAct 配方的提示模板；仅在存在工具时生效。
+func WithPrompt(value string) Option {
+	return func(config *baseConfig) { config.Prompt = value }
+}
+
+// WithTextReAct 开启文本 ReAct 兼容模式：请求不携带原生 Functions，
+// 改为提示内列出工具文本协议并解析模型正文中的 Action/Action Input。
+func WithTextReAct(value bool) Option {
+	return func(config *baseConfig) { config.TextReAct = value }
 }
 
 type agentLimits struct {
@@ -171,50 +152,22 @@ type agentLimits struct {
 	maxLLMCalls    int
 }
 
-func resolveBaseConfig(config BaseConfig, opts ...Option) (BaseConfig, error) {
+// resolveBaseConfig 是唯一的配置解析入口：默认值先于 Option 填充并
+// 且只执行一次，WithToolRetryBackoff(0) 等显式零值由调用与否天然区分。
+func resolveBaseConfig(config baseConfig, opts ...Option) (baseConfig, error) {
 	applyConfigDefaults(&config)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&config)
 		}
 	}
-	if err := resolveRetryAliases(&config); err != nil {
-		return BaseConfig{}, err
-	}
 	if err := validateBaseConfig(config); err != nil {
-		return BaseConfig{}, err
+		return baseConfig{}, err
 	}
 	return config, nil
 }
 
-// resolveRetryAliases 合并废弃字段与规范字段。存在性规则对两侧一致：
-// 对应 With* 选项被调用过或字段值非零都算「已提供」；两边提供不同值
-// （含显式零值与非零值）在初始化时拒绝，单侧提供时采用该值。退避默认值
-// 只在两侧都未提供时填充，显式零值保留为「无重试间隔」。
-func resolveRetryAliases(config *BaseConfig) error {
-	newRetries := config.toolRetriesSet || config.ToolRetries != 0
-	oldRetries := config.legacyRetriesSet || config.MaxRetries != 0
-	switch {
-	case newRetries && oldRetries && config.ToolRetries != config.MaxRetries:
-		return fmt.Errorf("agent tool retries configured twice with different values: ToolRetries=%d, MaxRetries=%d", config.ToolRetries, config.MaxRetries)
-	case !newRetries && oldRetries:
-		config.ToolRetries = config.MaxRetries
-	}
-	newBackoff := config.toolRetryBackoffSet || config.ToolRetryBackoff != 0
-	oldBackoff := config.legacyBackoffSet || config.RetryBackoff != 0
-	switch {
-	case newBackoff && oldBackoff && config.ToolRetryBackoff != config.RetryBackoff:
-		return fmt.Errorf("agent tool retry backoff configured twice with different values: ToolRetryBackoff=%s, RetryBackoff=%s", config.ToolRetryBackoff, config.RetryBackoff)
-	case !newBackoff && oldBackoff:
-		config.ToolRetryBackoff = config.RetryBackoff
-	}
-	if !newBackoff && !oldBackoff {
-		config.ToolRetryBackoff = DefaultRetryBackoff
-	}
-	return nil
-}
-
-func applyConfigDefaults(config *BaseConfig) {
+func applyConfigDefaults(config *baseConfig) {
 	if config.MaxDepth == 0 {
 		config.MaxDepth = DefaultMaxDepth
 	}
@@ -233,9 +186,13 @@ func applyConfigDefaults(config *BaseConfig) {
 	if config.CheckpointTimeout == 0 {
 		config.CheckpointTimeout = DefaultCheckpointTimeout
 	}
+	// 默认值先于 Option 填充：WithToolRetryBackoff(0) 等显式零值由
+	// 调用与否天然区分，不再依赖存在性标记。该函数只允许被调用一次
+	// （resolveBaseConfig 内部），重复执行会覆盖显式零值。
+	config.ToolRetryBackoff = DefaultRetryBackoff
 }
 
-func validateBaseConfig(config BaseConfig) error {
+func validateBaseConfig(config baseConfig) error {
 	checks := []struct {
 		name  string
 		value int
@@ -259,9 +216,6 @@ func validateBaseConfig(config BaseConfig) error {
 	if config.ToolRetryBackoff < 0 || config.ToolRetryBackoff > hardMaxRetryBackoff {
 		return fmt.Errorf("agent tool retry backoff must be between zero and %s: %s", hardMaxRetryBackoff, config.ToolRetryBackoff)
 	}
-	if err := validateModelPolicy(config.ModelRetry, config.ModelRateLimit); err != nil {
-		return err
-	}
 	if config.CheckpointTimeout <= 0 || config.CheckpointTimeout > hardMaxCheckpointTimeout {
 		return fmt.Errorf("agent checkpoint timeout must be greater than zero and at most %s: %s", hardMaxCheckpointTimeout, config.CheckpointTimeout)
 	}
@@ -281,7 +235,7 @@ func validateDurability(value graph.Durability) error {
 	}
 }
 
-func limitsFromConfig(config BaseConfig) agentLimits {
+func limitsFromConfig(config baseConfig) agentLimits {
 	return agentLimits{
 		maxDepth:       config.MaxDepth,
 		timeout:        config.Timeout,

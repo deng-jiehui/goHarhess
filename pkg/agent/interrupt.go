@@ -20,10 +20,8 @@ func WithResume(interruptID string, input any) runnable.Option {
 type AgentKind string
 
 const (
-	AgentKindBasic     AgentKind = "basic"
-	AgentKindReact     AgentKind = "react"
-	AgentKindRouting   AgentKind = "routing"
-	AgentKindGroupChat AgentKind = "group_chat"
+	AgentKindBasic AgentKind = "basic"
+	AgentKindReact AgentKind = "react"
 )
 
 // Resume continues a Graph-owned execution checkpoint with the supplied Agent.

@@ -1,23 +1,27 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/goharness/goharness/pkg/llm"
+)
 
 // New creates an Agent and automatically selects its Graph recipe. Tool-backed
 // configurations use the standard ReAct recipe; otherwise the minimal
-// one-model graph is used.
-func New(cfg BaseConfig, opts ...Option) (Agent, error) {
-	resolved, err := resolveBaseConfig(cfg, opts...)
+// one-model graph is used. model 为 nil 时运行期首次调用返回 ErrMissingModel。
+func New(model llm.ChatModel, opts ...Option) (Agent, error) {
+	resolved, err := resolveBaseConfig(baseConfig{Model: model}, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("configure agent %q: %w", cfg.Name, err)
+		return nil, fmt.Errorf("configure agent: %w", err)
 	}
 	if len(resolved.Tools) > 0 {
-		return NewReactAgent(ReactAgentConfig{BaseConfig: resolved})
+		return newReactAgent(resolved)
 	}
-	return NewBasicAgent(resolved)
+	return newBasicAgent(resolved)
 }
 
-func MustNew(cfg BaseConfig, opts ...Option) Agent {
-	value, err := New(cfg, opts...)
+func MustNew(model llm.ChatModel, opts ...Option) Agent {
+	value, err := New(model, opts...)
 	if err != nil {
 		panic(err)
 	}

@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/goharness/goharness/internal/agentrecipe"
-	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/graph"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/state"
 )

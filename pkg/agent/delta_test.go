@@ -30,7 +30,7 @@ func TestReactAgentAssemblesDeltaFunctionCall(t *testing.T) {
 	echo := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
 	})
-	value, err := agent.New(agent.BaseConfig{Name: "fn", Model: model, Tools: []tool.Tool{echo}})
+	value, err := agent.New(model, agent.WithName("fn"), agent.WithTools(echo))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +69,7 @@ func TestReactAgentAssemblesDeltaAction(t *testing.T) {
 	echo := tool.NewFunctionTool(tool.Spec{Name: "echo"}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
 		return tool.TextResult(fmt.Sprint(input.Args["text"])), nil
 	})
-	value, err := agent.NewReactAgent(agent.ReactAgentConfig{BaseConfig: agent.BaseConfig{
-		Name: "react", Model: model, Tools: []tool.Tool{echo},
-	}, TextReAct: true})
+	value, err := agent.New(model, agent.WithName("react"), agent.WithTools(echo), agent.WithTextReAct(true))
 	if err != nil {
 		t.Fatal(err)
 	}

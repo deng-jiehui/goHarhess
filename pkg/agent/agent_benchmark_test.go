@@ -32,11 +32,7 @@ func benchReActAgent(tb testing.TB, modelCalls int, needsHistory bool) (agent.Ag
 		calls.Add(1)
 		return tool.TextResult(strings.Repeat("r", 1024)), nil
 	})
-	value, err := agent.New(agent.BaseConfig{
-		Name:  "bench-react",
-		Model: benchfixture.NewStepModel(modelCalls-1, "bench-tool", strings.Repeat("a", 1024)),
-		Tools: []tool.Tool{echo},
-	}, agent.WithMaxLLMCalls(modelCalls))
+	value, err := agent.New(benchfixture.NewStepModel(modelCalls-1, "bench-tool", strings.Repeat("a", 1024)), agent.WithName("bench-react"), agent.WithTools(echo), agent.WithMaxLLMCalls(modelCalls))
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -118,12 +114,7 @@ func benchmarkAgentGroup(b *testing.B, profile string) {
 							runs.Add(1)
 							return tool.TextResult(strings.Repeat("r", 1024)), nil
 						})
-						value, err := agent.New(agent.BaseConfig{
-							Name:            "bench-persist",
-							Model:           benchfixture.NewStepModel(calls-1, "bench-tool", "done"),
-							Tools:           []tool.Tool{echo},
-							CheckpointStore: store,
-						}, agent.WithMaxLLMCalls(calls))
+						value, err := agent.New(benchfixture.NewStepModel(calls-1, "bench-tool", "done"), agent.WithName("bench-persist"), agent.WithTools(echo), agent.WithCheckpointStore(store), agent.WithMaxLLMCalls(calls))
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -187,14 +178,9 @@ func benchSessionGrowth(b *testing.B, name string, requests int) {
 		for n := 0; n < b.N; n++ {
 			b.StopTimer()
 			store := state.NewMemoryStore()
-			value, err := agent.New(agent.BaseConfig{
-				Name:  "bench-session",
-				Model: benchfixture.NewTurnModel("bench-tool", "done"),
-				Tools: []tool.Tool{tool.NewFunctionTool(tool.Spec{Name: "bench-tool"}, func(_ context.Context, _ tool.CallInput) (tool.Result, error) {
-					return tool.TextResult("r"), nil
-				})},
-				CheckpointStore: store,
-			}, agent.WithMaxLLMCalls(2))
+			value, err := agent.New(benchfixture.NewTurnModel("bench-tool", "done"), agent.WithName("bench-session"), agent.WithTools(tool.NewFunctionTool(tool.Spec{Name: "bench-tool"}, func(_ context.Context, _ tool.CallInput) (tool.Result, error) {
+				return tool.TextResult("r"), nil
+			})), agent.WithCheckpointStore(store), agent.WithMaxLLMCalls(2))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -250,15 +236,10 @@ func benchmarkToolSuspendResume(b *testing.B, profile string) {
 		names[i] = tools[i].Spec().Name
 	}
 	newAgent := func(store state.Store) agent.Agent {
-		value, err := agent.New(agent.BaseConfig{
-			Name: "bench-tool-resume",
-			Model: benchfixture.NewScriptedStepModel(
-				benchfixture.ModelStep{Calls: names},
-				benchfixture.ModelStep{Text: "done"},
-			),
-			Tools:           tools,
-			CheckpointStore: store,
-		}, agent.WithMaxLLMCalls(8))
+		value, err := agent.New(benchfixture.NewScriptedStepModel(
+			benchfixture.ModelStep{Calls: names},
+			benchfixture.ModelStep{Text: "done"},
+		), agent.WithName("bench-tool-resume"), agent.WithTools(tools...), agent.WithCheckpointStore(store), agent.WithMaxLLMCalls(8))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -345,10 +326,7 @@ func benchAgentStream(b *testing.B, name, mode, text string, segments int) {
 		// 片段）、消息起止完整、恰好一次最终结果；分段发布退化为
 		// 结束时单次快照时必须失败。完成后 ResetTimer 丢弃预检查
 		// 计入的时间与分配，且保持计时停止进入正式循环。
-		probe, err := agent.NewBasicAgent(agent.BaseConfig{
-			Name:  "bench-stream-probe",
-			Model: benchfixture.NewSegmentModel(text, segments),
-		})
+		probe, err := agent.New(benchfixture.NewSegmentModel(text, segments), agent.WithName("bench-stream-probe"))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -396,10 +374,7 @@ func benchAgentStream(b *testing.B, name, mode, text string, segments int) {
 		var lastLen int
 		for n := 0; n < b.N; n++ {
 			b.StopTimer()
-			value, err := agent.NewBasicAgent(agent.BaseConfig{
-				Name:  "bench-stream",
-				Model: benchfixture.NewSegmentModel(text, segments),
-			})
+			value, err := agent.New(benchfixture.NewSegmentModel(text, segments), agent.WithName("bench-stream"))
 			if err != nil {
 				b.Fatal(err)
 			}

@@ -9,78 +9,52 @@ import (
 	"github.com/goharness/goharness/pkg/agent"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
-	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 )
+
+type teamState struct {
+	Messages []schema.Message
+	Output   []schema.Message
+}
 
 func main() {
 	researcher := mustAgent("researcher", "research completed")
 	reviewer := mustAgent("reviewer", "review completed")
 
-	type teamState struct {
-		Messages []schema.Message
-		Output   []schema.Message
+	run := func(a agent.Agent) func(context.Context, *teamState) error {
+		return func(ctx context.Context, s *teamState) error {
+			out, err := a.Invoke(ctx, s.Messages)
+			s.Messages = append(s.Messages, out...)
+			s.Output = out
+			return err
+		}
 	}
-	builder := graph.NewGraph[[]schema.Message, []schema.Message]("research-team")
-	builder.SetDescription("Research, then review")
-	err := builder.SetStateFactory(func(_ context.Context, input []schema.Message) (*teamState, error) {
-		return &teamState{Messages: schema.CloneMessages(input)}, nil
-	})
-	addAgent := func(name string, value agent.Agent) error {
-		return builder.AddNode(name, value,
-			graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
-				return schema.CloneMessages(state.Messages), nil
-			}),
-			graph.WithPostHandler(func(_ context.Context, state *teamState, output []schema.Message) error {
-				state.Messages = append(state.Messages, schema.CloneMessages(output)...)
-				state.Output = append(state.Output, schema.CloneMessages(output)...)
-				return nil
-			}),
-		)
-	}
-	if err == nil {
-		err = addAgent("research", researcher)
-	}
-	if err == nil {
-		err = addAgent("review", reviewer)
-	}
-	finish := runnable.Func[[]schema.Message, []schema.Message](func(_ context.Context, input []schema.Message, _ ...runnable.Option) ([]schema.Message, error) {
-		return schema.CloneMessages(input), nil
-	})
-	if err == nil {
-		err = builder.AddNode("finish", finish, graph.WithPreHandler(func(_ context.Context, state *teamState) ([]schema.Message, error) {
-			return schema.CloneMessages(state.Output), nil
-		}))
-	}
-	if err == nil {
-		err = builder.AddEdge(graph.Start, "research")
-	}
-	if err == nil {
-		err = builder.AddEdge("research", "review")
-	}
-	if err == nil {
-		err = builder.AddEdge("review", "finish")
-	}
-	if err == nil {
-		err = builder.AddEdge("finish", graph.End)
-	}
-	must(err)
-	team, err := builder.Compile()
+	app, err := graph.NewState[teamState]("research-team").
+		Node("research", run(researcher)).
+		Node("review", run(reviewer)).
+		Node("finish", func(_ context.Context, s *teamState) error { return nil }).
+		Start("research").
+		Edge("research", "review").
+		Edge("review", "finish").
+		Edge("finish", graph.End).
+		Compile()
 	must(err)
 
-	messages, err := team.Invoke(context.Background(), []schema.Message{schema.UserMessage("analyze the topic")})
+	out, err := app.Invoke(context.Background(), teamState{
+		Messages: []schema.Message{schema.UserMessage("analyze the topic")},
+	})
 	must(err)
 
-	data, err := json.MarshalIndent(messages, "", "  ")
+	data, err := json.MarshalIndent(out.Messages, "", "  ")
 	must(err)
 	fmt.Println(string(data))
 }
 
-func mustAgent(name, response string) *agent.BasicAgent {
-	value, err := agent.NewBasicAgent(agent.BaseConfig{
-		Name:  name,
-		Model: llm.NewScriptedModel([]schema.Message{schema.AssistantMessage(response)}),
-	})
+func mustAgent(name, response string) agent.Agent {
+	value, err := agent.New(
+		llm.NewScriptedModel([]schema.Message{schema.AssistantMessage(response)}),
+		agent.WithName(name),
+	)
 	must(err)
 	return value
 }

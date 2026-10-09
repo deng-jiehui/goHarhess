@@ -36,7 +36,7 @@ func main() {
 		[]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("1", "echo", `{"text":"hello"}`))},
 		[]schema.Message{schema.AssistantMessage("done")},
 	)
-	value, err := agent.New(agent.BaseConfig{Name: "demo", Model: model, Tools: []tool.Tool{echo}})
+	value, err := agent.New(model, agent.WithName("demo"), agent.WithTool(echo))
 	must(err)
 	messages, err := value.Invoke(ctx, []schema.Message{schema.UserMessage("say hello")})
 	must(err)
