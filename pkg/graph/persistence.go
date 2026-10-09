@@ -231,6 +231,9 @@ func writeCheckpoint(ctx context.Context, config checkpointConfig, record state.
 			"checkpoint.status":     record.Status,
 			"checkpoint.durability": string(durability),
 		})
+		// 存储操作开始前发 start：OTel 等桥接靠它把 checkpoint span 挂到
+		// 提交节点之下，结束事件用同一 SpanID 收尾。
+		observe.Emit(spanCtx, observe.EventOf(span, observe.KindCheckpoint, nil))
 	}
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), config.Timeout)
 	defer cancel()

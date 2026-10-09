@@ -22,6 +22,9 @@ type runInfo struct {
 	InputType  string
 	OutputType string
 	ResumeMode resumeMode
+	// CheckpointKey 是本次运行关联的检查点键：恢复产生的新执行记录
+	// 靠它把调用树接回被挂起的那次运行。
+	CheckpointKey string
 }
 
 type nodeExec struct {
@@ -146,6 +149,25 @@ func (s *lifecycleSink) Publish(ctx context.Context, event lifecycleEvent) {
 		runEvent := observe.EventOf(failed, observe.KindRun, runAttrs(s.run))
 		runEvent.Err = event.Err
 		observe.Emit(bound, runEvent)
+	case eventGraphSuspend:
+		// 挂起收尾：活动节点按 step 序先结束，run 随后。结束事件带
+		// graph.outcome=suspended，区别于正常完成与失败；同一 SpanID
+		// 收尾，OTel/Slog/公共流据此闭合本次执行记录。
+		active := make([]nodeLifecycle, 0, len(s.nodes))
+		for _, node := range s.nodes {
+			active = append(active, node)
+		}
+		sort.Slice(active, func(i, j int) bool { return active[i].execution.Step < active[j].execution.Step })
+		s.nodes = map[graphNodeKey]nodeLifecycle{}
+		invocation := s.runInvocation
+		s.mu.Unlock()
+		for _, node := range active {
+			suspended := node.invocation.WithPhase(observe.PhaseEnd)
+			observe.Emit(node.ctx, observe.EventOf(suspended, observe.KindNode, map[string]any{"graph.outcome": "suspended"}))
+		}
+		suspended := invocation.WithPhase(observe.PhaseEnd)
+		bound := observe.BindInvocation(ctx, invocation)
+		observe.Emit(bound, observe.EventOf(suspended, observe.KindRun, mergeAttrs(runAttrs(s.run), "graph.outcome", "suspended", "graph.step", event.Step)))
 	default:
 		s.mu.Unlock()
 	}
@@ -175,19 +197,26 @@ func nodeExecutionMetadata(execution nodeExec) map[string]any {
 
 // runAttrs 是 run 级事件补充到 span 元数据上的运行属性。
 func runAttrs(run runInfo) map[string]any {
-	return map[string]any{
+	attrs := map[string]any{
 		"graph.input_type":  run.InputType,
 		"graph.output_type": run.OutputType,
 		"graph.resume_mode": string(run.ResumeMode),
 	}
+	if run.CheckpointKey != "" {
+		attrs["checkpoint.key"] = run.CheckpointKey
+	}
+	return attrs
 }
 
 // mergeAttrs 在 attrs 副本上补充键值，供一次性事件组装使用。
-func mergeAttrs(attrs map[string]any, key string, value any) map[string]any {
-	merged := make(map[string]any, len(attrs)+1)
+func mergeAttrs(attrs map[string]any, pairs ...any) map[string]any {
+	merged := make(map[string]any, len(attrs)+len(pairs)/2)
 	for k, v := range attrs {
 		merged[k] = v
 	}
-	merged[key] = value
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, _ := pairs[i].(string)
+		merged[key] = pairs[i+1]
+	}
 	return merged
 }

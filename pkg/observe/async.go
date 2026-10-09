@@ -81,8 +81,7 @@ func (a *AsyncObserver) Close() {
 func (a *AsyncObserver) drain() {
 	defer close(a.drained)
 	handle := func(event Event) {
-		defer func() { _ = recover() }()
-		a.inner.OnEvent(context.Background(), event)
+		dispatchOne(context.Background(), a.inner, event)
 	}
 	for {
 		select {

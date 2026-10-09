@@ -33,6 +33,36 @@ type runSetup struct {
 	configured bool
 	inputs     []resumeInput
 	options    map[string][]runnable.Option
+	// pendingLoad 暂存检查点加载 span：恢复路径上加载先于 run 观测记录
+	// 建立，run start 发射后重放为 run 的子 span；未能进入执行的提前
+	// 返回路径以独立根 span 兜底发射。
+	pendingLoad *pendingLoadSpan
+}
+
+// pendingLoadSpan 是一次检查点加载暂存的观测记录。
+type pendingLoadSpan struct {
+	span    observe.Invocation
+	end     observe.Event
+	emitted bool
+}
+
+// flushPendingLoad 发射暂存的加载 span：ctx 已绑定 run 调用时重挂为
+// run 的子节点（同 SpanID 收尾），否则作为独立根 span 发射。重复调用
+// 幂等——进入执行后的重放与提前返回的兜底共用同一入口。
+func (s *runSetup) flushPendingLoad(ctx context.Context) {
+	p := s.pendingLoad
+	if p == nil || p.emitted {
+		return
+	}
+	p.emitted = true
+	if parent, ok := observe.InvocationFromContext(ctx); ok && parent.Trace.SpanID != "" {
+		p.span.Trace.TraceID = parent.Trace.TraceID
+		p.span.Trace.RunID = parent.Trace.RunID
+		p.span.Trace.ParentSpanID = parent.Trace.SpanID
+		p.end.Trace = p.span.Trace
+	}
+	observe.Emit(ctx, observe.EventOf(p.span.WithPhase(observe.PhaseStart), observe.KindCheckpoint, nil))
+	observe.Emit(ctx, p.end)
 }
 
 func (g *Graph[I, O]) invokeRuntime(ctx context.Context, input I, options ...runnable.Option) (O, error) {
@@ -125,7 +155,7 @@ func (g *Graph[I, O]) prepareRun(ctx context.Context, options []runnable.Option)
 	}, nil
 }
 
-func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup runSetup) (executionProgress, error) {
+func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup *runSetup) (executionProgress, error) {
 	if !setup.configured {
 		return executionProgress{}, ErrCheckpointRequired
 	}
@@ -134,11 +164,18 @@ func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup runSetup
 	}
 	config := setup.checkpoint
 	// 加载 span 只在有观察者时建立：无观察者时 Begin 的分配纯属浪费。
+	// 调用方 ctx 已绑定调用树时立即发射；否则（根 resume）暂存，等 run
+	// 记录建立后重放为其子 span，避免成为 OTel 里的孤儿调用树。
 	observed := observe.Active(ctx)
+	_, hasParent := observe.TraceFromContext(ctx)
+	deferEvents := observed && !hasParent
 	loadCtx := ctx
 	var loadSpan observe.Invocation
 	if observed {
 		loadCtx, loadSpan = observe.Begin(ctx, "checkpoint", "load", map[string]any{"checkpoint.key": config.Key})
+		if !deferEvents {
+			observe.Emit(loadCtx, observe.EventOf(loadSpan, observe.KindCheckpoint, nil))
+		}
 	}
 	record, found, err := config.Store.Load(ctx, config.Key)
 	if observed {
@@ -155,7 +192,11 @@ func (g *Graph[I, O]) loadCheckpointProgress(ctx context.Context, setup runSetup
 		if err != nil {
 			loadEvent.Err = err
 		}
-		observe.Emit(loadCtx, loadEvent)
+		if deferEvents {
+			setup.pendingLoad = &pendingLoadSpan{span: loadSpan, end: loadEvent}
+		} else {
+			observe.Emit(loadCtx, loadEvent)
+		}
 	}
 	if err != nil {
 		return executionProgress{}, &CheckpointError{Key: config.Key, Err: fmt.Errorf("load failed: %w", err)}
@@ -360,7 +401,10 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		}
 		progress = coord.root
 	} else if resume {
-		loaded, err := g.loadCheckpointProgress(ctx, setup)
+		loaded, err := g.loadCheckpointProgress(ctx, &setup)
+		// 加载 span 已暂存：bindCallbacks 之后的重放把它挂到新 run 下；
+		// 此前的提前返回（恢复拒绝、已完成结果等）以独立根 span 兜底。
+		defer setup.flushPendingLoad(ctx)
 		if err != nil {
 			return zero, err
 		}
@@ -497,11 +541,12 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	}
 	revision, _ := g.recoveryMetadata()
 	ctx = bindCallbacks(ctx, runInfo{
-		Name:       g.Name(),
-		Revision:   revision,
-		InputType:  typeName(g.inputType),
-		OutputType: typeName(g.outputType),
-		ResumeMode: runMode,
+		Name:          g.Name(),
+		Revision:      revision,
+		InputType:     typeName(g.inputType),
+		OutputType:    typeName(g.outputType),
+		ResumeMode:    runMode,
+		CheckpointKey: setup.checkpoint.Key,
 	}, g.Snapshot().Nodes)
 
 	var runtimeState any
@@ -655,6 +700,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 	transactional := g.stepMerger != nil
 
 	publish(ctx, lifecycleEvent{Type: eventGraphStart})
+	// run 观测记录已建立：把恢复时暂存的检查点加载 span 重放到 run 下。
+	setup.flushPendingLoad(ctx)
 	currentNode := Start
 	visits := map[string]int{}
 	startStep := 0
@@ -1407,6 +1454,7 @@ func (g *Graph[I, O]) persistInterruption(
 		// 嵌套 frame 挂起：就地更新树内存槽位，不落盘——根调度器收敛后
 		// 统一保存整棵树，再由根运行返回 InterruptedError。
 		coord.updateFrame(checkpoint.frame, progress)
+		publish(ctx, lifecycleEvent{Type: eventGraphSuspend, Step: step})
 		return &suspendSignal{pending: coord.pendingOf(checkpoint.frame)}
 	}
 	if err := saveInterruptedCheckpoint(saveCtx, checkpoint, progress); err != nil {
@@ -1415,9 +1463,11 @@ func (g *Graph[I, O]) persistInterruption(
 	if coord := checkpoint.coord; coord != nil {
 		pending := coord.pendingOf(coord.root)
 		emitInterruptEvent(ctx, g.Name(), point, request.Reason, resumeNode, step, pending)
+		publish(ctx, lifecycleEvent{Type: eventGraphSuspend, Step: step})
 		return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: pending}
 	}
 	emitInterruptEvent(ctx, g.Name(), point, request.Reason, resumeNode, step, pendingInterrupts(progress))
+	publish(ctx, lifecycleEvent{Type: eventGraphSuspend, Step: step})
 	return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: pendingInterrupts(progress)}
 }
 

@@ -69,7 +69,9 @@ func EventOf(inv Invocation, kind Kind, attrs map[string]any) Event {
 	}
 }
 
-// Multi 把多个 Observer 合成一个，按注册顺序同步调用。
+// Multi 把多个 Observer 合成一个，按注册顺序同步调用。每个 Observer
+// 经 dispatchOne 单独分发：单个 panic 被隔离并记录，后续 Observer 照常
+// 收到事件，与直接注册到 With 的行为一致。
 func Multi(observers ...Observer) Observer {
 	filtered := make([]Observer, 0, len(observers))
 	for _, o := range observers {
@@ -79,7 +81,7 @@ func Multi(observers ...Observer) Observer {
 	}
 	return ObserverFunc(func(ctx context.Context, event Event) {
 		for _, o := range filtered {
-			o.OnEvent(ctx, event)
+			dispatchOne(ctx, o, event)
 		}
 	})
 }

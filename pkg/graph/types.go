@@ -62,6 +62,9 @@ const (
 	eventNodeEnd    lifecycleEventType = "node_end"
 	eventGraphEnd   lifecycleEventType = "graph_end"
 	eventGraphError lifecycleEventType = "graph_error"
+	// eventGraphSuspend 在挂起把检查点落盘后发射：收尾本次 run 与活动
+	// 节点的观测记录，供恢复时另起新记录按检查点身份关联。
+	eventGraphSuspend lifecycleEventType = "graph_suspend"
 )
 
 // lifecycleEvent 是调度循环的控制面信封，只在包内流向 lifecycleSink；

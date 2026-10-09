@@ -30,6 +30,12 @@ func (streamLifecycleAdapter) OnEvent(ctx context.Context, event observe.Event) 
 	case observe.PhaseStart:
 		phase = stream.PhaseStart
 	case observe.PhaseEnd:
+		// 挂起收尾的 end 事件不算闭合：观测侧 span 已带 suspended 收尾，
+		// 公共流的挂起通告由 finish() 按未闭合生命周期统一产出
+		// PhaseInterrupted（附带完整待答记录），这里跳过避免误报正常结束。
+		if event.Attrs["graph.outcome"] == "suspended" {
+			return
+		}
 		phase = stream.PhaseEnd
 	case observe.PhaseError:
 		phase = stream.PhaseError

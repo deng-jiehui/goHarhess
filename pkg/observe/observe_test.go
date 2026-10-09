@@ -262,3 +262,90 @@ func TestErrorEventCarriesErr(t *testing.T) {
 		t.Fatalf("Err = %v", collected.events[0].Err)
 	}
 }
+
+// TestEmitPayloadRedactCannotMutateBusinessData 复现审查发现：脱敏函数拿到的
+// 必须与业务输入无关的独立副本，改写不应污染调用方数据。
+func TestEmitPayloadRedactCannotMutateBusinessData(t *testing.T) {
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			payload := raw.(map[string]any)
+			payload["secret"] = "***"
+			return payload
+		}))
+	raw := map[string]any{"secret": "s3cr3t"}
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM}, raw)
+
+	if raw["secret"] != "s3cr3t" {
+		t.Fatalf("redact mutated business payload: %v", raw)
+	}
+	got, ok := collected.events[0].Payload.(map[string]any)
+	if !ok || got["secret"] != "***" {
+		t.Fatalf("payload not redacted: %#v", collected.events[0].Payload)
+	}
+}
+
+// TestEmitPayloadRedactPanicIsIsolated 脱敏 panic 不能冲出业务调用：事件
+// 继续分发（Payload 留空），异常记入日志。
+func TestEmitPayloadRedactPanicIsIsolated(t *testing.T) {
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(observe.Event, any) any { panic("redact boom") }))
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM, Phase: observe.PhaseStart}, "raw")
+
+	if len(collected.events) != 1 {
+		t.Fatalf("events = %d", len(collected.events))
+	}
+	if collected.events[0].Payload != nil {
+		t.Fatalf("Payload = %v, want nil after redact panic", collected.events[0].Payload)
+	}
+	if !strings.Contains(logs.String(), "redact panicked") {
+		t.Fatalf("redact panic not logged: %q", logs.String())
+	}
+}
+
+// TestMultiDispatchContinuesAfterPanic Multi 中第一个观察者 panic 后，
+// 后续观察者必须继续收到事件。
+func TestMultiDispatchContinuesAfterPanic(t *testing.T) {
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	panicky := observe.ObserverFunc(func(context.Context, observe.Event) { panic("boom") })
+	collected := &collector{}
+	ctx := observe.With(context.Background(), observe.Multi(panicky, collected))
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindTool, Phase: observe.PhaseStart})
+	if len(collected.events) != 1 {
+		t.Fatal("panic in first Multi observer stopped dispatch to the next")
+	}
+	if !strings.Contains(logs.String(), "observer panicked") {
+		t.Fatalf("panic not logged: %q", logs.String())
+	}
+}
+
+// TestAsyncObserverPanicIsolated Async 消费端 panic 与其他观察者共用同一
+// 隔离与日志语义；Close 正常排空返回。
+func TestAsyncObserverPanicIsolated(t *testing.T) {
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	panicky := observe.ObserverFunc(func(context.Context, observe.Event) { panic("async boom") })
+	async := observe.Async(panicky, 4, false)
+	ctx := observe.With(context.Background(), async)
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindTool, Phase: observe.PhaseStart})
+	async.Close()
+
+	if !strings.Contains(logs.String(), "observer panicked") {
+		t.Fatalf("async panic not logged: %q", logs.String())
+	}
+}

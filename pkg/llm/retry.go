@@ -113,7 +113,7 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 		defer writer.Close()
 		for attempt := 0; attempt < m.config.MaxAttempts; attempt++ {
 			var started atomic.Bool
-			attemptCtx := withStreamSignal[Response](executionCtx, func() {
+			attemptCtx := withStreamProduced(executionCtx, func() {
 				started.Store(true)
 			})
 			attemptCtx, published := stream.TrackMessages(attemptCtx)

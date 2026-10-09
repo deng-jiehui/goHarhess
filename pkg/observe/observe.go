@@ -71,8 +71,28 @@ func EmitPayload(ctx context.Context, event Event, raw any) {
 		if req.redact == nil {
 			return nil
 		}
-		return req.redact(event, raw)
+		return redactPayload(ctx, event, req.redact, raw)
 	})
+}
+
+// redactPayload 先把载荷克隆成独立副本再交给用户脱敏函数：脱敏可以就地
+// 改写副本（如把密钥替换为 "***"），业务数据与调用方持有的原始输入不受
+// 影响。脱敏函数本身也可能 panic：异常在此被隔离并记录，事件继续以无
+// Payload 的形态分发——不能回退到未脱敏的原始载荷。
+func redactPayload(ctx context.Context, event Event, redact RedactFunc, raw any) (payload any) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			payload = nil
+			slog.Default().LogAttrs(ctx, slog.LevelWarn, "observe: redact panicked",
+				slog.String("kind", string(event.Kind)),
+				slog.String("phase", string(event.Phase)),
+				slog.String("name", event.Name),
+				slog.String("trace_id", event.Trace.TraceID),
+				slog.String("span_id", event.Trace.SpanID),
+				slog.Any("panic", recovered))
+		}
+	}()
+	return redact(event, CloneValue(raw))
 }
 
 func emit(ctx context.Context, event Event, payload func() any) {

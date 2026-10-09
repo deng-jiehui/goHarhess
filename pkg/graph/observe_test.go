@@ -3,6 +3,7 @@ package graph_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/goharness/goharness/pkg/graph"
@@ -12,11 +13,15 @@ import (
 )
 
 type eventLog struct {
+	mu     sync.Mutex
 	events []observe.Event
 }
 
 func (l *eventLog) OnEvent(_ context.Context, event observe.Event) {
+	// 异步 checkpoint 在 drain 协程发射事件，收集器必须并发安全。
+	l.mu.Lock()
 	l.events = append(l.events, event)
+	l.mu.Unlock()
 }
 
 func sequence(events []observe.Event) []string {
@@ -254,14 +259,14 @@ func TestObserveInterruptAndCheckpoint(t *testing.T) {
 		t.Fatalf("pending=%v", pending)
 	}
 	var interruptEvent *observe.Event
-	checkpointSaves := 0
+	saveSpans := map[string][]observe.Phase{}
 	for i := range log.events {
 		event := &log.events[i]
 		if event.Kind == observe.KindInterrupt {
 			interruptEvent = event
 		}
-		if event.Kind == observe.KindCheckpoint && event.Name == "save" && event.Phase == observe.PhaseEnd {
-			checkpointSaves++
+		if event.Kind == observe.KindCheckpoint && event.Name == "save" {
+			saveSpans[event.Trace.SpanID] = append(saveSpans[event.Trace.SpanID], event.Phase)
 		}
 	}
 	if interruptEvent == nil {
@@ -273,8 +278,31 @@ func TestObserveInterruptAndCheckpoint(t *testing.T) {
 	if interruptEvent.Attrs["interrupt.pending"] != 1 {
 		t.Fatalf("pending attr = %v", interruptEvent.Attrs["interrupt.pending"])
 	}
-	if checkpointSaves == 0 {
-		t.Fatal("no checkpoint save event")
+	// 每次保存都必须 start/end 配对且共享 SpanID：OTel 桥接靠这对
+	// 事件把 checkpoint span 挂到运行调用树下，而不是临时孤儿 span。
+	if len(saveSpans) == 0 {
+		t.Fatalf("no checkpoint save events: %v", sequence(log.events))
+	}
+	for spanID, phases := range saveSpans {
+		if !equalSeq(phasesToStrings(phases), []string{"start", "end"}) {
+			t.Fatalf("save span %s phases = %v", spanID, phases)
+		}
+	}
+
+	// 挂起收尾：活动节点与 run 都以 graph.outcome=suspended 的 end 事件
+	// 闭合，恢复前的最后一个事件必须是 run 收尾，不留下未关 span。
+	last := log.events[len(log.events)-1]
+	if last.Kind != observe.KindRun || last.Phase != observe.PhaseEnd || last.Attrs["graph.outcome"] != "suspended" {
+		t.Fatalf("run not closed on suspend: %v", sequence(log.events))
+	}
+	nodeSuspended := false
+	for _, event := range log.events {
+		if event.Kind == observe.KindNode && event.Phase == observe.PhaseEnd && event.Attrs["graph.outcome"] == "suspended" {
+			nodeSuspended = true
+		}
+	}
+	if !nodeSuspended {
+		t.Fatalf("no suspended node end: %v", sequence(log.events))
 	}
 
 	before := len(log.events)
@@ -282,18 +310,47 @@ func TestObserveInterruptAndCheckpoint(t *testing.T) {
 	if err != nil || out != "hello/Ada" {
 		t.Fatalf("resume out=%q err=%v", out, err)
 	}
-	var sawLoad bool
-	for _, event := range log.events[before:] {
-		if event.Kind == observe.KindCheckpoint && event.Name == "load" && event.Phase == observe.PhaseEnd {
-			sawLoad = true
-			if event.Attrs["checkpoint.found"] != true {
-				t.Fatalf("load attrs = %v", event.Attrs)
+	loadSpans := map[string][]observe.Phase{}
+	var loadEnd *observe.Event
+	var runStart *observe.Event
+	for i := before; i < len(log.events); i++ {
+		event := &log.events[i]
+		switch {
+		case event.Kind == observe.KindCheckpoint && event.Name == "load":
+			loadSpans[event.Trace.SpanID] = append(loadSpans[event.Trace.SpanID], event.Phase)
+			if event.Phase == observe.PhaseEnd {
+				loadEnd = event
 			}
+		case event.Kind == observe.KindRun && event.Phase == observe.PhaseStart:
+			runStart = event
 		}
 	}
-	if !sawLoad {
-		t.Fatalf("no checkpoint load event on resume: %v", sequence(log.events[before:]))
+	if len(loadSpans) != 1 {
+		t.Fatalf("checkpoint load spans = %v", loadSpans)
 	}
+	for spanID, phases := range loadSpans {
+		if !equalSeq(phasesToStrings(phases), []string{"start", "end"}) {
+			t.Fatalf("load span %s phases = %v", spanID, phases)
+		}
+	}
+	if loadEnd == nil || loadEnd.Attrs["checkpoint.found"] != true {
+		t.Fatalf("load end = %#v", loadEnd)
+	}
+	// 恢复建立新的 run 记录，通过 checkpoint.key 关联到原检查点。
+	if runStart == nil || runStart.Attrs["checkpoint.key"] != "ask-run" {
+		t.Fatalf("resume run start = %v", sequence(log.events[before:]))
+	}
+	if runStart.Trace.SpanID == last.Trace.SpanID {
+		t.Fatal("resumed run reused suspended span id")
+	}
+}
+
+func phasesToStrings(phases []observe.Phase) []string {
+	out := make([]string, len(phases))
+	for i, phase := range phases {
+		out[i] = string(phase)
+	}
+	return out
 }
 
 func equalSeq(got, want []string) bool {

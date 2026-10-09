@@ -77,7 +77,7 @@ func responseReaderFromWire(ctx context.Context, events <-chan wireEvent, cancel
 				}
 				switch event.kind {
 				case wireEventDelta:
-					notifyStream[Response](ctx)
+					notifyStreamProduced(ctx)
 					err := accumulator.apply(event.messages)
 					if err != nil {
 						_ = writer.CloseWithError(err)

@@ -32,3 +32,44 @@ func TestBeginCallbackEmitsLLMStartEventWithRedactedPayload(t *testing.T) {
 		t.Fatalf("payload = %#v", events[0].Payload)
 	}
 }
+
+// TestCapturePayloadMutationCannotReachBusinessRequest 复现审查 P1：
+// 脱敏对载荷的改写不能污染模型实际收到的请求。
+func TestCapturePayloadMutationCannotReachBusinessRequest(t *testing.T) {
+	var seen llm.Request
+	node, err := llm.NewChatModelNode(llm.NewHandlerModel(
+		func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+			seen = request
+			return []schema.Message{schema.AssistantMessage("ok")}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []observe.Event
+	ctx := observe.With(context.Background(),
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			request := raw.(llm.Request)
+			// 深克隆后改写：若隔离失效，模型将收到 "***"。
+			request.Messages[0].ContentBlocks[0].Text.Text = "***"
+			return request
+		}),
+		observe.ObserverFunc(func(_ context.Context, event observe.Event) { events = append(events, event) }),
+	)
+	request := llm.Request{Messages: []schema.Message{{
+		Role:          schema.RoleUser,
+		ContentBlocks: []schema.ContentBlock{schema.NewTextBlock("secret")},
+	}}}
+	if _, err := node.Invoke(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen.Messages[0].JoinedText(""); got != "secret" {
+		t.Fatalf("model received mutated request: %q", got)
+	}
+	payload, ok := events[0].Payload.(llm.Request)
+	if !ok || payload.Messages[0].JoinedText("") != "***" {
+		t.Fatalf("payload = %#v", events[0].Payload)
+	}
+	if request.Messages[0].JoinedText("") != "secret" {
+		t.Fatal("redact mutated caller request")
+	}
+}

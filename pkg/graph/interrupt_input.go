@@ -189,7 +189,9 @@ func (g *CompiledGraph[I, O]) PendingInterrupts(ctx context.Context, options ...
 	if err != nil {
 		return nil, err
 	}
-	c, err := g.runtime.loadCheckpointProgress(runCtx, setup)
+	c, err := g.runtime.loadCheckpointProgress(runCtx, &setup)
+	// 纯查询路径没有运行记录：加载 span 以独立根 span 发射。
+	setup.flushPendingLoad(runCtx)
 	if err != nil {
 		return nil, err
 	}
