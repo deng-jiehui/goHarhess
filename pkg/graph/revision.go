@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -146,6 +147,15 @@ func (g *Graph[I, O]) compileRecoveryMetadata() error {
 			contract.Dispatches = map[string]revisionDispatch{}
 		}
 		contract.Dispatches[from] = item
+	}
+	// 路由按「来源→各预声明目标」投影为条件边条目，检查点契约
+	// 能看到与运行期一致的候选出边集合。
+	for from, route := range g.routes {
+		for _, target := range slices.Sorted(maps.Keys(route.targets)) {
+			contract.Edges = append(contract.Edges, revisionEdge{
+				From: from, To: target, Conditional: true, Input: typeName(route.inputType),
+			})
+		}
 	}
 	data, err := json.Marshal(contract)
 	if err != nil {

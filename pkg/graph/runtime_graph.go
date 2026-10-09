@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -38,6 +40,7 @@ type Graph[I, O any] struct {
 	maxSteps       int
 	forks          map[string]forkSpec
 	dispatches     map[string]*dispatchSpec
+	routes         map[string]*runtimeRoute
 	parallelGroups map[string]*runtimeParallelNode
 	stepMerger     *runtimeStepMerger
 	maxConcurrency int
@@ -92,6 +95,14 @@ type runtimePostHandler struct {
 type runtimeCondition struct {
 	inputType reflect.Type
 	invoke    func(context.Context, any) (bool, error)
+}
+
+// runtimeRoute 是单次求值的路由决策：一次调用直接返回目标节点名。
+// 目标集合在声明期固定，运行期不再按出边逐条求值谓词。
+type runtimeRoute struct {
+	inputType reflect.Type
+	targets   map[string]bool
+	invoke    func(context.Context, any) (string, error)
 }
 
 // NodeOption configures Graph-owned node adapters. Runnable options must be
@@ -338,8 +349,81 @@ func (g *Graph[I, O]) addRuntimeEdge(from, to, label string, condition *runtimeC
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if _, ok := g.routes[from]; ok {
+		return validationError("route.edge.mix", fmt.Sprintf("routes[%q]", from), "routed node cannot declare ordinary edges")
+	}
 	g.edges = append(g.edges, runtimeEdge{from: from, to: to, label: strings.TrimSpace(label), condition: condition})
 	return nil
+}
+
+// addRuntimeRoute 登记单次求值的路由：from 的出边集合由路由声明接管，
+// 不能再声明普通出边、条件出边、静态扇出、动态分派或并行组。
+func (g *Graph[I, O]) addRuntimeRoute(from string, route *runtimeRoute) error {
+	if g == nil {
+		return validationError("graph.nil", "graph", "graph cannot be nil")
+	}
+	from = strings.TrimSpace(from)
+	if from == "" || from == End {
+		return validationError("route.from.invalid", "routes.from", "route source must be a node or START")
+	}
+	if route == nil || len(route.targets) == 0 {
+		return validationError("route.targets.empty", fmt.Sprintf("routes[%q]", from), "route requires declared targets")
+	}
+	for target := range route.targets {
+		if target == "" || target == Start {
+			return validationError("route.targets.invalid", fmt.Sprintf("routes[%q]", from), "route target %q is invalid", target)
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.routes[from]; ok {
+		return validationError("route.duplicate", fmt.Sprintf("routes[%q]", from), "route already declared")
+	}
+	for _, e := range g.edges {
+		if e.from == from {
+			return validationError("route.edge.mix", fmt.Sprintf("routes[%q]", from), "routed node cannot declare ordinary edges")
+		}
+	}
+	if _, ok := g.forks[from]; ok {
+		return validationError("route.edge.mix", fmt.Sprintf("routes[%q]", from), "routed node cannot also declare a fork")
+	}
+	if _, ok := g.dispatches[from]; ok {
+		return validationError("route.edge.mix", fmt.Sprintf("routes[%q]", from), "routed node cannot also declare a dispatch")
+	}
+	if _, ok := g.parallelGroups[from]; ok {
+		return validationError("route.edge.mix", fmt.Sprintf("routes[%q]", from), "routed node cannot also be a parallel group entry")
+	}
+	if g.routes == nil {
+		g.routes = map[string]*runtimeRoute{}
+	}
+	g.routes[from] = route
+	return nil
+}
+
+// newRuntimeRoute 把一次决策包装为路由：invoke 每次选择只调用一次，
+// 返回值必须是已声明目标之一，否则运行时按路由错误处理。
+func newRuntimeRoute[V any](router func(context.Context, V) (string, error)) *runtimeRoute {
+	return &runtimeRoute{inputType: typeOf[V](), targets: map[string]bool{}, invoke: func(ctx context.Context, input any) (target string, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("graph route panicked: %v", recovered)
+			}
+		}()
+		return router(ctx, typedArgument[V](input))
+	}}
+}
+
+func cloneRuntimeRoutes(in map[string]*runtimeRoute) map[string]*runtimeRoute {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]*runtimeRoute, len(in))
+	for k, v := range in {
+		copy := *v
+		copy.targets = maps.Clone(v.targets)
+		out[k] = &copy
+	}
+	return out
 }
 
 func (g *Graph[I, O]) Name() string {
@@ -441,7 +525,7 @@ func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {
 		parallelGroups[name] = spec
 	}
 	return &Graph[I, O]{
-		forks: cloneForks(g.forks), dispatches: cloneDispatches(g.dispatches), parallelGroups: parallelGroups, stepMerger: g.stepMerger, maxConcurrency: g.maxConcurrency,
+		forks: cloneForks(g.forks), dispatches: cloneDispatches(g.dispatches), routes: cloneRuntimeRoutes(g.routes), parallelGroups: parallelGroups, stepMerger: g.stepMerger, maxConcurrency: g.maxConcurrency,
 
 		name: g.name, description: g.description, inputType: g.inputType, outputType: g.outputType, stateType: g.stateType,
 		stateFactory: g.stateFactory, codec: g.codec, codecID: g.codecID, codecVersion: g.codecVersion, codecType: g.codecType,
@@ -582,6 +666,12 @@ func (g *Graph[I, O]) Snapshot() Snapshot {
 	for index, edge := range g.edges {
 		edges[index] = EdgeInfo{From: edge.from, To: edge.to, Label: edge.label, Conditional: edge.condition != nil}
 	}
+	// 路由按预声明目标投影为条件出边，快照与运行期看到同一份拓扑。
+	for from, route := range g.routes {
+		for _, target := range slices.Sorted(maps.Keys(route.targets)) {
+			edges = append(edges, EdgeInfo{From: from, To: target, Conditional: true})
+		}
+	}
 	return Snapshot{
 		Name: g.name, Description: g.description, Built: g.built, MaxSteps: g.maxSteps,
 		InputType: typeName(g.inputType), OutputType: typeName(g.outputType), StateType: typeName(g.stateType),
@@ -649,6 +739,39 @@ func (g *Graph[I, O]) validateRuntimeTypes() error {
 		// 并行汇合的消费对象是成员局部 State 而非边输入，跳过输入类型比较。
 		if exists && target.pre == nil && target.parallel == nil && target.parallelJoin == nil && !sourceType.AssignableTo(target.inputType) {
 			return validationError("edge.type_mismatch", edgePath(index), "%s output %s is not assignable to %s input %s", edge.from, typeName(sourceType), edge.to, typeName(target.inputType))
+		}
+	}
+	for from, route := range g.routes {
+		sourceType, ok := g.runtimeSourceType(from)
+		if !ok {
+			continue
+		}
+		// 路由输入与条件边同一套决议：能匹配节点输出或 State 之一即可；
+		// 两者同时匹配时运行期按 State 处理，不视为歧义。
+		matchesOutput := sourceType.AssignableTo(route.inputType)
+		matchesState := g.stateType != nil && g.stateType.AssignableTo(route.inputType)
+		if !matchesOutput && !matchesState {
+			return validationError("route.input.type_mismatch", fmt.Sprintf("routes[%q]", from), "route input %s matches neither source output %s nor State %s", typeName(route.inputType), typeName(sourceType), typeName(g.stateType))
+		}
+	}
+	return nil
+}
+
+// validateRoutes 校验路由拓扑：来源是已注册节点或 START，预声明目标
+// 全部存在；路由不再与其他出边形式混用（登记时已互斥）。
+func (g *Graph[I, O]) validateRoutes() error {
+	for from, route := range g.routes {
+		if from != Start {
+			if _, ok := g.nodes[from]; !ok {
+				return fmt.Errorf("route %q source is not registered", from)
+			}
+		}
+		for target := range route.targets {
+			if target != End {
+				if _, ok := g.nodes[target]; !ok {
+					return fmt.Errorf("route %q target %q is not registered", from, target)
+				}
+			}
 		}
 	}
 	return nil
@@ -786,6 +909,9 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	if err := g.validateParallelGroups(); err != nil {
 		errs = append(errs, validationError("graph.parallel.invalid", "parallel", "%v", err))
 	}
+	if err := g.validateRoutes(); err != nil {
+		errs = append(errs, validationError("graph.route.invalid", "routes", "%v", err))
+	}
 	if err := g.validateRuntimeTypes(); err != nil {
 		switch value := err.(type) {
 		case ValidationError:
@@ -840,7 +966,10 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 		reverse[to] = append(reverse[to], from)
 	}
 	if len(outgoing[Start]) == 0 {
-		errs = append(errs, validationError("graph.start.missing", "edges", "START requires an outgoing edge"))
+		// START 上的路由同样构成入口：候选目标即首节点集合。
+		if _, routed := g.routes[Start]; !routed {
+			errs = append(errs, validationError("graph.start.missing", "edges", "START requires an outgoing edge"))
+		}
 	}
 	for from, indexes := range outgoing {
 		unconditional, conditional := 0, 0
@@ -864,6 +993,10 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 			if _, ok := g.dispatches[id]; ok {
 				continue
 			}
+			// 路由节点的出边集合由预声明目标接管，同样没有静态出边。
+			if _, ok := g.routes[id]; ok {
+				continue
+			}
 			// 并行组入口的扇出在调度层完成，同样没有静态出边。
 			if _, ok := g.parallelGroups[id]; ok {
 				continue
@@ -875,7 +1008,7 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 	// 的虚拟边补足，成员路径上的后续节点仍走真实边；并行组入口同理
 	// 以「入口→成员」虚拟边补足扇出。
 	walkOutgoing, walkEdges := outgoing, edges
-	if len(g.dispatches) > 0 || len(g.parallelGroups) > 0 {
+	if len(g.dispatches) > 0 || len(g.parallelGroups) > 0 || len(g.routes) > 0 {
 		walkEdges = append([]runtimeEdge(nil), edges...)
 		walkOutgoing = map[string][]int{}
 		for from, indexes := range outgoing {
@@ -894,6 +1027,15 @@ func (g *Graph[I, O]) validateRuntimeGraph() ValidationErrors {
 				walkOutgoing[name] = append(walkOutgoing[name], len(walkEdges))
 				walkEdges = append(walkEdges, runtimeEdge{from: name, to: member})
 				reverse[member] = append(reverse[member], name)
+			}
+		}
+		// 路由节点的出边以预声明目标投影，供可达性遍历看到完整拓扑。
+		for from, route := range g.routes {
+			targets := slices.Sorted(maps.Keys(route.targets))
+			for _, target := range targets {
+				walkOutgoing[from] = append(walkOutgoing[from], len(walkEdges))
+				walkEdges = append(walkEdges, runtimeEdge{from: from, to: target})
+				reverse[target] = append(reverse[target], from)
 			}
 		}
 	}

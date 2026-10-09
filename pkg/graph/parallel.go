@@ -139,6 +139,9 @@ func (g *Graph[I, O]) AddParallelNode(name string, branches []ParallelBranch, op
 	if name == Start || name == End {
 		return validationError("node.id.reserved", fmt.Sprintf("nodes[%q].id", name), "ID is reserved")
 	}
+	if _, ok := g.routes[name]; ok {
+		return validationError("route.edge.mix", fmt.Sprintf("nodes[%q].id", name), "routed node cannot also be a parallel group entry")
+	}
 	if len(branches) == 0 {
 		return validationError("parallel.branches.empty", fmt.Sprintf("nodes[%q].branches", name), "parallel node requires at least one branch")
 	}

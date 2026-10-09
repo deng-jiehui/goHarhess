@@ -81,6 +81,9 @@ func AddDispatch[I, O, S any](g *Graph[I, O], from string, targets []string, joi
 	if _, ok := g.dispatches[from]; ok {
 		return fmt.Errorf("dispatch %q already declared", from)
 	}
+	if _, ok := g.routes[from]; ok {
+		return fmt.Errorf("dispatch %q cannot also declare a route", from)
+	}
 	if g.dispatches == nil {
 		g.dispatches = map[string]*dispatchSpec{}
 	}

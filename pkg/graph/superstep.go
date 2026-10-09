@@ -56,6 +56,9 @@ func (g *Graph[I, O]) AddFork(from string, branches ...string) error {
 	if _, ok := g.forks[from]; ok {
 		return fmt.Errorf("fork %q already declared", from)
 	}
+	if _, ok := g.routes[from]; ok {
+		return fmt.Errorf("fork %q cannot also declare a route", from)
+	}
 	if g.forks == nil {
 		g.forks = map[string]forkSpec{}
 	}

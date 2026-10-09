@@ -1484,6 +1484,22 @@ func (g *Graph[I, O]) runtimeExecutionPlan() (map[string]runtimeNode, []runtimeE
 }
 
 func (g *Graph[I, O]) selectRuntimeNext(ctx context.Context, from string, value erasedValue, runtimeState any, edges []runtimeEdge) (string, error) {
+	if route := g.routes[from]; route != nil {
+		// 路由决策只求值一次：输入优先取 State（路由以 State 为决策依据），
+		// 类型不匹配时退回节点输出；未声明的目标按路由错误处理。
+		input := value.value
+		if g.stateType != nil && g.stateType.AssignableTo(route.inputType) && (value.typ == nil || !value.typ.AssignableTo(route.inputType) || route.inputType == g.stateType) {
+			input = runtimeState
+		}
+		target, err := route.invoke(ctx, input)
+		if err != nil {
+			return "", fmt.Errorf("route %q: %w", from, err)
+		}
+		if !route.targets[target] {
+			return "", fmt.Errorf("route %q returned undeclared target %q", from, target)
+		}
+		return target, nil
+	}
 	fallback := ""
 	for _, candidate := range edges {
 		if candidate.from != from {
