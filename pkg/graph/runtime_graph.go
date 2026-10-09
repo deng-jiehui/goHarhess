@@ -1020,11 +1020,10 @@ func (g *Graph[I, O]) validateParallelGroups() error {
 		for from, targets := range routeTargets {
 			if !inner[from] {
 				for _, target := range targets {
-					to := target
-					if to == name {
-						to = join
-					}
-					if to == join {
+					// 组外路由目标是组名本身时表示进入组入口（fan-out），
+					// 不是汇合；只有组内成员返回组名才在上方遍历中被解释
+					// 为到达汇合。组外直接指向汇合节点仍然非法。
+					if target == join {
 						return fmt.Errorf("route %q -> %q enters join outside its group", from, target)
 					}
 				}

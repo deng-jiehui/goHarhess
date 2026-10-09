@@ -411,8 +411,16 @@ func TestDispatchMemberStateMigration(t *testing.T) {
 		parse := runnable.Func[string, string](func(_ context.Context, input string, _ ...runnable.Option) (string, error) {
 			return "parsed:" + input, nil
 		})
+		var once atomic.Bool
 		if err := g.AddNode("parse", parse,
-			graph.WithPreHandler(func(_ context.Context, s *memberChainState) (string, error) { return s.Last, nil }),
+			graph.WithPreHandler(func(_ context.Context, s *memberChainState) (string, error) {
+				// 第一轮（两个 fetch 汇合）结束后挂起：此时成员已推进到
+				// parse，member.State 落盘而 parse 任务记录尚未建立。
+				if pauseAfterFirstRound != nil && once.CompareAndSwap(false, true) {
+					pauseAfterFirstRound()
+				}
+				return s.Last, nil
+			}),
 			graph.WithPostHandler(func(_ context.Context, s *memberChainState, output string) error {
 				s.Results = append(s.Results, output)
 				return nil
@@ -437,15 +445,9 @@ func TestDispatchMemberStateMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		var once atomic.Bool
 		if err := graph.SetStepMerger(g, func(_ context.Context, base *memberChainState, results []graph.StepResult[*memberChainState]) error {
 			for _, r := range results {
 				base.Results = append(base.Results, r.State.Results...)
-			}
-			// 第一轮（两个 fetch 汇合）结束后挂起：此时成员已推进到 parse，
-			// member.State 落盘而 parse 任务记录尚未建立。
-			if pauseAfterFirstRound != nil && len(results) == 2 && once.CompareAndSwap(false, true) {
-				pauseAfterFirstRound()
 			}
 			return nil
 		}); err != nil {

@@ -107,6 +107,14 @@ func (g *Graph[I, O]) validateDispatches() error {
 	for _, e := range g.edges {
 		outgoing[e.from] = append(outgoing[e.from], e)
 	}
+	// 成员内部的路由候选目标与普通边同样参与可达性：Branch 声明的
+	// 所有去向都可能被选中，任何一条到不了汇合点都应拒绝编译。
+	routeTargets := map[string][]string{}
+	for id, route := range g.routes {
+		for target := range route.targets {
+			routeTargets[id] = append(routeTargets[id], target)
+		}
+	}
 	for from, spec := range g.dispatches {
 		if from == Start || from == End {
 			return fmt.Errorf("dispatch source %q is a reserved node", from)
@@ -173,24 +181,34 @@ func (g *Graph[I, O]) validateDispatches() error {
 				if node.parallel != nil {
 					return fmt.Errorf("dispatch %q: parallel node %q inside a member path is unsupported", from, id)
 				}
-				if len(outgoing[id]) == 0 {
+				next := make([]string, 0, len(outgoing[id])+len(routeTargets[id]))
+				for _, e := range outgoing[id] {
+					next = append(next, e.to)
+				}
+				next = append(next, routeTargets[id]...)
+				if len(next) == 0 {
 					return fmt.Errorf("dispatch %q member path from %q does not reach join %q", from, target, spec.join)
 				}
-				for _, e := range outgoing[id] {
-					if err := walk(e.to); err != nil {
+				for _, to := range next {
+					if err := walk(to); err != nil {
 						return err
 					}
 				}
 				return nil
 			}
 			reached[target] = true
+			targetNext := make([]string, 0, len(outgoing[target])+len(routeTargets[target]))
 			for _, e := range outgoing[target] {
-				if err := walk(e.to); err != nil {
+				targetNext = append(targetNext, e.to)
+			}
+			targetNext = append(targetNext, routeTargets[target]...)
+			if len(targetNext) == 0 {
+				return fmt.Errorf("dispatch %q member path from %q does not reach join %q", from, target, spec.join)
+			}
+			for _, to := range targetNext {
+				if err := walk(to); err != nil {
 					return err
 				}
-			}
-			if len(outgoing[target]) == 0 {
-				return fmt.Errorf("dispatch %q member path from %q does not reach join %q", from, target, spec.join)
 			}
 			for id := range reached {
 				if id == target && !revisit {

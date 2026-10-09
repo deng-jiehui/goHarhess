@@ -202,13 +202,17 @@ func TestNativeStepIsolationOrderAndRepeatedFork(t *testing.T) {
 	if !reflect.DeepEqual(f.entries["a"], f.entries["b"]) {
 		t.Fatalf("same-round inputs differ: %v / %v", f.entries["a"], f.entries["b"])
 	}
-	if !reflect.DeepEqual(f.entries["c"][0], []string{"fork", "a", "b"}) {
+	// c 接续的是成员 b 自己的局部 State（a 的中间态不进入分支），
+	// 与合并前主干隔离。
+	if !reflect.DeepEqual(f.entries["c"][0], []string{"fork", "b"}) {
 		t.Fatalf("next-round state: %v", f.entries["c"])
 	}
 	if f.calls["join"] != 2 {
 		t.Fatalf("join calls %d", f.calls["join"])
 	}
-	if len(f.groups) != 6 || f.groups[0] == f.groups[3] {
+	// 合并只在全部成员到达后执行一次：每次扇出产生两条成员终态记录，
+	// 两次扇出共四条，组实例按轮次区分。
+	if len(f.groups) != 4 || f.groups[0] != f.groups[1] || f.groups[0] == f.groups[2] {
 		t.Fatalf("group instances: %v", f.groups)
 	}
 	saved, _ := readStep(t, store, "loop")
@@ -258,7 +262,9 @@ func TestNativeStepFailureBoundaries(t *testing.T) {
 					expectedStep = 0
 				}
 				if kind == "node" {
-					expected = []string{"fork", "a", "b"}
+					// 成员中间态不合并进主干：c 失败时提交的主干只有 fork，
+					// a/b 的终态保存在组内成员快照中。
+					expected = []string{"fork"}
 					expectedStep = 3
 				}
 				if !reflect.DeepEqual(s.Values, expected) || saved.Step != expectedStep {

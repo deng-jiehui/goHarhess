@@ -544,12 +544,15 @@ func (g *Graph[I, O]) scheduleNext(ctx context.Context, s *StepSchedule, from, n
 		return nil
 	}
 	if spec, ok := g.forks[from]; ok {
+		// 成员清单按分支声明序冻结，成员 ID 就是分支入口名：成员各自持有
+		// 局部 State 直到汇合，合并只在全部到达后执行一次。
 		s.Sequence++
 		group := &StepGroup{ID: fmt.Sprintf("group-%d", s.Sequence), Fork: from}
-		s.Group = group
-		for _, b := range spec.Branches {
+		for index, b := range spec.Branches {
+			group.Members = append(group.Members, GroupMember{ID: b, Seq: index, Node: b})
 			s.Tasks = append(s.Tasks, s.task(b, group.ID, b))
 		}
+		s.Group = group
 		return nil
 	}
 	if next == End {
@@ -703,6 +706,19 @@ func (g *Graph[I, O]) validateSchedule(s *StepSchedule) error {
 	for _, b := range spec.Branches {
 		branches[b] = false
 	}
+	// 成员清单持久化时按分支声明校验：ID 即分支名，一一对应不缺不重。
+	if len(s.Group.Members) > 0 {
+		seenMembers := map[string]bool{}
+		for _, m := range s.Group.Members {
+			if _, ok := branches[m.ID]; !ok || seenMembers[m.ID] || m.Node != m.ID {
+				return fmt.Errorf("%w: unknown or duplicate member %q", state.ErrInvalidCheckpoint, m.ID)
+			}
+			seenMembers[m.ID] = true
+		}
+		if len(seenMembers) != len(spec.Branches) {
+			return fmt.Errorf("%w: fork member manifest incomplete", state.ErrInvalidCheckpoint)
+		}
+	}
 	check := func(b string) error {
 		used, ok := branches[b]
 		if !ok || used {
@@ -803,6 +819,12 @@ func (g *Graph[I, O]) validateDispatchSchedule(s *StepSchedule) error {
 			for _, to := range outgoing[n] {
 				visit(to)
 			}
+			// 成员内部路由与边同样参与可达性：路由续点也属于本成员路径。
+			if route, ok := g.routes[n]; ok {
+				for target := range route.targets {
+					visit(target)
+				}
+			}
 		}
 		visit(entry)
 		if !reached[t.Node] {
@@ -874,6 +896,12 @@ func (g *Graph[I, O]) validateParallelSchedule(s *StepSchedule) error {
 			reached[n] = true
 			for _, to := range outgoing[n] {
 				visit(to)
+			}
+			// 成员内部路由与边同样参与可达性：路由续点也属于本成员路径。
+			if route, ok := g.routes[n]; ok {
+				for target := range route.targets {
+					visit(target)
+				}
 			}
 		}
 		visit(entry)
@@ -999,9 +1027,17 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 	coord := setup.checkpoint.coord
 	frame := setup.checkpoint.frame
 	inputRun, _ := ctx.Value(inputRunKey{}).(*inputRun)
-	// 成员局部态组（动态分派与展开并行组）按成员 ID 持有各自局部 State；
-	// 静态分支组查不到成员，仍走公共克隆路径。
-	memberLocal := s.Group != nil && (s.Group.Dispatch || s.Group.Parallel)
+	// 成员局部态组（静态扇出、动态分派与展开并行组）按成员 ID 持有各自
+	// 局部 State；原生 fork 的成员清单来自分支声明顺序，旧检查点未持久化
+	// 时按声明补齐。
+	if s.Group != nil && !s.Group.Dispatch && !s.Group.Parallel && len(s.Group.Members) == 0 {
+		if spec, ok := g.forks[s.Group.Fork]; ok {
+			for index, branch := range spec.Branches {
+				s.Group.Members = append(s.Group.Members, GroupMember{ID: branch, Seq: index, Node: branch})
+			}
+		}
+	}
+	memberLocal := s.Group != nil && len(s.Group.Members) > 0
 	var memberOf map[string]*GroupMember
 	if memberLocal {
 		memberOf = make(map[string]*GroupMember, len(s.Group.Members))
@@ -1291,22 +1327,13 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 	if blocked {
 		return nil, nil, nil, &suspendSignal{pending: pending}
 	}
-	// 并行组不做每轮公共合并：成员各自持有局部 State 直到统一汇合，
-	// 合并由汇合任务用组的 State merger 执行。
-	if s.Group == nil || !s.Group.Parallel {
-		// 扇出登记了组级合并器时优先使用，避免把某次 Parallel 的合并
-		// 规则扩散到整图；未登记的组仍回落全局合并器。
-		merger := g.stepMerger
-		if s.Group != nil {
-			if spec, ok := g.forks[s.Group.Fork]; ok && spec.merger != nil {
-				merger = spec.merger
-			}
-		}
-		if merger != nil {
-			mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
-			if err = merger.invoke(mergeCtx, candidate, results); err != nil {
-				return nil, nil, nil, fmt.Errorf("merge step: %w", err)
-			}
+	// 组（扇出/分派/并行）不做每轮公共合并：成员各自持有局部 State 直到
+	// 统一汇合，合并只在全部成员到达后对各分支终态执行一次（见下方）。
+	// 无组的顺序步骤仍走全局合并器。
+	if s.Group == nil && g.stepMerger != nil {
+		mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
+		if err = g.stepMerger.invoke(mergeCtx, candidate, results); err != nil {
+			return nil, nil, nil, fmt.Errorf("merge step: %w", err)
 		}
 	}
 	// 任务记录与子调用的回收不在此处执行——它们随调用方的进度提交进入
@@ -1344,8 +1371,8 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		}
 		if target == joinNode {
 			next.Group.Arrived = append(next.Group.Arrived, task.Branch)
-			if s.Group != nil && s.Group.Parallel {
-				// 到达汇合的成员保存终态局部 State：汇合任务按声明序消费。
+			if memberLocal {
+				// 到达汇合的成员保存终态局部 State：合并按声明序消费。
 				snap, serr := g.snapshotRuntimeState(routeBase, results[i].State)
 				if serr != nil {
 					return nil, nil, nil, fmt.Errorf("snapshot member %q state: %w", task.Branch, serr)
@@ -1380,9 +1407,38 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			return nil, nil, nil, errors.New("join is missing members")
 		}
 		if s.Group != nil && s.Group.Parallel {
-			// 组保留到汇合任务执行：成员终态快照随调度进入检查点。
+			// 组保留到汇合任务执行：成员终态快照随调度进入检查点，
+			// 合并由汇合任务用组的 State merger 执行。
 			next.Tasks = []StepTask{next.task(joinNode, s.Group.ID, "")}
-		} else {
+		} else if s.Group != nil {
+			// 扇出/分派组：全部成员到达后用各自终态一次性合并，
+			// 中间结果不进入主干 State，合并器也只执行这一次。
+			merger := g.stepMerger
+			if spec, ok := g.forks[s.Group.Fork]; ok && spec.merger != nil {
+				merger = spec.merger
+			}
+			if merger == nil {
+				return nil, nil, nil, fmt.Errorf("group %q reached join %q without a step merger", s.Group.Fork, joinNode)
+			}
+			final := make([]StepResult[any], len(next.Group.Members))
+			for mi := range next.Group.Members {
+				member := &next.Group.Members[mi]
+				if member.State == nil {
+					return nil, nil, nil, fmt.Errorf("group %q member %q state missing at join %q", s.Group.Fork, member.ID, joinNode)
+				}
+				restored, rerr := g.restoreRuntimeState(routeBase, *member.State)
+				if rerr == nil && coord != nil {
+					restored, rerr = hydrateRuntimeState(restored, coord.record.conversation())
+				}
+				if rerr != nil {
+					return nil, nil, nil, fmt.Errorf("restore member %q state: %w", member.ID, rerr)
+				}
+				final[mi] = StepResult[any]{NodeID: member.Node, GroupID: s.Group.ID, Branch: member.ID, State: restored}
+			}
+			mergeCtx := withRuntimeState(context.WithoutCancel(ctx), candidate)
+			if err = merger.invoke(mergeCtx, candidate, final); err != nil {
+				return nil, nil, nil, fmt.Errorf("merge step: %w", err)
+			}
 			next.Group = nil
 			next.Tasks = []StepTask{next.task(joinNode, "", "")}
 		}

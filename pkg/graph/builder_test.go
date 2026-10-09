@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -413,10 +414,11 @@ func TestBuilderParallelMergeScoped(t *testing.T) {
 }
 
 // 并行成员自行声明 Branch 路由时不再补默认汇合边：成员路由按声明到达
-// 本分支内的接续节点再回到汇合。fork 语义下成员接续节点见到的是合并后
-// 的主干 State（fork 组不做成员局部态，这与既有 AddFork 行为一致）。
+// 本分支内的接续节点再回到汇合。fork 组成员持有局部 State，接续节点从
+// 成员自己的提交态继续；合并函数只在全部成员到达汇合时执行一次。
 func TestBuilderParallelMemberRoute(t *testing.T) {
 	var merges atomic.Int32
+	var received [][]string
 	app, err := graph.NewState[builderState]("member-route").
 		Node("prep", func(_ context.Context, s *builderState) error {
 			s.Docs = []string{s.Query}
@@ -443,6 +445,7 @@ func TestBuilderParallelMemberRoute(t *testing.T) {
 			func(_ context.Context, base *builderState, results []graph.StepResult[*builderState]) error {
 				merges.Add(1)
 				for _, r := range results {
+					received = append(received, append([]string(nil), r.State.Docs...))
 					base.Docs = append(base.Docs, r.State.Docs[len(r.State.Docs)-1])
 				}
 				return nil
@@ -460,11 +463,17 @@ func TestBuilderParallelMemberRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 两轮批内合并：首轮 a,b 的成员结果；第二轮 a 经路由走到 a2 的接续结果。
-	if merges.Load() != 2 {
-		t.Fatalf("merge invoked %d times, want 2", merges.Load())
+	// 多步分支的中间态不触发合并：a 经路由走到 a2 后到达汇合，b 先到汇合
+	// 等待；合并只在全部成员到达后按声明序消费各自的终态 State——
+	// a 分支的终态包含 a2，不是首轮的中间结果 [q a]。
+	if merges.Load() != 1 {
+		t.Fatalf("merge invoked %d times, want 1", merges.Load())
 	}
-	if !out.Done || fmt.Sprint(out.Docs) != "[q a b a2]" {
+	want := [][]string{{"q", "a", "a2"}, {"q", "b"}}
+	if !reflect.DeepEqual(received, want) {
+		t.Fatalf("merger received %v, want final member states %v", received, want)
+	}
+	if !out.Done || fmt.Sprint(out.Docs) != "[q a2 b]" {
 		t.Fatalf("output=%+v", out)
 	}
 }
