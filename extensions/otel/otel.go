@@ -83,10 +83,11 @@ func (b *bridge) finish(event observe.Event, err error) {
 	b.mu.Lock()
 	traceSpans := b.spans[event.Trace.TraceID]
 	entry, ok := traceSpans[event.Trace.SpanID]
-	if event.Kind == observe.KindRun {
-		// run 收尾：删除以该 run span 为根的子树（含自身），祖先与
-		// 兄弟记录保留到各自 run 收尾——嵌套图的子 run 不会误清父级。
-		// 先收集完整集合再删除，避免中途断链漏清。
+	// 清理边界：run 收尾删除整棵子树（含自身），祖先与兄弟记录保留到
+	// 各自 run 收尾——嵌套图的子 run 不会误清父级；无父级的独立根操作
+	// （如直接调用模型）也在自身结束时清理，否则记录会随调用次数
+	// 无限累积。先收集完整集合再删除，避免中途断链漏清。
+	if event.Kind == observe.KindRun || event.Trace.ParentSpanID == "" {
 		doomed := map[string]bool{}
 		for id, e := range traceSpans {
 			if id == event.Trace.SpanID || descendantOf(traceSpans, e, event.Trace.SpanID) {

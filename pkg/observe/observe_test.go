@@ -362,6 +362,29 @@ func (p sealedPayload) Clone() sealedPayload {
 // opaquePayload 不可隔离：未导出字段且无 Clone()。
 type opaquePayload struct{ token *string }
 
+// shallowClonePayload 的领域 Clone() 是宽松实现：返回成功但共享内部
+// 引用——外层 Clone 成功不能证明内部已隔离。
+type shallowClonePayload struct{ token *string }
+
+func (p shallowClonePayload) Clone() shallowClonePayload { return p }
+
+// anyCloneMeta 按 schema/state 元数据约定实现 Clone() any。
+type anyCloneMeta struct{ values map[string]string }
+
+func (m *anyCloneMeta) Clone() any {
+	out := make(map[string]string, len(m.values))
+	for k, v := range m.values {
+		out[k] = v
+	}
+	return &anyCloneMeta{values: out}
+}
+
+// looseCarrierPayload 的领域 Clone() 宽松共享 Meta 指针；反射兜底可以
+// 逐字段复制，Meta 内部由 Clone() any 完成隔离。
+type looseCarrierPayload struct{ Meta *anyCloneMeta }
+
+func (p looseCarrierPayload) Clone() looseCarrierPayload { return p }
+
 func TestEmitPayloadHonorsDomainClone(t *testing.T) {
 	collected := &collector{}
 	token := "s3cr3t"
@@ -414,5 +437,54 @@ func TestEmitPayloadSkipsUnisolatableValue(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "not isolatable") {
 		t.Fatalf("skip not logged: %q", logs.String())
+	}
+}
+
+// TestEmitPayloadRejectsNonIsolatingClone 复核点：领域 Clone() 返回成功
+// 但内部仍共享引用时，脱敏副本必须与业务数据零共享——共享则跳过载荷。
+func TestEmitPayloadRejectsNonIsolatingClone(t *testing.T) {
+	collected := &collector{}
+	token := "s3cr3t"
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			payload := raw.(shallowClonePayload)
+			*payload.token = "***"
+			return payload
+		}))
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM}, shallowClonePayload{token: &token})
+
+	if token != "s3cr3t" {
+		t.Fatalf("redact escaped isolation: %q", token)
+	}
+	if collected.events[0].Payload != nil {
+		t.Fatalf("Payload = %v, want nil for non-isolating clone", collected.events[0].Payload)
+	}
+}
+
+// TestEmitPayloadRepairsSharedFieldViaAnyClone 复核点：外层 Clone 宽松
+// 共享的内部字段，反射兜底仍能经 Clone() any 完成隔离并保留载荷。
+func TestEmitPayloadRepairsSharedFieldViaAnyClone(t *testing.T) {
+	collected := &collector{}
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			payload := raw.(looseCarrierPayload)
+			payload.Meta.values["k"] = "***"
+			return payload
+		}))
+	meta := &anyCloneMeta{values: map[string]string{"k": "s3cr3t"}}
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.Kind("retrieval")}, looseCarrierPayload{Meta: meta})
+
+	if meta.values["k"] != "s3cr3t" {
+		t.Fatalf("redact escaped isolation: %q", meta.values["k"])
+	}
+	got, ok := collected.events[0].Payload.(looseCarrierPayload)
+	if !ok {
+		t.Fatalf("Payload = %#v", collected.events[0].Payload)
+	}
+	if got.Meta == meta {
+		t.Fatal("payload shares meta pointer with business data")
+	}
+	if got.Meta.values["k"] != "***" {
+		t.Fatalf("payload = %q", got.Meta.values["k"])
 	}
 }

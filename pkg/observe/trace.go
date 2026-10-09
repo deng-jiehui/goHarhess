@@ -351,12 +351,19 @@ func cloneReflectValueStrict(value reflect.Value, depth int) (reflect.Value, boo
 	if !value.IsValid() || depth > maxMetadataCloneDepth {
 		return value, false
 	}
+	// time.Time 是不可变值，内部 loc 指针共享安全，按标量处理
+	// （未导出字段反射也复制不了）。
+	if value.Type() == timeType {
+		return value, true
+	}
 	// 递归遵循领域 Clone 约定：llm.Request/Response、retrieval 载荷、
 	// mcp 载荷等都实现了 Clone()，反射复制可能漏掉内部共享结构。
+	// 但领域实现内部可能是宽松复制（如 schema.CloneMessages 宽松模式
+	// 会保留不可克隆值的引用），克隆结果必须校验与源零共享才算隔离；
+	// 校验不过退回严格反射路径逐字段处理。
 	if method := value.MethodByName("Clone"); method.IsValid() {
-		t := method.Type()
-		if t.NumIn() == 0 && t.NumOut() == 1 && t.Out(0).AssignableTo(value.Type()) {
-			return method.Call(nil)[0], true
+		if cloned, ok := tryDomainClone(value, method); ok && !sharesMutableRef(value, cloned) {
+			return cloned, true
 		}
 	}
 	switch value.Kind() {
@@ -437,9 +444,123 @@ func cloneReflectValueStrict(value reflect.Value, depth int) (reflect.Value, boo
 			cloned.Index(index).Set(item)
 		}
 		return cloned, true
+	case reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		// 无法复制的引用形态：共享即可能被脱敏就地影响，判为不可隔离。
+		return value, false
 	default:
-		// 基本类型不可变，原值即安全副本。
+		// 标量不可变，原值即安全副本。
 		return value, true
+	}
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// tryDomainClone 调用领域 Clone()：兼容返回具体类型与 Clone() any
+// （schema/state 元数据约定）两种签名；Clone panic、返回类型不匹配时
+// 返回失败，由调用方退回反射路径。
+func tryDomainClone(value, method reflect.Value) (cloned reflect.Value, ok bool) {
+	methodType := method.Type()
+	if methodType.NumIn() != 0 || methodType.NumOut() != 1 {
+		return reflect.Value{}, false
+	}
+	out := methodType.Out(0)
+	if !out.AssignableTo(value.Type()) && out.Kind() != reflect.Interface {
+		return reflect.Value{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			cloned, ok = reflect.Value{}, false
+		}
+	}()
+	result := method.Call(nil)[0]
+	if result.Kind() == reflect.Interface {
+		if result.IsNil() {
+			return reflect.Value{}, false
+		}
+		result = result.Elem()
+	}
+	if !result.IsValid() || !result.Type().AssignableTo(value.Type()) {
+		return reflect.Value{}, false
+	}
+	return result, true
+}
+
+// sharesMutableRef 判断两棵值树是否共享可变引用（指针、map、slice 底层
+// 数组、chan、func、unsafe.Pointer）。领域 Clone() 返回成功不代表内部
+// 已隔离——宽松实现会原样保留不可克隆的内部字段，必须逐树比对地址。
+func sharesMutableRef(a, b reflect.Value) bool {
+	aRefs := map[uintptr]bool{}
+	collectMutableRefs(a, aRefs, map[cloneVisit]bool{}, 0)
+	bRefs := map[uintptr]bool{}
+	collectMutableRefs(b, bRefs, map[cloneVisit]bool{}, 0)
+	for ptr := range aRefs {
+		if bRefs[ptr] {
+			return true
+		}
+	}
+	return false
+}
+
+type cloneVisit struct {
+	typ reflect.Type
+	ptr uintptr
+}
+
+// collectMutableRefs 收集值树中全部可变引用地址；time.Time 等不可变值
+// 不展开。环与深度均有界，未导出字段照常遍历（取地址不需要导出）。
+func collectMutableRefs(value reflect.Value, out map[uintptr]bool, seen map[cloneVisit]bool, depth int) {
+	if !value.IsValid() || depth > maxMetadataCloneDepth || value.Type() == timeType {
+		return
+	}
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		ptr := value.Pointer()
+		if ptr == 0 {
+			return
+		}
+		out[ptr] = true
+		mark := cloneVisit{typ: value.Type(), ptr: ptr}
+		if seen[mark] {
+			return
+		}
+		seen[mark] = true
+		if value.Kind() == reflect.Pointer {
+			collectMutableRefs(value.Elem(), out, seen, depth+1)
+		}
+	case reflect.Map:
+		if value.IsNil() {
+			return
+		}
+		out[value.Pointer()] = true
+		mark := cloneVisit{typ: value.Type(), ptr: value.Pointer()}
+		if seen[mark] {
+			return
+		}
+		seen[mark] = true
+		iterator := value.MapRange()
+		for iterator.Next() {
+			collectMutableRefs(iterator.Key(), out, seen, depth+1)
+			collectMutableRefs(iterator.Value(), out, seen, depth+1)
+		}
+	case reflect.Slice:
+		if value.Cap() > 0 {
+			out[value.Pointer()] = true
+		}
+		for index := 0; index < value.Len(); index++ {
+			collectMutableRefs(value.Index(index), out, seen, depth+1)
+		}
+	case reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			collectMutableRefs(value.Index(index), out, seen, depth+1)
+		}
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			collectMutableRefs(value.Field(index), out, seen, depth+1)
+		}
+	case reflect.Interface:
+		if !value.IsNil() {
+			collectMutableRefs(value.Elem(), out, seen, depth+1)
+		}
 	}
 }
 
