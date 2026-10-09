@@ -480,18 +480,25 @@ func SpawnAgent(ctx context.Context, spec ManagedSpec, description string) (Agen
 	}
 	creator := callerAgentID(ctx)
 	m, exists, err := coord.registerManagedWith(ctx, site, callKey, seq, spec, func(m *managedTask) error {
-		id := coord.newAgentIDLocked()
+		// 会话集合归集到根协调器：属主不同（命名空间子运行内创建）时
+		// 需要加根锁；属主相同说明外层注册锁已覆盖，不重复加锁。
+		agentCoord := coord.agentScope()
+		if agentCoord != coord {
+			agentCoord.mu.Lock()
+			defer agentCoord.mu.Unlock()
+		}
+		id := agentCoord.newAgentIDLocked()
 		// 会话级配置取自任务已冻结的 Spec 并独立复制：调用方原切片此后
 		// 的修改既不影响任务记录，也不影响子 Agent 的登记配置。
 		agentSpec := ManagedSpec{Builder: m.Spec.Builder, Version: m.Spec.Version, Config: cloneRawJSON(m.Spec.Config)}
 		m.AgentID = id
 		m.ID = agentTaskID(id, 1)
-		coord.agents = append(coord.agents, &sessionAgent{
+		agentCoord.agents = append(agentCoord.agents, &sessionAgent{
 			ID: id, Creator: creator, Description: description, Spec: agentSpec,
 			Status: AgentStatusActive, Active: m.ID,
 			Tasks: []agentTask{{ID: m.ID, Seq: 1, Status: ManagedStatusRunning, Input: cloneRawJSON(spec.Input)}},
 		})
-		coord.agentsData = nil
+		agentCoord.agentsData = nil
 		return nil
 	})
 	if err != nil {
@@ -524,17 +531,18 @@ func FollowupAgent(ctx context.Context, agentID string, input json.RawMessage) (
 		return AgentRef{}, err
 	}
 	coord := site.coord
+	agentCoord := coord.agentScope()
 	creator := callerAgentID(ctx)
 	// 追加任务的配置固定取自子 Agent 的登记记录，不接受调用方改写。
-	coord.mu.Lock()
-	agent, verr := coord.visibleAgentLocked(creator, agentID)
+	agentCoord.mu.Lock()
+	agent, verr := agentCoord.visibleAgentLocked(creator, agentID)
 	var spec ManagedSpec
 	if verr == nil {
 		spec = agent.Spec
 		spec.Config = cloneRawJSON(agent.Spec.Config)
 		spec.Input = cloneRawJSON(input)
 	}
-	coord.mu.Unlock()
+	agentCoord.mu.Unlock()
 	if verr != nil {
 		return AgentRef{}, verr
 	}
@@ -558,7 +566,11 @@ func FollowupAgent(ctx context.Context, agentID string, input json.RawMessage) (
 		return AgentRef{}, err
 	}
 	m, exists, err := coord.registerManagedWith(ctx, site, callKey, seq, spec, func(m *managedTask) error {
-		a, err := coord.visibleAgentLocked(creator, agentID)
+		if agentCoord != coord {
+			agentCoord.mu.Lock()
+			defer agentCoord.mu.Unlock()
+		}
+		a, err := agentCoord.visibleAgentLocked(creator, agentID)
 		if err != nil {
 			return err
 		}
@@ -573,7 +585,7 @@ func FollowupAgent(ctx context.Context, agentID string, input json.RawMessage) (
 		m.ID = agentTaskID(agentID, taskSeq)
 		a.Tasks = append(a.Tasks, agentTask{ID: m.ID, Seq: taskSeq, Status: ManagedStatusRunning, Input: cloneRawJSON(spec.Input)})
 		a.Status, a.Active = AgentStatusActive, m.ID
-		coord.agentsData = nil
+		agentCoord.agentsData = nil
 		return nil
 	})
 	if err != nil {
@@ -593,10 +605,11 @@ func ListAgents(ctx context.Context) ([]AgentSummary, error) {
 		return nil, err
 	}
 	creator := callerAgentID(ctx)
-	site.coord.mu.Lock()
-	defer site.coord.mu.Unlock()
+	coord := site.coord.agentScope()
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
 	var out []AgentSummary
-	for _, a := range site.coord.agents {
+	for _, a := range coord.agents {
 		if a.Creator == creator {
 			out = append(out, a.summary())
 		}
@@ -610,9 +623,10 @@ func GetAgent(ctx context.Context, agentID string) (AgentInfo, error) {
 	if err != nil {
 		return AgentInfo{}, err
 	}
-	site.coord.mu.Lock()
-	defer site.coord.mu.Unlock()
-	a, err := site.coord.visibleAgentLocked(callerAgentID(ctx), agentID)
+	coord := site.coord.agentScope()
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	a, err := coord.visibleAgentLocked(callerAgentID(ctx), agentID)
 	if err != nil {
 		return AgentInfo{}, err
 	}
@@ -627,7 +641,7 @@ func CloseAgent(ctx context.Context, agentID string) (AgentInfo, error) {
 	if err != nil {
 		return AgentInfo{}, err
 	}
-	coord := site.coord
+	coord := site.coord.agentScope()
 	coord.mu.Lock()
 	a, err := coord.visibleAgentLocked(callerAgentID(ctx), agentID)
 	if err != nil {
@@ -671,9 +685,10 @@ func ManagedAgentContext(ctx context.Context) (json.RawMessage, error) {
 	if site == nil || site.managed == nil || site.managed.AgentID == "" {
 		return nil, ErrManagedUnavailable
 	}
-	site.coord.mu.Lock()
-	defer site.coord.mu.Unlock()
-	a := site.coord.findAgentLocked(site.managed.AgentID)
+	coord := site.coord.agentScope()
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	a := coord.findAgentLocked(site.managed.AgentID)
 	if a == nil {
 		return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, site.managed.AgentID)
 	}

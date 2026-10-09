@@ -230,12 +230,8 @@ func walkManaged(frame *executionProgress, fn func(*managedTask)) {
 		fn(m)
 		walkManaged(m.Frame, fn)
 	}
-	for _, child := range frame.Children {
-		if child == nil {
-			continue
-		}
-		walkManaged(child.Frame, fn)
-	}
+	// 子调用名下的受管任务在子调用的命名空间记录中，不在本记录内——
+	// 跨记录阻塞经 waitChild 传递，本函数只覆盖本记录的受管子树。
 }
 
 func validateManagedTasks(tasks []*managedTask) error {

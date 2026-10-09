@@ -38,15 +38,17 @@ const (
 	InterruptPointAfterCommit InterruptPoint = "after_commit"
 )
 
-// executionFormatTree 是 Execution 的当前格式版本：进度是一棵执行树，
-// 根 frame 对应入口图，子调用进度经 childExecution.Frame 递归。
+// executionFormatTree 是 Execution 的当前格式版本：每条记录保存一个执行
+// frame，子调用进度经 childExecution.Key 指向的独立命名空间记录存储，
+// 不再内嵌递归。
 const executionFormatTree = 1
 
 // executionProgress 保存一个执行 frame 在提交边界上的 State、下一批任务及
 // 汇合记录；它同时是执行树的节点：Tasks 保存本轮分支任务的进度与交互日志，
-// Children 保存本 frame 发起的子调用。不保存流；有 PreHandler 的任务由
-// PreHandler 从 State 重建输入，无 PreHandler 的顺序任务在调度时把边输入
-// 冻结进 StepTask.Input（fork 组任务仍恒由 Pre 重建）。
+// Children 登记本 frame 发起的子调用（进度在各自的命名空间记录中）。
+// 不保存流；有 PreHandler 的任务由 PreHandler 从 State 重建输入，无
+// PreHandler 的顺序任务在调度时把边输入冻结进 StepTask.Input（fork 组
+// 任务仍恒由 Pre 重建）。
 type executionProgress struct {
 	Format        int                       `json:"format,omitempty"`
 	Schedule      *StepSchedule             `json:"schedule,omitempty"`
@@ -206,8 +208,8 @@ func (*InterruptedError) Unwrap() error { return ErrInterrupted }
 
 // checkpointConfig 集中承载检查点持久化参数与共享记录指针。coord 非 nil
 // 表示本运行参与执行树持久化：frame 指向树中本运行负责的 frame 槽位
-// （根运行为 coord.root，子运行为对应 childExecution.Frame），进度提交
-// 先原地更新该 frame 再编码整棵树，经协调器的唯一 writer 落盘。
+// （根运行与命名空间子运行为各自 coord.root，受管运行为根树中的
+// managedTask.Frame），进度提交先原地更新该 frame 再编码落盘。
 // recordView 以保护性互斥持有当前检查点记录：后台写入成功后整体替换，
 // 读取方在锁内取得稳定视图。记录各切片/映射字段按不可变约定共享，
 // 调用方不得原地修改取回的字段。

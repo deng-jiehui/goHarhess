@@ -50,10 +50,14 @@ type execTreeProgress struct {
 }
 
 type execTreeChild struct {
-	TaskID string           `json:"task_id"`
-	Seq    int              `json:"seq"`
-	Status string           `json:"status"`
-	Frame  execTreeProgress `json:"frame"`
+	TaskID  string `json:"task_id"`
+	Seq     int    `json:"seq"`
+	Status  string `json:"status"`
+	Key     string `json:"key"`
+	Pending []struct {
+		ID       string `json:"id"`
+		Answered bool   `json:"answered"`
+	} `json:"pending"`
 }
 
 func loadExecTree(t *testing.T, store state.Store, key string) execTreeProgress {
@@ -104,8 +108,14 @@ func TestExecTreeNestedGraphSuspendsAndResumes(t *testing.T) {
 		t.Fatalf("saved pending=%v err=%v", saved, err)
 	}
 	tree := loadExecTree(t, store, "tree")
-	if tree.GraphName != "parent" || len(tree.Children) != 1 || tree.Children[0].Status != "suspended" || tree.Children[0].Frame.GraphName != "child-ask" {
+	if tree.GraphName != "parent" || len(tree.Children) != 1 || tree.Children[0].Status != "suspended" || tree.Children[0].Key == "" {
 		t.Fatalf("tree=%+v", tree)
+	}
+	// 子图进度保存在键带父级前缀的独立记录中；父记录只登记键与
+	// 挂起时上报的待答问题。
+	childTree := loadExecTree(t, store, tree.Children[0].Key)
+	if childTree.GraphName != "child-ask" {
+		t.Fatalf("child record=%+v", childTree)
 	}
 	out, err := compiled.Resume(context.Background(), opt, graph.WithResume(pending[0].ID, "approved"))
 	if err != nil || out != "approved" {
@@ -438,26 +448,12 @@ func TestExecTreeRejectsMalformedStructures(t *testing.T) {
 			}
 		})
 	}
-	// 超深嵌套：用根 frame 自身的合法字段做模板，递归挂接超过深度上限。
-	var template map[string]any
-	if err = json.Unmarshal(record.Execution, &template); err != nil {
-		t.Fatal(err)
+	// 超深嵌套：命名空间键的路径段数即嵌套深度，伪造超过上限的记录键。
+	deepKey := "k"
+	for i := 0; i < 300; i++ {
+		deepKey += "/x"
 	}
-	delete(template, "children")
-	delete(template, "tasks")
-	deepNode := map[string]any{"task_id": "t", "seq": 0, "status": "running"}
-	current := deepNode
-	for i := 0; i < 80; i++ {
-		inner := map[string]any{"task_id": "t", "seq": 0, "status": "running"}
-		f := map[string]any{}
-		for k, v := range template {
-			f[k] = v
-		}
-		f["children"] = []map[string]any{inner}
-		current["frame"] = f
-		current = inner
-	}
-	data, err := json.Marshal([]map[string]any{deepNode})
+	data, err := json.Marshal([]map[string]any{{"task_id": "t", "seq": 0, "status": "suspended", "key": deepKey}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1069,7 +1069,11 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 			if ms := managedSiteFromContext(taskCtx); ms != nil {
 				managedOwner = ms.managed.ID
 			}
-			taskCtx = withCallSite(taskCtx, &callSite{coord: coord, frame: frame, taskID: task.ID, step: step + index, owner: managedOwner})
+			recordKey := childPrefixFromContext(taskCtx)
+			if managedOwner != "" {
+				recordKey += "/" + managedOwner
+			}
+			taskCtx = withCallSite(taskCtx, &callSite{coord: coord, frame: frame, taskID: task.ID, step: step + index, owner: managedOwner, recordKey: recordKey})
 		}
 		event := lifecycleEvent{Type: eventNodeStart, NodeID: task.Node, Step: step + index}
 		taskCtx = bindEventContext(taskCtx, event)

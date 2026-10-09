@@ -369,22 +369,30 @@ func TestNestedChildRejectsChangedFingerprint(t *testing.T) {
 		t.Fatalf("pending=%v", pending)
 	}
 	tree := loadExecTree(t, store, "nested-fp")
-	if len(tree.Children) != 1 || tree.Children[0].Frame.GraphRevision == "" {
-		t.Fatalf("child frame missing: %+v", tree.Children)
+	if len(tree.Children) != 1 || tree.Children[0].Key == "" {
+		t.Fatalf("child record key missing: %+v", tree.Children)
 	}
-	childOldRev := tree.Children[0].Frame.GraphRevision
+	childTree := loadExecTree(t, store, tree.Children[0].Key)
+	if childTree.GraphRevision == "" {
+		t.Fatalf("child record missing revision: %+v", childTree)
+	}
+	childOldRev := childTree.GraphRevision
 
-	// 子图升级自身 Codec v1→v2：父图结构、父图 Codec 均不变，但子 frame
+	// 子图升级自身 Codec v1→v2：父图结构、父图 Codec 均不变，但子记录
 	// 指纹与当前子图编译不一致，父图带答案恢复被拒。
 	childCall = buildChild(2)
 	_, err = compiledParent.Resume(context.Background(), opt, graph.WithResume(pending[0].ID, "yes"))
 	if !errors.Is(err, graph.ErrResumeIncompatible) {
 		t.Fatalf("resume after child codec change = %v, want ErrResumeIncompatible", err)
 	}
-	// 父图检查点原样保留：子 frame 指纹未变，可再次以旧版子图恢复。
+	// 父子记录原样保留：子记录指纹未变，可再次以旧版子图恢复。
 	savedTree := loadExecTree(t, store, "nested-fp")
-	if len(savedTree.Children) != 1 || savedTree.Children[0].Frame.GraphRevision != childOldRev {
-		t.Fatalf("child frame mutated: %+v", savedTree.Children)
+	if len(savedTree.Children) != 1 || savedTree.Children[0].Key == "" {
+		t.Fatalf("child key mutated: %+v", savedTree.Children)
+	}
+	savedChild := loadExecTree(t, store, savedTree.Children[0].Key)
+	if savedChild.GraphRevision != childOldRev {
+		t.Fatalf("child record mutated: %+v", savedChild)
 	}
 }
 

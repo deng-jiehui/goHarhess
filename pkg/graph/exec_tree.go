@@ -16,9 +16,10 @@ import (
 	"github.com/goharness/goharness/pkg/state"
 )
 
-// 执行树的 frame 进度即 executionProgress；子调用进度经 childExecution.Frame
-// 递归，分支任务进度经 taskProgress 挂在所属 frame 上。根记录 Execution 只
-// 保存根 frame——树内任何 frame/任务/日志变更都编码整棵树后写回。
+// 执行树的 frame 进度即 executionProgress：分支任务进度经 taskProgress 挂在
+// 所属 frame 上，子调用进度保存在键带父级前缀的独立命名空间记录中，
+// childExecution 只登记身份、记录键与挂起时上报的待答问题。受管任务
+// frame 仍内嵌在本 frame 记录内，随受管机制一并演进。
 
 // taskStatus 是分支任务的进度状态。
 type taskStatus string
@@ -213,23 +214,32 @@ const (
 	childStatusFailed    childStatus = "failed"
 )
 
-// childExecution 保存父任务发起的一次子调用的身份与进度。身份由父任务 ID
-// 加任务内调用序号构成；Input 用于重放校验——同一任务重放时必须以相同
+// childExecution 保存父任务发起的一次子调用的身份与进度引用。身份由父任务
+// ID 加任务内调用序号构成；Input 用于重放校验——同一任务重放时必须以相同
 // 顺序、相同输入调用子执行。Result/Error 保存已完成的输出或可恢复的
-// 业务失败；Frame 是子执行自己的进度树（含它的子调用）。
+// 业务失败；子执行自己的进度保存在 Key 指向的独立命名空间记录中，
+// Pending 是挂起时上报的子树待答问题副本，驱动父级聚合与重驱判定。
 type childExecution struct {
 	TaskID string `json:"task_id"`
 	Seq    int    `json:"seq"`
 	// Call 是发起该子调用的调用身份（会话内去重键）；为空表示节点级
 	// 调用。序号 Seq 按调用身份分派，被结果复用跳过的调用不打乱序号。
-	Call     string             `json:"call,omitempty"`
-	Status   childStatus        `json:"status"`
-	Graph    string             `json:"graph,omitempty"`
-	Revision string             `json:"revision,omitempty"`
-	Input    json.RawMessage    `json:"input,omitempty"`
-	Result   json.RawMessage    `json:"result,omitempty"`
-	Error    string             `json:"error,omitempty"`
-	Frame    *executionProgress `json:"frame,omitempty"`
+	Call     string          `json:"call,omitempty"`
+	Status   childStatus     `json:"status"`
+	Graph    string          `json:"graph,omitempty"`
+	Revision string          `json:"revision,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	// Key 是子执行独立检查点记录的存储键：属主记录键前缀 + "/" + childKey。
+	// 挂起的子执行必然持有记录键（挂起路径先写自己的记录再传播信号）。
+	Key string `json:"key,omitempty"`
+	// Pending 是子执行挂起时上报的子树未答问题集合（含更深层）：恢复时
+	// 按 ID 标记已答，驱动父级 pending 聚合与重驱判定。
+	Pending []control.InterruptRecord `json:"pending,omitempty"`
+	// frame 是无存储运行（storeless）的内存进度槽位，只活在内存中；
+	// 持久化模式下子进度保存在 Key 指向的独立记录中，不经过此槽位。
+	frame *executionProgress
 }
 
 // childKey 生成子调用在父 frame 内的稳定身份：父任务、工具调用归属与
@@ -252,10 +262,7 @@ func (c *childExecution) Clone() *childExecution {
 	if c.Result != nil {
 		out.Result = append(json.RawMessage(nil), c.Result...)
 	}
-	if c.Frame != nil {
-		frame := c.Frame.Clone()
-		out.Frame = &frame
-	}
+	out.Pending = cloneJournal(c.Pending)
 	return &out
 }
 
@@ -299,9 +306,21 @@ func validateChildExecutions(children []*childExecution) error {
 		if len(child.Result) > 0 && !json.Valid(child.Result) {
 			return fmt.Errorf("%w: children[%d] result is not valid JSON", state.ErrInvalidCheckpoint, i)
 		}
-		// 挂起的子执行必然提交过 frame 进度（挂起路径先写 frame 再传播信号）。
-		if child.Status == childStatusSuspended && (child.Frame == nil || child.Frame.GraphName == "") {
-			return fmt.Errorf("%w: children[%d] suspended without frame progress", state.ErrInvalidCheckpoint, i)
+		// 挂起的子执行必然持有命名空间记录键（挂起路径先写自己的记录再传播信号）。
+		if child.Status == childStatusSuspended && strings.TrimSpace(child.Key) == "" {
+			return fmt.Errorf("%w: children[%d] suspended without record key", state.ErrInvalidCheckpoint, i)
+		}
+		// 记录键的命名空间深度即嵌套深度：病态深键在解码边界拒绝，
+		// 不等到恢复路径才暴露。
+		if strings.Count(child.Key, "/") > 4*maxExecutionDepth {
+			return fmt.Errorf("%w: children[%d] key exceeds namespace depth %d", state.ErrInvalidCheckpoint, i, maxExecutionDepth)
+		}
+		pendingIDs := make(map[string]bool, len(child.Pending))
+		for _, record := range child.Pending {
+			if err := record.Validate(); err != nil || pendingIDs[record.ID] {
+				return fmt.Errorf("%w: children[%d] has invalid pending journal", state.ErrInvalidCheckpoint, i)
+			}
+			pendingIDs[record.ID] = true
 		}
 		if child.Status == childStatusCompleted && len(child.Result) == 0 {
 			return fmt.Errorf("%w: children[%d] completed without result", state.ErrInvalidCheckpoint, i)
@@ -347,16 +366,8 @@ func validateExecutionTree(root *executionProgress, depth int) error {
 			}
 		}
 	}
-	for _, child := range root.Children {
-		// 已登记但尚未提交过进度的子调用槽位为空 frame，跳过校验；
-		// 首个进度提交后 GraphName 等字段才齐备。
-		if child.Frame == nil || child.Frame.GraphName == "" {
-			continue
-		}
-		if err := validateExecutionTree(child.Frame, depth+1); err != nil {
-			return err
-		}
-	}
+	// 子调用进度在自己的命名空间记录中，不参与本记录的树深校验；
+	// 嵌套深度由记录键的路径段数限制。
 	for _, m := range root.Managed {
 		if m == nil || m.Frame == nil || m.Frame.GraphName == "" {
 			continue
@@ -484,6 +495,10 @@ type callSite struct {
 	// owner 是本任务所属受管运行的任务 ID；根运行的任务为空。受管任务
 	// ID 携带完整 owner 路径，保证跨层级全局唯一。
 	owner string
+	// recordKey 是本 frame 发起的子调用其独立检查点记录的键前缀：
+	// 根 frame 为「记录键/RunID」，受管 frame 追加 managed owner 路径，
+	// 命名空间子 frame 即子记录自身的键；登记时拼上 childKey 得子键。
+	recordKey string
 	// managedSeq 是受管任务创建调用的序号空间：与子调用序号分开，
 	// 两类调用的重放顺序互不影响。
 	managedSeq map[string]int
@@ -523,6 +538,25 @@ func (s *callSite) nextManagedMsgSeq(callKey string) int {
 }
 
 type callSiteKey struct{}
+
+// childPrefixKey 在运行 ctx 上携带本运行所属 frame 的子调用记录键前缀：
+// 根运行为「记录键/RunID」，命名空间子运行即自己的记录键。运行内各
+// callSite 以它为底拼接 owner 段与 childKey 得到子调用记录键。
+type childPrefixKey struct{}
+
+func childPrefixFromContext(ctx context.Context) string {
+	prefix, _ := ctx.Value(childPrefixKey{}).(string)
+	return prefix
+}
+
+// resumeInputsKey 把根恢复输入透传给命名空间子运行：各层按待答 ID 匹配
+// 消费自己的答案，重放边界与根保持同一份输入。
+type resumeInputsKey struct{}
+
+func resumeInputsFromContext(ctx context.Context) []resumeInput {
+	inputs, _ := ctx.Value(resumeInputsKey{}).([]resumeInput)
+	return inputs
+}
 
 func withCallSite(ctx context.Context, site *callSite) context.Context {
 	if site == nil {
@@ -577,6 +611,12 @@ type runCoordinator struct {
 	builders  map[string]managedBuilderEntry
 	slots     chan struct{}
 	fatalErrs map[*managedTask]error
+	// store 与 durability 供命名空间子运行派生同配置的独立 writer/record；
+	// owner 是父级协调器（命名空间子运行非空、根运行为空）：会话级
+	// 子 Agent 集合只保存在根记录上，经 owner 链归集到根协调器。
+	store      state.Store
+	durability Durability
+	owner      *runCoordinator
 	// storeless 标记无检查点的内存受管运行：树变更照常并入内存现场，
 	// 只是没有落盘队列；审批类可恢复挂起在该模式下按
 	// ErrCheckpointRequired 拒绝。
@@ -585,6 +625,16 @@ type runCoordinator struct {
 	// 每次写入随执行树一同落盘；agentsData 缓存其编码，集合变更时失效。
 	agents     []*sessionAgent
 	agentsData json.RawMessage
+}
+
+// agentScope 返回会话级子 Agent 集合的属主协调器：集合只保存在根记录上，
+// 命名空间子运行对子 Agent 的操作经 owner 链归集到根协调器——创建、
+// 派生与可见性判定都由根的单写者边界统一处理。
+func (c *runCoordinator) agentScope() *runCoordinator {
+	for c.owner != nil {
+		c = c.owner
+	}
+	return c
 }
 
 // encodeLocked 在树锁内把根 frame 编码为 Execution 载荷；根 frame 标记
@@ -750,7 +800,11 @@ func (c *runCoordinator) acquireChild(ctx context.Context, site *callSite, callK
 		Seq:    seq,
 		Status: childStatusRunning,
 		Input:  append(json.RawMessage(nil), encoded...),
-		Frame:  &executionProgress{},
+		Key:    site.recordKey + "/" + childKey(site.taskID, callKey, seq),
+	}
+	if strings.Count(child.Key, "/") > 4*maxExecutionDepth {
+		c.mu.Unlock()
+		return nil, false, fmt.Errorf("%w: child call %s exceeds namespace depth %d", state.ErrInvalidCheckpoint, childKey(site.taskID, callKey, seq), maxExecutionDepth)
 	}
 	site.frame.Children = append(site.frame.Children, child)
 	ticket, err := c.publishLocked(ctx, func(record *state.Checkpoint, data []byte) { record.Execution = data })
@@ -791,11 +845,13 @@ func (c *runCoordinator) failChild(ctx context.Context, child *childExecution, e
 	return ticket.wait()
 }
 
-// suspendChild 仅更新子调用状态（frame 内容已由其自身挂起路径写入槽位）；
-// 根保存由调度器在收敛后统一执行。
-func (c *runCoordinator) suspendChild(child *childExecution) {
+// suspendChild 更新子调用状态并登记其挂起时上报的待答问题：父级恢复判定
+// 与 pending 聚合都以这份副本为准，子现场保存在自己的命名空间记录里；
+// storeless 运行时问题集合同样只活在内存。根保存由调度器收敛后统一执行。
+func (c *runCoordinator) suspendChild(child *childExecution, pending []control.InterruptRecord) {
 	c.mu.Lock()
 	child.Status = childStatusSuspended
+	child.Pending = cloneJournal(pending)
 	c.mu.Unlock()
 }
 
@@ -809,9 +865,8 @@ func (c *runCoordinator) retryChild(child *childExecution) {
 }
 
 // claimChildIdentity 登记或校验子调用绑定的子图身份：首次执行写入
-// Graph/Revision；重放时图名必须一致，版本一致性由调用方按子执行状态
-// 校验——带子 frame 的恢复走条目化契约闭包比较，无 frame 的记录仍要求
-// 记录的版本与当前一致。
+// Graph/Revision；重放时图名必须一致，版本一致性按子执行状态校验——
+// 有持久化进度的以其记录内整图指纹为准，无进度的要求登记版本一致。
 func (c *runCoordinator) claimChildIdentity(child *childExecution, name, revision string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -825,22 +880,6 @@ func (c *runCoordinator) claimChildIdentity(child *childExecution, name, revisio
 			ErrResumeIncompatible, childKey(child.TaskID, child.Call, child.Seq), child.Graph, child.Revision, name, revision)
 	}
 	return nil
-}
-
-// adoptPreparedChild 发布子调用恢复时准备好的现场：迁移后的 State 快照、
-// 新版本标记与契约在同一次树变更内落位并落盘，随后任何保存都同时携带
-// 两者——再次恢复不会重复进入旧版迁移。
-func (c *runCoordinator) adoptPreparedChild(ctx context.Context, child *childExecution, frame *executionProgress, revision string) error {
-	ticket, err := c.mutateTree(ctx, func() {
-		if frame != child.Frame {
-			*child.Frame = *frame
-		}
-		child.Revision = revision
-	}, func(record *state.Checkpoint, data []byte) { record.Execution = data })
-	if err != nil {
-		return err
-	}
-	return ticket.wait()
 }
 
 // frameRunnable 判断挂起子 frame 的子树是否获得了可推进的输入。
@@ -893,10 +932,7 @@ func inferFrameWait(f *executionProgress) (bool, []control.InterruptRecord) {
 		case childStatusRunning, childStatusFailed:
 			return true, nil
 		case childStatusSuspended:
-			if frameRunnable(child.Frame) {
-				return true, nil
-			}
-			return false, pendingInterruptsTree(child.Frame)
+			return childWaitState(child)
 		}
 	}
 	return true, nil
@@ -928,20 +964,31 @@ func resolveWait(frame *executionProgress, w *waitRecord, journal []control.Inte
 }
 
 // childWaitResolved 判断阻塞在子调用上的等待是否解除：子执行完成、可继续
-// 或可重试即为可推进；仍挂起时看其子树是否获得可推进输入。
+// 或可重试即为可推进；仍挂起时按其登记的待答问题判定。
 func childWaitResolved(frame *executionProgress, taskID, callKey string, seq int) (bool, []control.InterruptRecord) {
 	child := frame.findChild(taskID, callKey, seq)
 	if child == nil {
 		return true, nil
 	}
+	return childWaitState(child)
+}
+
+// childWaitState 是 waitChild 判定的公共实现：挂起子执行登记的待答问题
+// 任一被答即可重驱（重放会自行停在下一个未答问题）；无待答记录也可推进
+// （可能尚有失败或运行中的下游，重放后自行落位）。全部未答时原样返回。
+func childWaitState(child *childExecution) (bool, []control.InterruptRecord) {
 	switch child.Status {
 	case childStatusCompleted, childStatusRunning, childStatusFailed:
 		return true, nil
 	case childStatusSuspended:
-		if frameRunnable(child.Frame) {
-			return true, nil
+		var waiting []control.InterruptRecord
+		for _, record := range child.Pending {
+			if record.Answered {
+				return true, nil
+			}
+			waiting = append(waiting, record.Clone())
 		}
-		return false, pendingInterruptsTree(child.Frame)
+		return len(waiting) == 0, waiting
 	}
 	return true, nil
 }
@@ -1024,10 +1071,7 @@ func taskWaitResolved(frame *executionProgress, task *taskProgress) (bool, []con
 		case childStatusRunning, childStatusFailed:
 			return true, nil
 		case childStatusSuspended:
-			if frameRunnable(child.Frame) {
-				return true, nil
-			}
-			return false, pendingInterruptsTree(child.Frame)
+			return childWaitState(child)
 		}
 	}
 	return true, nil
@@ -1186,7 +1230,8 @@ func (g *Graph[I, O]) completeTask(ctx context.Context, coord *runCoordinator, f
 	return ticket.wait()
 }
 
-// 树级遍历：pending 汇集根 frame 与各子 frame 的未回答问题；
+// 树级遍历：pending 汇集本 frame 的未回答问题、各子调用挂起时上报的
+// 待答副本（含更深层，由子执行在自己的记录里维护）与内嵌受管子树；
 // applyResumeInputTree 先整体验证再写入回答，保证不会只写一半。
 func pendingInterruptsTree(root *executionProgress) []control.InterruptRecord {
 	var pending []control.InterruptRecord
@@ -1204,7 +1249,11 @@ func pendingInterruptsTree(root *executionProgress) []control.InterruptRecord {
 			}
 		}
 		for _, child := range frame.Children {
-			walk(child.Frame)
+			for _, record := range child.Pending {
+				if !record.Answered {
+					pending = append(pending, record.Clone())
+				}
+			}
 		}
 		for _, m := range frame.Managed {
 			if m != nil {
@@ -1244,8 +1293,10 @@ func applyResumeInputTree(root *executionProgress, inputs []resumeInput) error {
 		for _, task := range frame.Tasks {
 			applyAnswerSet(task.Interrupts, inputs)
 		}
+		// 子调用按上报的待答副本标记已答：命中即视为可推进输入，
+		// 答案数据在子运行重载自己的命名空间记录时按同一 ID 写入日志。
 		for _, child := range frame.Children {
-			walk(child.Frame)
+			applyAnswerSet(child.Pending, inputs)
 		}
 		for _, m := range frame.Managed {
 			if m != nil {
