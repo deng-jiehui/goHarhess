@@ -3,6 +3,7 @@ package observe
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"time"
 )
 
@@ -77,8 +78,9 @@ func EmitPayload(ctx context.Context, event Event, raw any) {
 
 // redactPayload 先把载荷克隆成独立副本再交给用户脱敏函数：脱敏可以就地
 // 改写副本（如把密钥替换为 "***"），业务数据与调用方持有的原始输入不受
-// 影响。脱敏函数本身也可能 panic：异常在此被隔离并记录，事件继续以无
-// Payload 的形态分发——不能回退到未脱敏的原始载荷。
+// 影响。复制遵循领域 Clone() 约定；无法隔离的载荷不交给脱敏函数（否则
+// 脱敏会就地改写业务数据）。脱敏函数本身也可能 panic：异常在此被隔离
+// 并记录，事件继续以无 Payload 的形态分发——不能回退到未脱敏的原始载荷。
 func redactPayload(ctx context.Context, event Event, redact RedactFunc, raw any) (payload any) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -92,7 +94,31 @@ func redactPayload(ctx context.Context, event Event, redact RedactFunc, raw any)
 				slog.Any("panic", recovered))
 		}
 	}()
-	return redact(event, CloneValue(raw))
+	cloned, ok := cloneForRedact(raw)
+	if !ok {
+		slog.Default().LogAttrs(ctx, slog.LevelWarn, "observe: payload not isolatable, redact skipped",
+			slog.String("kind", string(event.Kind)),
+			slog.String("phase", string(event.Phase)),
+			slog.String("name", event.Name),
+			slog.String("trace_id", event.Trace.TraceID),
+			slog.String("span_id", event.Trace.SpanID))
+		return nil
+	}
+	return redact(event, cloned)
+}
+
+// cloneForRedact 生成可与业务数据完全隔离的副本：优先调用领域类型的
+// Clone() 方法；反射路径失败时返回 ok=false。
+func cloneForRedact(raw any) (any, bool) {
+	source := reflect.ValueOf(raw)
+	if !source.IsValid() {
+		return nil, true
+	}
+	cloned, ok := cloneReflectValueStrict(source, 0)
+	if !ok || !cloned.IsValid() {
+		return nil, false
+	}
+	return cloned.Interface(), true
 }
 
 func emit(ctx context.Context, event Event, payload func() any) {

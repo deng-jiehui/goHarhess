@@ -120,3 +120,82 @@ func TestObserverOrphanEndStillRecords(t *testing.T) {
 		t.Fatalf("ended spans=%d", len(recorder.Ended()))
 	}
 }
+
+// TestLateChildAfterNodeEndKeepsRealParent 复核点：节点 span 结束后才发射的
+// checkpoint save 仍须挂到该节点真实 span 下，而不是落到框架 ID 合成的
+// 远端父上下文所生成的另一条追踪。
+func TestLateChildAfterNodeEndKeepsRealParent(t *testing.T) {
+	recorder, tracer := newRecorder(t)
+	ctx := observe.With(context.Background(), otel.Observer(tracer))
+
+	runTrace := observe.Trace{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", RunID: "r1", SpanID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	nodeTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "cccccccccccccccccccccccccccccccc", ParentSpanID: runTrace.SpanID}
+	saveTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "dddddddddddddddddddddddddddddddd", ParentSpanID: nodeTrace.SpanID}
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseStart, Name: "g", Trace: runTrace, Time: time.Now()})
+	observe.Emit(ctx, event(observe.PhaseStart, nodeTrace))
+	observe.Emit(ctx, event(observe.PhaseEnd, nodeTrace))
+	// 节点 span 已结束后 checkpoint save 才开始（同步与异步模式都会走这条路径）。
+	observe.Emit(ctx, observe.Event{Kind: observe.KindCheckpoint, Phase: observe.PhaseStart, Name: "save", Trace: saveTrace, Time: time.Now()})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindCheckpoint, Phase: observe.PhaseEnd, Name: "save", Trace: saveTrace, Time: time.Now(), Duration: time.Millisecond})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseEnd, Name: "g", Trace: runTrace, Time: time.Now(), Duration: 10 * time.Millisecond})
+
+	var runSpan, nodeSpan, saveSpan sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		switch s.Name() {
+		case "run:g":
+			runSpan = s
+		case "node:node":
+			nodeSpan = s
+		case "checkpoint:save":
+			saveSpan = s
+		}
+	}
+	if runSpan == nil || nodeSpan == nil || saveSpan == nil {
+		t.Fatalf("spans=%v", recorder.Ended())
+	}
+	if got := saveSpan.Parent().SpanID(); got != nodeSpan.SpanContext().SpanID() {
+		t.Fatalf("save parent=%s want node %s", got, nodeSpan.SpanContext().SpanID())
+	}
+	if saveSpan.SpanContext().TraceID() != runSpan.SpanContext().TraceID() {
+		t.Fatal("save span escaped to another trace")
+	}
+}
+
+// TestNestedRunEndKeepsParentSpans 嵌套 run 收尾只清理自己的子树：父节点
+// 结束后迟到的 checkpoint save 仍能挂到父节点真实 span 下。
+func TestNestedRunEndKeepsParentSpans(t *testing.T) {
+	recorder, tracer := newRecorder(t)
+	ctx := observe.With(context.Background(), otel.Observer(tracer))
+
+	runTrace := observe.Trace{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", RunID: "r1", SpanID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	nodeTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "cccccccccccccccccccccccccccccccc", ParentSpanID: runTrace.SpanID}
+	childRun := observe.Trace{TraceID: runTrace.TraceID, RunID: "r2", SpanID: "dddddddddddddddddddddddddddddddd", ParentSpanID: nodeTrace.SpanID}
+	saveTrace := observe.Trace{TraceID: runTrace.TraceID, RunID: "r1", SpanID: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", ParentSpanID: nodeTrace.SpanID}
+
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseStart, Name: "g", Trace: runTrace, Time: time.Now()})
+	observe.Emit(ctx, event(observe.PhaseStart, nodeTrace))
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseStart, Name: "child", Trace: childRun, Time: time.Now()})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseEnd, Name: "child", Trace: childRun, Time: time.Now(), Duration: time.Millisecond})
+	observe.Emit(ctx, event(observe.PhaseEnd, nodeTrace))
+	// 子 run 收尾后父节点迟到的 checkpoint save：父级记录必须仍在。
+	observe.Emit(ctx, observe.Event{Kind: observe.KindCheckpoint, Phase: observe.PhaseStart, Name: "save", Trace: saveTrace, Time: time.Now()})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindCheckpoint, Phase: observe.PhaseEnd, Name: "save", Trace: saveTrace, Time: time.Now(), Duration: time.Millisecond})
+	observe.Emit(ctx, observe.Event{Kind: observe.KindRun, Phase: observe.PhaseEnd, Name: "g", Trace: runTrace, Time: time.Now(), Duration: 10 * time.Millisecond})
+
+	var nodeSpan, saveSpan sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		switch s.Name() {
+		case "node:node":
+			nodeSpan = s
+		case "checkpoint:save":
+			saveSpan = s
+		}
+	}
+	if nodeSpan == nil || saveSpan == nil {
+		t.Fatalf("spans=%v", recorder.Ended())
+	}
+	if got := saveSpan.Parent().SpanID(); got != nodeSpan.SpanContext().SpanID() {
+		t.Fatalf("save parent=%s want node %s", got, nodeSpan.SpanContext().SpanID())
+	}
+}

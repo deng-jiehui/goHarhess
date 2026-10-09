@@ -253,6 +253,9 @@ func BindInvocation(ctx context.Context, invocation Invocation) context.Context 
 
 const maxMetadataCloneDepth = 64
 
+// cloneReflectValue 是元数据/CloneValue 的宽松复制：失败回退共享原值
+// （元数据只读可接受），且纯反射实现——它可能被领域 Clone() 反向调用，
+// 若再反向调 Clone() 会无限递归。
 func cloneReflectValue(value reflect.Value, depth int) reflect.Value {
 	if !value.IsValid() || depth > maxMetadataCloneDepth {
 		return value
@@ -337,6 +340,106 @@ func cloneReflectValue(value reflect.Value, depth int) reflect.Value {
 		return cloned
 	default:
 		return value
+	}
+}
+
+// cloneReflectValueStrict 是脱敏载荷的严格复制：报告隔离是否成功。
+// 领域类型带 Clone() 方法时按其约定复制（反射处理不了的共享视图、
+// 未导出句柄由领域实现负责）；反射路径遇到不可复制形态（未导出字段、
+// 不可赋值项）返回 ok=false，调用方不得拿原值当副本使用。
+func cloneReflectValueStrict(value reflect.Value, depth int) (reflect.Value, bool) {
+	if !value.IsValid() || depth > maxMetadataCloneDepth {
+		return value, false
+	}
+	// 递归遵循领域 Clone 约定：llm.Request/Response、retrieval 载荷、
+	// mcp 载荷等都实现了 Clone()，反射复制可能漏掉内部共享结构。
+	if method := value.MethodByName("Clone"); method.IsValid() {
+		t := method.Type()
+		if t.NumIn() == 0 && t.NumOut() == 1 && t.Out(0).AssignableTo(value.Type()) {
+			return method.Call(nil)[0], true
+		}
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		cloned, ok := cloneReflectValueStrict(value.Elem(), depth+1)
+		if !ok || !cloned.Type().AssignableTo(value.Type().Elem()) {
+			return value, false
+		}
+		pointer := reflect.New(value.Type().Elem())
+		pointer.Elem().Set(cloned)
+		return pointer, true
+	case reflect.Struct:
+		cloned := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.NumField(); index++ {
+			source := value.Field(index)
+			target := cloned.Field(index)
+			if !source.CanInterface() || !target.CanSet() {
+				return value, false
+			}
+			field, ok := cloneReflectValueStrict(source, depth+1)
+			if !ok || !field.Type().AssignableTo(target.Type()) {
+				return value, false
+			}
+			target.Set(field)
+		}
+		return cloned, true
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		cloned, ok := cloneReflectValueStrict(value.Elem(), depth+1)
+		if !ok {
+			return value, false
+		}
+		wrapped := reflect.New(value.Type()).Elem()
+		if cloned.Type().AssignableTo(value.Type()) || cloned.Type().Implements(value.Type()) {
+			wrapped.Set(cloned)
+			return wrapped, true
+		}
+		return value, false
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			item, ok := cloneReflectValueStrict(iterator.Value(), depth+1)
+			if !ok || !item.Type().AssignableTo(value.Type().Elem()) {
+				return value, false
+			}
+			cloned.SetMapIndex(iterator.Key(), item)
+		}
+		return cloned, true
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			item, ok := cloneReflectValueStrict(value.Index(index), depth+1)
+			if !ok || !item.Type().AssignableTo(value.Type().Elem()) {
+				return value, false
+			}
+			cloned.Index(index).Set(item)
+		}
+		return cloned, true
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.Len(); index++ {
+			item, ok := cloneReflectValueStrict(value.Index(index), depth+1)
+			if !ok || !item.Type().AssignableTo(value.Type().Elem()) {
+				return value, false
+			}
+			cloned.Index(index).Set(item)
+		}
+		return cloned, true
+	default:
+		// 基本类型不可变，原值即安全副本。
+		return value, true
 	}
 }
 

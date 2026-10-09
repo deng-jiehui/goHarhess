@@ -336,6 +336,22 @@ func TestObserveInterruptAndCheckpoint(t *testing.T) {
 	if loadEnd == nil || loadEnd.Attrs["checkpoint.found"] != true {
 		t.Fatalf("load end = %#v", loadEnd)
 	}
+	// 重放只调整父级：开始时间必须保留加载发生的真实时刻，
+	// end-start 与记录的耗时一致（WithPhase 重置会丢真实耗时）。
+	var loadStart *observe.Event
+	for spanID := range loadSpans {
+		for i := before; i < len(log.events); i++ {
+			event := &log.events[i]
+			if event.Kind == observe.KindCheckpoint && event.Name == "load" &&
+				event.Phase == observe.PhaseStart && event.Trace.SpanID == spanID {
+				loadStart = event
+			}
+		}
+	}
+	if loadStart == nil || loadEnd.Time.Sub(loadStart.Time) != loadEnd.Duration {
+		t.Fatalf("load timing inconsistent: start=%v end=%v duration=%v",
+			loadStart, loadEnd.Time, loadEnd.Duration)
+	}
 	// 恢复建立新的 run 记录，通过 checkpoint.key 关联到原检查点。
 	if runStart == nil || runStart.Attrs["checkpoint.key"] != "ask-run" {
 		t.Fatalf("resume run start = %v", sequence(log.events[before:]))

@@ -61,7 +61,9 @@ func (s *runSetup) flushPendingLoad(ctx context.Context) {
 		p.span.Trace.ParentSpanID = parent.Trace.SpanID
 		p.end.Trace = p.span.Trace
 	}
-	observe.Emit(ctx, observe.EventOf(p.span.WithPhase(observe.PhaseStart), observe.KindCheckpoint, nil))
+	// 直接用暂存快照：Timestamp 仍是加载发生时的真实开始时间——
+	// 这里只调整父级关联，不能让 WithPhase 把开始时间改成重放时刻。
+	observe.Emit(ctx, observe.EventOf(p.span, observe.KindCheckpoint, nil))
 	observe.Emit(ctx, p.end)
 }
 

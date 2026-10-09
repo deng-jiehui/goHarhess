@@ -349,3 +349,70 @@ func TestAsyncObserverPanicIsolated(t *testing.T) {
 		t.Fatalf("async panic not logged: %q", logs.String())
 	}
 }
+
+// sealedPayload 带未导出字段与 Clone() 约定：反射无法复制未导出字段，
+// 必须走领域 Clone——否则脱敏改写会穿透指针污染业务数据。
+type sealedPayload struct{ token *string }
+
+func (p sealedPayload) Clone() sealedPayload {
+	s := *p.token
+	return sealedPayload{token: &s}
+}
+
+// opaquePayload 不可隔离：未导出字段且无 Clone()。
+type opaquePayload struct{ token *string }
+
+func TestEmitPayloadHonorsDomainClone(t *testing.T) {
+	collected := &collector{}
+	token := "s3cr3t"
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			payload := raw.(sealedPayload)
+			*payload.token = "***"
+			return payload
+		}))
+	raw := sealedPayload{token: &token}
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM}, raw)
+
+	if token != "s3cr3t" {
+		t.Fatalf("redact escaped isolation: %q", token)
+	}
+	got := collected.events[0].Payload.(sealedPayload)
+	if *got.token != "***" {
+		t.Fatalf("payload = %q", *got.token)
+	}
+	if got.token == raw.token {
+		t.Fatal("Clone() not honored: payload shares pointer with business data")
+	}
+}
+
+func TestEmitPayloadSkipsUnisolatableValue(t *testing.T) {
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	collected := &collector{}
+	redacted := atomic.Int32{}
+	ctx := observe.With(context.Background(), collected,
+		observe.CapturePayload(func(_ observe.Event, raw any) any {
+			redacted.Add(1)
+			return raw
+		}))
+	token := "s3cr3t"
+	observe.EmitPayload(ctx, observe.Event{Kind: observe.KindLLM}, opaquePayload{token: &token})
+
+	// 不可隔离的载荷不交给脱敏函数：Payload 留空，业务数据不受影响。
+	if redacted.Load() != 0 {
+		t.Fatal("redact received unisolatable payload")
+	}
+	if collected.events[0].Payload != nil {
+		t.Fatalf("Payload = %v, want nil", collected.events[0].Payload)
+	}
+	if token != "s3cr3t" {
+		t.Fatalf("business data touched: %q", token)
+	}
+	if !strings.Contains(logs.String(), "not isolatable") {
+		t.Fatalf("skip not logged: %q", logs.String())
+	}
+}

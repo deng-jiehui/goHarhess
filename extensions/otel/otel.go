@@ -26,7 +26,7 @@ func Observer(tracer trace.Tracer) observe.Observer {
 	if tracer == nil {
 		tracer = trace.NewNoopTracerProvider().Tracer("goharness")
 	}
-	return &bridge{tracer: tracer, spans: map[string]trace.Span{}}
+	return &bridge{tracer: tracer, spans: map[string]map[string]spanEntry{}}
 }
 
 // With 是 observe.With(ctx, Observer(tracer)) 的便捷形式。
@@ -37,7 +37,16 @@ func With(ctx context.Context, tracer trace.Tracer) context.Context {
 type bridge struct {
 	tracer trace.Tracer
 	mu     sync.Mutex
-	spans  map[string]trace.Span
+	// spans 按 traceID -> 框架 spanID 登记本观测窗口内的全部 span。
+	// 已结束的 span 仍保留映射：节点结束后才发射的子操作（如
+	// checkpoint save）需要真实父上下文才能留在同一条追踪里；
+	// run 收尾时按父链删除以该 run 为根的整棵子树。
+	spans map[string]map[string]spanEntry
+}
+
+type spanEntry struct {
+	span   trace.Span
+	parent string
 }
 
 func (b *bridge) OnEvent(ctx context.Context, event observe.Event) {
@@ -61,15 +70,38 @@ func (b *bridge) start(ctx context.Context, event observe.Event) {
 		trace.WithAttributes(attrsOf(event)...),
 	)
 	b.mu.Lock()
-	b.spans[event.Trace.SpanID] = span
+	traceSpans, ok := b.spans[event.Trace.TraceID]
+	if !ok {
+		traceSpans = map[string]spanEntry{}
+		b.spans[event.Trace.TraceID] = traceSpans
+	}
+	traceSpans[event.Trace.SpanID] = spanEntry{span: span, parent: event.Trace.ParentSpanID}
 	b.mu.Unlock()
 }
 
 func (b *bridge) finish(event observe.Event, err error) {
 	b.mu.Lock()
-	span, ok := b.spans[event.Trace.SpanID]
-	delete(b.spans, event.Trace.SpanID)
+	traceSpans := b.spans[event.Trace.TraceID]
+	entry, ok := traceSpans[event.Trace.SpanID]
+	if event.Kind == observe.KindRun {
+		// run 收尾：删除以该 run span 为根的子树（含自身），祖先与
+		// 兄弟记录保留到各自 run 收尾——嵌套图的子 run 不会误清父级。
+		// 先收集完整集合再删除，避免中途断链漏清。
+		doomed := map[string]bool{}
+		for id, e := range traceSpans {
+			if id == event.Trace.SpanID || descendantOf(traceSpans, e, event.Trace.SpanID) {
+				doomed[id] = true
+			}
+		}
+		for id := range doomed {
+			delete(traceSpans, id)
+		}
+		if len(traceSpans) == 0 {
+			delete(b.spans, event.Trace.TraceID)
+		}
+	}
 	b.mu.Unlock()
+	span := entry.span
 	if !ok {
 		// 未见过 start（如调用方只注册了下游阶段）：补一条瞬时 span，
 		// 保证错误与 token 用量不丢。
@@ -104,12 +136,12 @@ func (b *bridge) finish(event observe.Event, err error) {
 // 与 observe 的尽力而为语义一致。
 func (b *bridge) annotate(event observe.Event) {
 	b.mu.Lock()
-	span, ok := b.spans[event.Trace.SpanID]
+	entry, ok := b.spans[event.Trace.TraceID][event.Trace.SpanID]
 	b.mu.Unlock()
 	if !ok {
 		return
 	}
-	span.AddEvent(string(event.Kind)+"."+string(event.Phase)+":"+event.Name,
+	entry.span.AddEvent(string(event.Kind)+"."+string(event.Phase)+":"+event.Name,
 		trace.WithTimestamp(event.Time),
 		trace.WithAttributes(attrsOf(event)...),
 	)
@@ -122,9 +154,9 @@ func (b *bridge) parentContext(ctx context.Context, event observe.Event) context
 		ctx = context.Background()
 	}
 	b.mu.Lock()
-	if parent, ok := b.spans[event.Trace.ParentSpanID]; ok {
+	if parent, ok := b.spans[event.Trace.TraceID][event.Trace.ParentSpanID]; ok {
 		b.mu.Unlock()
-		return trace.ContextWithSpanContext(ctx, parent.SpanContext())
+		return trace.ContextWithSpanContext(ctx, parent.span.SpanContext())
 	}
 	b.mu.Unlock()
 	traceID, err := trace.TraceIDFromHex(truncateHex(event.Trace.TraceID, 32))
@@ -142,6 +174,23 @@ func (b *bridge) parentContext(ctx context.Context, event observe.Event) context
 		Remote:     true,
 	})
 	return trace.ContextWithRemoteSpanContext(ctx, remote)
+}
+
+// descendantOf 沿父链判断 entry 是否为 target spanID 的后代。
+func descendantOf(traceSpans map[string]spanEntry, entry spanEntry, target string) bool {
+	seen := map[string]bool{}
+	for id := entry.parent; id != "" && !seen[id]; {
+		if id == target {
+			return true
+		}
+		seen[id] = true
+		parent, ok := traceSpans[id]
+		if !ok {
+			return false
+		}
+		id = parent.parent
+	}
+	return false
 }
 
 // spanName 按「类别:操作名」命名，调用树在 tracing 后端可直接分组成层。
