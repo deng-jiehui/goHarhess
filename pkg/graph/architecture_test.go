@@ -161,7 +161,7 @@ func TestRecoveryArchitectureBoundaries(t *testing.T) {
 		}
 		if entry.IsDir() {
 			name := entry.Name()
-			if name == ".git" || name == "docs" || name == ".worktrees" {
+			if name == ".git" || name == "docs" || name == ".worktrees" || name == ".bench" || name == ".tmp" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -193,7 +193,7 @@ func TestRecoveryArchitectureBoundaries(t *testing.T) {
 	for _, forbidden := range []string{
 		"github.com/goharness/goharness/pkg/agent",
 		"github.com/goharness/goharness/pkg/llm",
-		"github.com/goharness/goharness/pkg/retrieval",
+		"github.com/goharness/goharness/extensions/retrieval",
 		"github.com/goharness/goharness/pkg/schema",
 		"github.com/goharness/goharness/pkg/tool",
 		"github.com/goharness/goharness/extensions/mcp",

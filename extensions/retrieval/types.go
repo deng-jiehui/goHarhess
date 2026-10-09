@@ -1,6 +1,6 @@
 // Package retrieval defines provider-neutral contracts for RAG data services.
-// HTTP-backed implementations should use NewHTTPService so they share the
-// framework connection pool.
+// HTTP-backed implementations should use httpclient.NewClient so they share
+// the framework connection pool.
 package retrieval
 
 // Metadata is structured data attached to records and search hits.

@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	retrievalcache "github.com/goharness/goharness/extensions/cache/retrieval"
-	"github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/extensions/retrieval"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 

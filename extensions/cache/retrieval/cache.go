@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	coreretrieval "github.com/goharness/goharness/pkg/retrieval"
+	coreretrieval "github.com/goharness/goharness/extensions/retrieval"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 

@@ -50,23 +50,3 @@ func HTTPClient(ctx context.Context) *http.Client {
 		Timeout: timeout,
 	})
 }
-
-// NewHTTPService creates a JSON/REST service using the tool execution's Pool
-// and timeout unless the service configuration explicitly supplies them.
-func NewHTTPService(ctx context.Context, cfg httpclient.ServiceConfig) (*httpclient.Service, error) {
-	options, _ := HTTPOptionsFromContext(ctx)
-	if cfg.Client == nil && cfg.Pool == nil {
-		if options.Client != nil {
-			cfg.Client = options.Client
-		} else {
-			cfg.Pool = options.Pool
-		}
-	}
-	if cfg.Timeout == 0 && cfg.Client == nil {
-		cfg.Timeout = options.Timeout
-		if cfg.Timeout <= 0 {
-			cfg.Timeout = DefaultHTTPTimeout
-		}
-	}
-	return httpclient.NewService(cfg)
-}

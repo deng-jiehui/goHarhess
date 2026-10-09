@@ -76,9 +76,9 @@ func (m *burstModel) Stream(ctx context.Context, request llm.Request, options ..
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
 		defer close(m.produced)
-		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
+		merger := newTestDeltaMerger(resolved.DeltaStream)
 		for index := range 8 {
-			messages, err := accumulator.Apply(llm.Response{Messages: []schema.Message{schema.AssistantMessage(fmt.Sprint(index))}})
+			messages, err := merger.apply(llm.Response{Messages: []schema.Message{schema.AssistantMessage(fmt.Sprint(index))}})
 			if err != nil {
 				_ = writer.CloseWithError(err)
 				return

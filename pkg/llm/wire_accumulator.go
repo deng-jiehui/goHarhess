@@ -3,12 +3,16 @@ package llm
 import (
 	"context"
 	"fmt"
+
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/stream"
 )
 
+// openAIAppendBlocksExtraKey 是适配器写入 Message.Extra 的私有标记：
+// 声明本事件中有多少个尾部 Block 是新增（而非对既有槽位的增量）。
+const openAIAppendBlocksExtraKey = "__goharness_openai_append_blocks"
+
 // wireAccumulator translates provider slots to stable public block indexes.
-// The compatibility DeltaAccumulator remains available for legacy snapshot callers.
 type wireAccumulator struct {
 	ctx         context.Context
 	accumulator *schema.MessageAccumulator

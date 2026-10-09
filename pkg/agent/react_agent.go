@@ -58,27 +58,11 @@ func newReactAgent(cfg baseConfig) (*ReactAgent, error) {
 }
 
 func (a *ReactAgent) stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	runOpts, err := resolveRunOptions(a.limits, options)
+	runCtx, prepared, runOpts, lifecycle, err := a.runPrelude(ctx, messages, AgentKindReact, options)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.dispatchRunOptions(&runOpts); err != nil {
-		return nil, err
-	}
-	runOpts.agentKind = AgentKindReact
-	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session)
-	prepared := a.prepareMessages(loaded, &runOpts)
-	runCtx, lifecycle, err := a.beginRun(ctx, prepared, runOpts)
-	if err != nil {
-		return nil, err
-	}
-	runOpts.session = session
-	runCtx = withToolExecutionLimits(runCtx, runOpts)
-	stream, err := a.runReact(runCtx, prepared, conversationInput(session, messages), runOpts)
+	stream, err := a.runReact(runCtx, prepared, conversationInput(runOpts.session, messages), runOpts)
 	if err != nil {
 		lifecycle.fail(err)
 		return nil, err

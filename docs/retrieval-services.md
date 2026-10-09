@@ -12,21 +12,24 @@ DefaultPool / one Transport
 
 ## 服务示例
 
-Qdrant:
+Qdrant 等 REST 集成用池化客户端与标准库构造请求：
 
 ```go
-service, err := httpclient.NewService(httpclient.ServiceConfig{
-    BaseURL:     "https://qdrant.example.com",
-    APIKey:      os.Getenv("QDRANT_API_KEY"),
-    APIKeyHeader: "api-key",
-    Timeout:      30 * time.Second,
-})
+client := httpclient.NewClient(httpclient.ClientConfig{Timeout: 30 * time.Second})
+
+request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+    "https://qdrant.example.com/collections/docs/points/search", body)
+if err != nil {
+    return err
+}
+request.Header.Set("Content-Type", "application/json")
+request.Header.Set("api-key", os.Getenv("QDRANT_API_KEY"))
+response, err := client.Do(request)
 ```
 
-Pinecone 使用相同配置，并将 `APIKeyHeader` 设为 `"Api-Key"`。
-Elasticsearch 可以将 `APIKeyHeader` 设为 `"Authorization"`，并设置
-`APIKeyPrefix: "ApiKey "`。Chroma 或内部 Milvus REST 网关可以省略 API key。
-托管的 Embedding 和 Rerank API 通常使用默认 Bearer 授权。
+Pinecone 改用 `Api-Key` 头；Elasticsearch 用 `Authorization: ApiKey …`；
+Chroma 或内部 Milvus REST 网关可以省略 API key。托管的 Embedding 和
+Rerank API 通常使用默认 Bearer 授权。
 
 适配器直接实现与 Provider 无关的 `runnable.Runnable` 契约：
 
@@ -36,7 +39,7 @@ Elasticsearch 可以将 `APIKeyHeader` 设为 `"Authorization"`，并设置
 - Rerank：`Runnable[retrieval.RerankRequest, []retrieval.RerankResult]`。
 
 `VectorRequest.Operation` 选择 query、upsert 或 delete，无需多个执行接口。
-HTTP 适配器应使用 `httpclient.NewService` 或 `httpclient.NewClient`。
+HTTP 适配器应使用 `httpclient.NewClient` 获取池化客户端。
 
 ## 连接池隔离
 

@@ -9,21 +9,18 @@ import (
 	"github.com/goharness/goharness/pkg/tool"
 )
 
-func TestNewHTTPServiceUsesToolContextPoolAndTimeout(t *testing.T) {
+func TestHTTPClientUsesToolContextPoolAndTimeout(t *testing.T) {
 	pool := httpclient.NewPool(httpclient.TransportConfig{})
 	ctx := tool.WithHTTPOptions(context.Background(), tool.HTTPOptions{
 		Pool:    pool,
 		Timeout: 7 * time.Second,
 	})
-	service, err := tool.NewHTTPService(ctx, httpclient.ServiceConfig{BaseURL: "https://api.example.com"})
-	if err != nil {
-		t.Fatal(err)
+	client := tool.HTTPClient(ctx)
+	if client.Transport != pool.Transport() {
+		t.Fatal("tool client did not use the context pool")
 	}
-	if service.HTTPClient().Transport != pool.Transport() {
-		t.Fatal("tool service did not use the context pool")
-	}
-	if service.HTTPClient().Timeout != 7*time.Second {
-		t.Fatalf("timeout = %s", service.HTTPClient().Timeout)
+	if client.Timeout != 7*time.Second {
+		t.Fatalf("timeout = %s", client.Timeout)
 	}
 }
 

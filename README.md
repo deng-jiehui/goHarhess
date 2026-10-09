@@ -131,8 +131,7 @@ Provider 模型通过 `llm.NewChatModelNode(model)` 接入图。完整说明见
 | `pkg/contextengine` | Token 预算、上下文裁切和 Prompt Cache 对齐 |
 | `pkg/control` | typed 挂起请求与人工交互协议 |
 | `pkg/state` | 会话历史 Checkpoint 和乐观版本控制 |
-| `pkg/retrieval` | 分块、索引、检索和重排 |
-| `extensions` | Cache、Redis、MCP 等可选实现，单独维护 Go module |
+| `extensions` | 检索（分块/索引/重排）、Cache、Redis、MCP 等可选实现，单独维护 Go module |
 
 ## 可选扩展
 

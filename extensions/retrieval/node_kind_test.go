@@ -3,7 +3,7 @@ package retrieval_test
 import (
 	"testing"
 
-	"github.com/goharness/goharness/pkg/retrieval"
+	"github.com/goharness/goharness/extensions/retrieval"
 	"github.com/goharness/goharness/pkg/runnable"
 )
 

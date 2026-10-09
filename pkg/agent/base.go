@@ -172,6 +172,34 @@ func (b *base) OptionTypes() []reflect.Type {
 	return out
 }
 
+// runPrelude 汇总各 Agent 共用的运行前置：解析并下发运行选项、装载会话、
+// 绑定运行上下文、预处理消息并开启生命周期。返回可直接驱动配方的上下文
+// 与冻结后的运行选项；session 已回填进 opts。
+func (b *base) runPrelude(ctx context.Context, messages []schema.Message, kind AgentKind, options []runnable.Option) (runCtx context.Context, prepared []schema.Message, opts RunOptions, lifecycle *runLifecycle, err error) {
+	opts, err = resolveRunOptions(b.limits, options)
+	if err != nil {
+		return nil, nil, RunOptions{}, nil, err
+	}
+	if err = b.dispatchRunOptions(&opts); err != nil {
+		return nil, nil, RunOptions{}, nil, err
+	}
+	opts.agentKind = kind
+	loaded, session, err := b.loadConversation(ctx, messages, &opts)
+	if err != nil {
+		return nil, nil, RunOptions{}, nil, err
+	}
+	ctx = bindRunContext(ctx, session)
+	prepared = b.prepareMessages(loaded, &opts)
+	runCtx, lifecycle, err = b.beginRun(ctx, prepared, opts)
+	if err != nil {
+		return nil, nil, RunOptions{}, nil, err
+	}
+	opts.session = session
+	runCtx = withResolvedRunOptions(runCtx, opts)
+	runCtx = withToolExecutionLimits(runCtx, opts)
+	return runCtx, prepared, opts, lifecycle, nil
+}
+
 // prepareMessages 是子类预处理输入的扩展点。输入已在会话装配边界隔离，
 // 内部按 Message 不可变约定传递，默认实现不再重复深拷贝。
 func (b *base) prepareMessages(messages []schema.Message, _ *RunOptions) []schema.Message {

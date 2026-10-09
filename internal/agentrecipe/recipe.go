@@ -58,7 +58,6 @@ type RunConfig struct {
 // 回填后清零。两个字段都不参与线格式。
 type baseState struct {
 	History      []schema.Message `json:"history,omitempty"`
-	Input        []schema.Message `json:"input,omitempty"`
 	Messages     []schema.Message `json:"messages,omitempty"`
 	Response     []schema.Message `json:"response,omitempty"`
 	externalConv bool
@@ -67,8 +66,9 @@ type baseState struct {
 
 // baseStateWire 是 baseState 的持久化视图：ConvExternal 时 History
 // 只保存 history_len 引用，恢复时由检查点会话回填；否则按原样内联。
-// 其余字段（Input 为本轮输入、Messages 为裁剪后工作集、Response 为
-// 本轮增量）与执行进度强相关，保持内联。
+// Messages 为裁剪后工作集、Response 为本轮增量，与执行进度强相关，
+// 保持内联；Input 保留在线格式中只解码旧检查点，运行时不再携带——
+// 本轮输入已包含在 History 尾部，恢复所需的原始输入由调用方重新提供。
 type baseStateWire struct {
 	History      []schema.Message `json:"history,omitempty"`
 	Input        []schema.Message `json:"input,omitempty"`
@@ -79,7 +79,7 @@ type baseStateWire struct {
 }
 
 func (s *baseState) wire() baseStateWire {
-	w := baseStateWire{Input: s.Input, Messages: s.Messages, Response: s.Response}
+	w := baseStateWire{Messages: s.Messages, Response: s.Response}
 	if s.externalConv {
 		w.ConvExternal = true
 		w.HistoryLen = len(s.History)
@@ -90,7 +90,8 @@ func (s *baseState) wire() baseStateWire {
 }
 
 func (w baseStateWire) toState() baseState {
-	s := baseState{History: w.History, Input: w.Input, Messages: w.Messages, Response: w.Response}
+	// w.Input 只作旧检查点解码的兼容字段，内容并入 History，不再回填 State。
+	s := baseState{History: w.History, Messages: w.Messages, Response: w.Response}
 	if w.ConvExternal {
 		s.externalConv = true
 		s.historyLen = w.HistoryLen
@@ -134,7 +135,7 @@ func newBaseState(input []schema.Message, cfg RunConfig) baseState {
 	if history == nil {
 		history = original
 	}
-	return baseState{History: history, Input: original, Messages: messages}
+	return baseState{History: history, Messages: messages}
 }
 
 // ToolState 是 Basic/ReAct 配方的运行状态。

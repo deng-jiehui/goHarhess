@@ -4,6 +4,13 @@
 缓存后端或 Redis 客户端。可选实现位于嵌套的
 `extensions` 模块，应用可以按需选择依赖。
 
+## 检索组件
+
+RAG 数据组件（分块、索引、混合检索、重排）在
+`extensions/retrieval` 中，实现 `runnable.Runnable` 契约，
+可直接接入图节点。用法见 [RAG 管道](rag-pipeline.md) 与
+[检索服务](retrieval-services.md)。
+
 ## 缓存装饰器
 
 缓存扩展装饰 Provider 值并保留规范的

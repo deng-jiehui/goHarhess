@@ -606,9 +606,9 @@ func (m *earlyStartModel) Stream(ctx context.Context, request llm.Request, optio
 
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
+		merger := newTestDeltaMerger(resolved.DeltaStream)
 		send := func(response llm.Response) bool {
-			messages, err := accumulator.Apply(response)
+			messages, err := merger.apply(response)
 			if err != nil {
 				_ = writer.CloseWithError(err)
 				return false

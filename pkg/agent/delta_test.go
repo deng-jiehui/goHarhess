@@ -125,9 +125,9 @@ func (m *deltaScriptedModel) Stream(ctx context.Context, request llm.Request, op
 
 	reader, writer := runnable.Pipe[llm.Response](ctx)
 	go func() {
-		accumulator := llm.NewDeltaAccumulator(resolved.DeltaStream)
+		merger := newTestDeltaMerger(resolved.DeltaStream)
 		for _, event := range events {
-			messages, err := accumulator.Apply(event)
+			messages, err := merger.apply(event)
 			if err != nil {
 				_ = writer.CloseWithError(err)
 				return

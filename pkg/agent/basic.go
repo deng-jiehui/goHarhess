@@ -42,28 +42,11 @@ func newBasicAgent(cfg baseConfig) (*BasicAgent, error) {
 }
 
 func (a *BasicAgent) stream(ctx context.Context, messages []schema.Message, options ...runnable.Option) (*runnable.StreamReader[[]schema.Message], error) {
-	runOpts, err := resolveRunOptions(a.limits, options)
+	runCtx, prepared, runOpts, lifecycle, err := a.runPrelude(ctx, messages, AgentKindBasic, options)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.dispatchRunOptions(&runOpts); err != nil {
-		return nil, err
-	}
-	runOpts.agentKind = AgentKindBasic
-	loaded, session, err := a.loadConversation(ctx, messages, &runOpts)
-	if err != nil {
-		return nil, err
-	}
-	ctx = bindRunContext(ctx, session)
-	prepared := a.prepareMessages(loaded, &runOpts)
-	runCtx, lifecycle, err := a.beginRun(ctx, prepared, runOpts)
-	if err != nil {
-		return nil, err
-	}
-	runOpts.session = session
-	runCtx = withResolvedRunOptions(runCtx, runOpts)
-	runCtx = withToolExecutionLimits(runCtx, runOpts)
-	recipeConfig := recipeRunConfig(session, messages, 1)
+	recipeConfig := recipeRunConfig(runOpts.session, messages, 1)
 	var dataStream *runnable.StreamReader[[]schema.Message]
 	if runOpts.resume {
 		dataStream, err = a.recipe.ResumeStream(runCtx, recipeConfig, runOpts.forwarded...)

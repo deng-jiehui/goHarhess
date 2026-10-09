@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -145,17 +146,17 @@ func TestOpenAIStreamAppendsMixedContentArraysAcrossEvents(t *testing.T) {
 		parts += `,` + string(raw) + `]`
 		return []byte(`{"choices":[{"index":0,"delta":{"role":"assistant","content":` + parts + `}}]}`)
 	}
-	accumulator := NewDeltaAccumulator(true)
+	accumulator := newWireAccumulator(context.Background())
 	for _, event := range [][]byte{makeEvent("first", true, rawOne), makeEvent("second", false, rawTwo)} {
 		messages, _, _, err := decodeOpenAIResponse(event, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := accumulator.Apply(Response{Messages: messages}); err != nil {
+		if err := accumulator.apply(messages); err != nil {
 			t.Fatal(err)
 		}
 	}
-	message := accumulator.Messages()[0]
+	message := accumulator.messages()[0]
 	blocks := message.ContentBlocks
 	want := []schema.ContentBlockType{schema.ContentBlockTypeText, schema.ContentBlockTypeImage, schema.ContentBlockTypeOpaque, schema.ContentBlockTypeText, schema.ContentBlockTypeOpaque}
 	if len(blocks) != len(want) {
@@ -185,10 +186,11 @@ func TestOpenAIStreamPassThroughRemovesPrivateAppendMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := NewDeltaAccumulator(false).Apply(Response{Messages: messages})
-	if err != nil {
+	accumulator := newWireAccumulator(context.Background())
+	if err := accumulator.apply(messages); err != nil {
 		t.Fatal(err)
 	}
+	output := accumulator.messages()
 	if len(output) != 1 || len(output[0].ContentBlocks) != 2 {
 		t.Fatalf("output=%#v", output)
 	}
