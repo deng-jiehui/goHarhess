@@ -19,11 +19,3 @@ func setMessageAgentName(message schema.Message, name string) schema.Message {
 	m.Extra[agentNameMetadataKey] = name
 	return m
 }
-
-func messageAgentName(message schema.Message) string {
-	if message.Extra == nil {
-		return ""
-	}
-	value, _ := message.Extra[agentNameMetadataKey].(string)
-	return value
-}

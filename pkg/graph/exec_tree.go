@@ -786,12 +786,6 @@ func (c *runCoordinator) frameRunnable(frame *executionProgress) bool {
 	return runnable
 }
 
-// frameRunnable 是不持锁版本：调用方须持有协调器树锁或操作克隆数据。
-func frameRunnable(f *executionProgress) bool {
-	runnable, _ := frameWaitResolved(f)
-	return runnable
-}
-
 // frameWaitResolved 判断 frame 当前阻塞位置是否解除，返回仍待答的问题。
 // 已登记但从未提交进度的槽位视为可推进（继续原子执行）。
 func frameWaitResolved(f *executionProgress) (bool, []control.InterruptRecord) {

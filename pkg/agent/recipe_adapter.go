@@ -58,10 +58,3 @@ func joinAgentTextBlocks(blocks []schema.ContentBlock) string {
 	}
 	return strings.Join(parts, "")
 }
-
-func recipeName(base *base, fallback string) string {
-	if base != nil && base.Name() != "" {
-		return base.Name()
-	}
-	return fallback
-}

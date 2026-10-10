@@ -22,7 +22,6 @@ import (
 type agentExecutionStore struct {
 	mu        sync.Mutex
 	memory    *state.MemoryStore
-	data      map[string][]byte
 	saves     int
 	saveErr   error
 	failAfter int

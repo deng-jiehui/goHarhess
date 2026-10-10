@@ -1021,54 +1021,6 @@ func newRuntimeCondition[V any](predicate func(context.Context, V) (bool, error)
 	}}
 }
 
-func bindRuntimePreHandler(handler any) (*runtimePreHandler, error) {
-	value := reflect.ValueOf(handler)
-	if !value.IsValid() || isNilReflectValue(value) || value.Kind() != reflect.Func {
-		return nil, errors.New("pre handler must be a non-nil function")
-	}
-	typeOfHandler := value.Type()
-	if typeOfHandler.NumIn() != 2 || typeOfHandler.In(0) != contextType || typeOfHandler.NumOut() != 2 || typeOfHandler.Out(1) != errorType {
-		return nil, errors.New("pre handler must have signature func(context.Context, *State) (Input, error)")
-	}
-	stateType, inputType := typeOfHandler.In(1), typeOfHandler.Out(0)
-	return &runtimePreHandler{stateType: stateType, inputType: inputType, invoke: func(ctx context.Context, state any) (output any, err error) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("pre handler panicked: %v", recovered)
-			}
-		}()
-		outputs := value.Call([]reflect.Value{reflect.ValueOf(ctx), reflectArgument(stateType, state)})
-		if !outputs[1].IsNil() {
-			return nil, outputs[1].Interface().(error)
-		}
-		return outputs[0].Interface(), nil
-	}}, nil
-}
-
-func bindRuntimePostHandler(handler any) (*runtimePostHandler, error) {
-	value := reflect.ValueOf(handler)
-	if !value.IsValid() || isNilReflectValue(value) || value.Kind() != reflect.Func {
-		return nil, errors.New("post handler must be a non-nil function")
-	}
-	typeOfHandler := value.Type()
-	if typeOfHandler.NumIn() != 3 || typeOfHandler.In(0) != contextType || typeOfHandler.NumOut() != 1 || typeOfHandler.Out(0) != errorType {
-		return nil, errors.New("post handler must have signature func(context.Context, *State, Output) error")
-	}
-	stateType, outputType := typeOfHandler.In(1), typeOfHandler.In(2)
-	return &runtimePostHandler{stateType: stateType, outputType: outputType, invoke: func(ctx context.Context, state, output any) (err error) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("post handler panicked: %v", recovered)
-			}
-		}()
-		outputs := value.Call([]reflect.Value{reflect.ValueOf(ctx), reflectArgument(stateType, state), reflectArgument(outputType, output)})
-		if !outputs[0].IsNil() {
-			return outputs[0].Interface().(error)
-		}
-		return nil
-	}}, nil
-}
-
 func bindRuntimeCondition(predicate any) (*runtimeCondition, error) {
 	value := reflect.ValueOf(predicate)
 	if !value.IsValid() || isNilReflectValue(value) || value.Kind() != reflect.Func {

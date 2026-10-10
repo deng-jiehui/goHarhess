@@ -74,13 +74,6 @@ type writeTicket struct{ done chan error }
 // wait 阻塞到本次写入完成，返回其保存结果。
 func (t writeTicket) wait() error { return <-t.done }
 
-// resolvedTicket 返回已完成的写入票据，供无存储模式跳过落盘等待。
-func resolvedTicket() writeTicket {
-	ticket := writeTicket{done: make(chan error, 1)}
-	ticket.done <- nil
-	return ticket
-}
-
 func newCheckpointWriter(config checkpointConfig, mode Durability) *checkpointWriter {
 	w := &checkpointWriter{config: config, async: mode == DurabilityAsync}
 	w.idle = sync.NewCond(&w.mu)
