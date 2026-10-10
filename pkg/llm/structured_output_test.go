@@ -470,3 +470,81 @@ func TestStructuredOutputTransformCloseReleasesUpstream(t *testing.T) {
 		t.Fatal("upstream not released after reader close")
 	}
 }
+
+func TestStructuredOutputCollectHonorsCancellation(t *testing.T) {
+	output := newDecisionOutput(t)
+	// 上游 Reader 用自己的 Context：本次调用取消仍应让等待退出并释放上游。
+	input, _ := runnable.Pipe[[]schema.Message](context.Background())
+	defer input.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := output.Collect(ctx, input); done <- err }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Collect did not respond to caller cancellation")
+	}
+}
+
+func TestStructuredOutputTransformHonorsCancellation(t *testing.T) {
+	output := newDecisionOutput(t)
+	input, _ := runnable.Pipe[[]schema.Message](context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, err := output.Transform(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := reader.Recv(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputRejectsUnsupportedFieldTypes(t *testing.T) {
+	// 动态 map 无法展开成 strict 要求的封闭属性集。
+	type withMap struct {
+		Labels map[string]string `json:"labels"`
+	}
+	if _, err := llm.NewStructuredOutput[withMap](); err == nil {
+		t.Fatal("dynamic map field accepted")
+	}
+	// ,string 标签让线路用字符串包裹数字，与推导出的原始类型不一致。
+	type stringTag struct {
+		ID int64 `json:"id,string"`
+	}
+	if _, err := llm.NewStructuredOutput[stringTag](); err == nil {
+		t.Fatal("json ,string tag accepted")
+	}
+	// json.Number 按原始数字收发而推导按 string 种类处理。
+	type numberField struct {
+		N json.Number `json:"n"`
+	}
+	if _, err := llm.NewStructuredOutput[numberField](); err == nil {
+		t.Fatal("json.Number field accepted")
+	}
+}
+
+func TestStructuredOutputRejectsCodecBeyondFields(t *testing.T) {
+	// 顶层自定义编解码。
+	if _, err := llm.NewStructuredOutput[customCodec](); err == nil {
+		t.Fatal("root custom codec accepted")
+	}
+	// 容器元素内的自定义编解码。
+	type items struct {
+		Items []customCodec `json:"items"`
+	}
+	if _, err := llm.NewStructuredOutput[items](); err == nil {
+		t.Fatal("slice element custom codec accepted")
+	}
+	// 指针字段内的自定义编解码。
+	type pointerItem struct {
+		Item *customCodec `json:"item"`
+	}
+	if _, err := llm.NewStructuredOutput[pointerItem](); err == nil {
+		t.Fatal("pointer field custom codec accepted")
+	}
+}

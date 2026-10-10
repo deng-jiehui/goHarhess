@@ -327,3 +327,83 @@ func TestOpenAICompatibleResponseLimitBoundary(t *testing.T) {
 		t.Fatalf("default-limit response failed: %v", err)
 	}
 }
+
+// 分片 refusal 必须累计进最终消息，结构化解码把它识别为拒绝回答。
+func TestOpenAICompatibleStreamPreservesRefusal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(writer, "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"refusal\":\"cannot\"}}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\" comply\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+		Model: "local", BaseURL: server.URL, Client: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := model.Stream(context.Background(), llm.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := llm.CollectResponse(context.Background(), reader)
+	if err != nil || len(response.Messages) != 1 {
+		t.Fatalf("response = %+v, err = %v", response, err)
+	}
+	if got := response.Messages[0].Extra["llm.refusal"]; got != "cannot comply" {
+		t.Fatalf("refusal = %v, messages = %+v", got, response.Messages)
+	}
+	output := newDecisionOutput(t)
+	if _, err := output.Decode(response.Messages); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("refused answer decoded: err = %v", err)
+	}
+}
+
+// 手写的公开 ResponseFormat 在发出 HTTP 请求前统一校验。
+func TestOpenAICompatibleValidatesFormatBeforeRequest(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(writer, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+		Model: "local", BaseURL: server.URL, Client: server.Client(),
+		Capabilities: llm.Capabilities{JSONSchema: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}`
+	invalid := []struct {
+		name   string
+		format llm.ResponseFormat
+	}{
+		{"bad name", llm.ResponseFormat{Name: "invalid/name", Strict: true, Schema: json.RawMessage(valid)}},
+		{"empty name", llm.ResponseFormat{Strict: true, Schema: json.RawMessage(valid)}},
+		{"malformed schema", llm.ResponseFormat{Name: "ok", Strict: true, Schema: json.RawMessage(`{`)}},
+		{"non object root", llm.ResponseFormat{Name: "ok", Strict: true, Schema: json.RawMessage(`{"type":"string"}`)}},
+		{"strict missing additionalProperties", llm.ResponseFormat{Name: "ok", Strict: true,
+			Schema: json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`)}},
+		{"strict missing required", llm.ResponseFormat{Name: "ok", Strict: true,
+			Schema: json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false}`)}},
+	}
+	for _, tc := range invalid {
+		format := tc.format
+		if _, err := model.Invoke(context.Background(), llm.Request{}, llm.WithResponseFormat(&format)); err == nil {
+			t.Fatalf("%s accepted", tc.name)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d", requests)
+	}
+	format := llm.ResponseFormat{Name: "ok", Strict: true, Schema: json.RawMessage(valid)}
+	if _, err := model.Invoke(context.Background(), llm.Request{}, llm.WithResponseFormat(&format)); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d", requests)
+	}
+}

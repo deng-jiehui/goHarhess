@@ -302,29 +302,63 @@ func (o *StructuredOutput[T]) Transform(ctx context.Context, input *runnable.Str
 }
 
 // drainMessages 读尽输入流并返回最后一份完整消息列表；输入尾部错误原样
-// 返回，不交付部分成功。
+// 返回，不交付部分成功。读取在独立 goroutine 中执行：上游 Reader 的 Context
+// 由创建方持有，本次调用的 ctx 取消时通过关闭上游使阻塞的 Recv 退出，
+// 函数返回前内部 goroutine 一定已经结束。
 func drainMessages(ctx context.Context, input *runnable.StreamReader[[]schema.Message]) ([]schema.Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type recvResult struct {
+		messages []schema.Message
+		err      error
+	}
+	results := make(chan recvResult)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			messages, err := input.Recv()
+			select {
+			case results <- recvResult{messages: messages, err: err}:
+				if err != nil {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	waitPump := func() {
+		close(stop)
+		<-finished
+	}
 	var last []schema.Message
 	have := false
 	for {
-		messages, err := input.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
 		select {
+		case result := <-results:
+			switch {
+			case errors.Is(result.err, io.EOF):
+				waitPump()
+				if !have {
+					return nil, fmt.Errorf("%w: input stream delivered no message list", ErrInvalidStructuredOutput)
+				}
+				return last, nil
+			case result.err != nil:
+				_ = input.Close()
+				waitPump()
+				return nil, result.err
+			default:
+				last, have = result.messages, true
+			}
 		case <-ctx.Done():
+			_ = input.Close()
+			waitPump()
 			return nil, ctx.Err()
-		default:
 		}
-		last, have = messages, true
 	}
-	if !have {
-		return nil, fmt.Errorf("%w: input stream delivered no message list", ErrInvalidStructuredOutput)
-	}
-	return last, nil
 }
 
 // defaultOutputName 从命名类型推导默认格式名（驼峰转下划线、非限定字符

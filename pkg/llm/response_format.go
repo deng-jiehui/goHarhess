@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/goharness/goharness/pkg/runnable"
 )
@@ -45,4 +46,80 @@ func WithResponseFormat(format *ResponseFormat) runnable.Option {
 		cloned := frozen.Clone()
 		o.ResponseFormat = &cloned
 	})
+}
+
+// validateResponseFormat 在类型化格式进入 Provider 请求前统一核对：名称符合
+// 线路要求、Schema 是 JSON 对象且根类型为 object；Strict 时递归核对每个对象
+// 节点声明 additionalProperties=false 且 required 覆盖全部属性。手写的公开
+// ResponseFormat 与组件生成的格式走同一条校验路径。
+func validateResponseFormat(format *ResponseFormat) error {
+	if format == nil {
+		return errors.New("response format is nil")
+	}
+	if !outputNamePattern.MatchString(format.Name) {
+		return fmt.Errorf("response format name %q must match %s", format.Name, outputNamePattern)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(format.Schema, &root); err != nil {
+		return fmt.Errorf("response format schema is not valid JSON: %w", err)
+	}
+	if t, _ := root["type"].(string); t != "object" {
+		return fmt.Errorf("response format schema root type must be %q, got %q", "object", t)
+	}
+	if format.Strict {
+		if err := validateStrictSchemaNode(root, "schema"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateStrictSchemaNode 递归核对 strict 约束：每个对象节点必须关闭额外
+// 字段并把全部属性列入 required，与原生 strict 格式的服务端要求一致。
+func validateStrictSchemaNode(node map[string]any, path string) error {
+	properties, _ := node["properties"].(map[string]any)
+	if t, _ := node["type"].(string); t == "object" || properties != nil {
+		if additional, ok := node["additionalProperties"]; !ok || additional != false {
+			return fmt.Errorf("strict response format %s must set additionalProperties=false", path)
+		}
+		required := map[string]bool{}
+		if list, ok := node["required"].([]any); ok {
+			for _, item := range list {
+				if name, ok := item.(string); ok {
+					required[name] = true
+				}
+			}
+		}
+		for name := range properties {
+			if !required[name] {
+				return fmt.Errorf("strict response format %s property %q is missing from required", path, name)
+			}
+		}
+	}
+	for name, child := range properties {
+		if object, ok := child.(map[string]any); ok {
+			if err := validateStrictSchemaNode(object, path+".properties."+name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, key := range []string{"items", "additionalProperties"} {
+		if child, ok := node[key].(map[string]any); ok {
+			if err := validateStrictSchemaNode(child, path+"."+key); err != nil {
+				return err
+			}
+		}
+	}
+	for _, key := range []string{"$defs", "definitions"} {
+		if defs, ok := node[key].(map[string]any); ok {
+			for name, child := range defs {
+				if object, ok := child.(map[string]any); ok {
+					if err := validateStrictSchemaNode(object, path+"."+key+"."+name); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

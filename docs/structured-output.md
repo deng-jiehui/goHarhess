@@ -42,7 +42,13 @@ T 必须是结构体（顶层指针、标量、切片、map 在构造期拒绝�
 - 需要可空字段时用 `*T`、`[]T` 等可空类型；非指针字段收到 `null` 会被拒绝。
 - 实现了 `json.Marshaler`/`Unmarshaler`/`TextMarshaler`/`TextUnmarshaler`
   的自定义编解码类型（如 `json.RawMessage` 字段）在构造期拒绝：推导出的
-  Schema 与实际编解码不一致，无法准确约束。
+  Schema 与实际编解码不一致，无法准确约束。顶层与容器元素同样检查，
+  不是只查直接字段。
+- 字段级 `map` 在构造期拒绝：动态键无法展开成 strict 要求的封闭属性集，
+  改用显式结构体字段。
+- `json:",string"` 标签与 `json.Number` 字段在构造期拒绝：线路形态与推导
+  类型不一致（前者按字符串包裹数字，后者相反）。带显式 JSON 名的匿名
+  内嵌字段同样拒绝。
 - `time.Time`、`slog.Level`、`big.Int` 等标准库类型按已知 Schema 保留。
 
 `Format()` 每次返回独立副本（`Strict=true`），组件构造完成后只读，可并发
@@ -72,6 +78,12 @@ model, err := llm.New(llm.Config{
 
 `WithResponseFormat` 与构造配置或单次 `GenerateConfig["response_format"]`
 同时存在时返回 `llm.ErrResponseFormatConflict`（在发 HTTP 请求之前）。
+
+手写 `ResponseFormat` 在发请求前统一校验：`Name` 必须匹配
+`[A-Za-z0-9_-]{1,64}`，`Schema` 必须是合法 JSON 且根类型为 `object`；
+`Strict=true` 时递归要求每个对象节点 `additionalProperties=false` 且
+`required` 覆盖全部属性。组件生成的格式与手写格式走同一条校验路径，
+不合法的格式在发请求之前报错。
 
 ## 用法一：单次回答 / Basic Agent
 

@@ -74,13 +74,17 @@ func compileStructuredSchema(t reflect.Type) (*compiledSchema, error) {
 }
 
 // normalizeStrict 沿 Go 类型与 Schema 并行下钻，把 strict 规则应用到每个
-// 嵌套对象：所有导出字段进入 required，额外字段已由推导禁止。
+// 嵌套对象：所有导出字段进入 required，额外字段已由推导禁止。根类型与
+// 容器元素同样在途经处检查自定义编解码与可表达性。
 func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if s == nil {
 		return fmt.Errorf("field %s: type %s has no derived schema", path, t)
+	}
+	if err := rejectCustomCodec(path, t); err != nil {
+		return err
 	}
 	switch t.Kind() {
 	case reflect.Struct:
@@ -104,12 +108,15 @@ func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 				continue
 			}
 			fieldPath := path + "." + info.name
+			if info.settings["string"] {
+				// ,string 让 encoding/json 用字符串包裹数字/布尔值，推导出的
+				// Schema 仍是原始类型，两侧不一致，构造期拒绝。
+				return fmt.Errorf("field %s: json ,string tag changes the wire type and "+
+					"cannot be represented by the schema; use a plain field type", fieldPath)
+			}
 			fieldType := field.Type
 			for fieldType.Kind() == reflect.Pointer {
 				fieldType = fieldType.Elem()
-			}
-			if err := rejectCustomCodec(fieldPath, fieldType); err != nil {
-				return err
 			}
 			optional := info.settings["omitempty"] || info.settings["omitzero"]
 			if optional && field.Type.Kind() != reflect.Pointer {
@@ -130,9 +137,9 @@ func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 	case reflect.Slice, reflect.Array:
 		return normalizeStrict(t.Elem(), s.Items, path+"[]")
 	case reflect.Map:
-		if s.AdditionalProperties != nil {
-			return normalizeStrict(t.Elem(), s.AdditionalProperties, path+"{}")
-		}
+		// 动态键无法展开成 strict 要求的封闭属性集；原生 strict 格式不支持。
+		return fmt.Errorf("field %s: dynamic map type %s cannot be expressed as "+
+			"a strict object schema; use explicit struct fields", path, t)
 	}
 	return nil
 }
@@ -147,6 +154,12 @@ func rejectCustomCodec(path string, t reflect.Type) error {
 	if t.Kind() == reflect.Interface {
 		// any 等接口类型推导为不限制约束的 Schema，与解码行为一致。
 		return nil
+	}
+	if t == reflect.TypeFor[json.Number]() {
+		// encoding/json 把 Number 按原始数字收发，而推导按 string 种类处理，
+		// 两侧不一致。
+		return fmt.Errorf("field %s: json.Number has a special wire form that "+
+			"the schema cannot describe; use int64 or float64", path)
 	}
 	pt := reflect.PointerTo(t)
 	if t.Implements(jsonMarshalerType) || pt.Implements(jsonMarshalerType) ||

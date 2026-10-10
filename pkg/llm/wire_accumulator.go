@@ -20,6 +20,7 @@ type wireAccumulator struct {
 	slots       []map[int]int
 	kinds       []map[int]schema.ContentBlockType
 	counts      []int
+	refusals    []string
 }
 
 func newWireAccumulator(ctx context.Context) *wireAccumulator {
@@ -39,6 +40,7 @@ func (a *wireAccumulator) apply(messages []schema.Message) error {
 			a.slots = append(a.slots, map[int]int{})
 			a.kinds = append(a.kinds, map[int]schema.ContentBlockType{})
 			a.counts = append(a.counts, 0)
+			a.refusals = append(a.refusals, "")
 			role := m.Role
 			if role == "" {
 				role = schema.RoleAssistant
@@ -46,6 +48,10 @@ func (a *wireAccumulator) apply(messages []schema.Message) error {
 			if err := a.emit(schema.MessageDelta{MessageID: id, Op: schema.MessageStart, Role: role}); err != nil {
 				return err
 			}
+		}
+		// 拒绝原因按消息身份累计；它不进入 ContentBlocks，最终消息统一带上。
+		if refusal, _ := m.Extra["llm.refusal"].(string); refusal != "" {
+			a.refusals[i] += refusal
 		}
 		appendCount, _ := m.Extra[openAIAppendBlocksExtraKey].(int)
 		if appendCount < 0 || appendCount > len(m.ContentBlocks) {
@@ -132,8 +138,16 @@ func (a *wireAccumulator) apply(messages []schema.Message) error {
 }
 func (a *wireAccumulator) messages() []schema.Message {
 	out := make([]schema.Message, 0, len(a.ids))
-	for _, id := range a.ids {
+	for i, id := range a.ids {
 		m, _ := a.accumulator.Message(id)
+		if i < len(a.refusals) && a.refusals[i] != "" {
+			extra := make(map[string]any, len(m.Extra)+1)
+			for key, value := range m.Extra {
+				extra[key] = value
+			}
+			extra["llm.refusal"] = a.refusals[i]
+			m.Extra = extra
+		}
 		out = append(out, m)
 	}
 	return out

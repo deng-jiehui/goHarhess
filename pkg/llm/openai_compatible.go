@@ -280,6 +280,9 @@ func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functi
 		payload[key] = value
 	}
 	if opts.ResponseFormat != nil {
+		if err := validateResponseFormat(opts.ResponseFormat); err != nil {
+			return nil, err
+		}
 		payload["response_format"] = encodeResponseFormat(*opts.ResponseFormat)
 	}
 	payload["model"] = m.model
