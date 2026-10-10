@@ -26,6 +26,24 @@ var (
 	ErrNoSession = errors.New("sub-agent session requires a checkpoint-enabled run and a configured store")
 )
 
+// PersistenceError 把子 Agent 会话记录或索引的存储读写失败标记为框架
+// 持久化错误（control.AsFramework 可识别）：穿透工具运行时，使父运行
+// 停在可恢复边界而不是被转成普通工具错误吞掉。恢复重放同一调用时，
+// 已完成的嵌套子执行直接复用结果，只重放记录保存。Key 是出错的记录键，
+// 原错误链随 Unwrap 保留（乐观锁冲突经 errors.Is(state.ErrConflict) 识别）。
+type PersistenceError struct {
+	Key string
+	Err error
+}
+
+func (e *PersistenceError) Error() string {
+	return fmt.Sprintf("sub-agent record %q: %v", e.Key, e.Err)
+}
+
+func (e *PersistenceError) Unwrap() error { return e.Err }
+
+func (e *PersistenceError) FrameworkError() bool { return true }
+
 // 会话子 Agent 记录在调用方 Store 中按命名空间键存放：
 // 索引为 "<会话ID>/agents"，各 Agent 记录为 "<会话ID>/agents/<ID>"；
 // 每条记录是一次普通的检查点保存，历史随 Store 保留，Cleanup 按 RunID 回退。
@@ -144,9 +162,10 @@ func agentKey(conversationID, agentID string) string {
 
 // loadIndex 读会话内的子 Agent 索引；缺失返回空索引，损坏返回 ErrAgentCorrupt。
 func (m *Manager) loadIndex(ctx context.Context, conversationID string) (agentIndex, state.Checkpoint, error) {
-	record, found, err := m.cfg.Store.Load(ctx, indexKey(conversationID))
+	key := indexKey(conversationID)
+	record, found, err := m.cfg.Store.Load(ctx, key)
 	if err != nil {
-		return agentIndex{}, state.Checkpoint{}, err
+		return agentIndex{}, state.Checkpoint{}, &PersistenceError{Key: key, Err: err}
 	}
 	if !found {
 		return agentIndex{}, state.Checkpoint{}, nil
@@ -163,13 +182,17 @@ func (m *Manager) saveIndex(ctx context.Context, conversationID string, index ag
 	if err != nil {
 		return err
 	}
+	key := indexKey(conversationID)
 	_, err = m.cfg.Store.Save(ctx, state.Checkpoint{
-		ConversationID: indexKey(conversationID),
+		ConversationID: key,
 		ID:             latest.ID,
 		Version:        latest.Version,
 		Result:         data,
 	})
-	return err
+	if err != nil {
+		return &PersistenceError{Key: key, Err: err}
+	}
+	return nil
 }
 
 // loadAgent 读单条子 Agent 记录并做创建者可见性过滤。
@@ -187,9 +210,10 @@ func (m *Manager) loadAgent(ctx context.Context, conversationID, agentID, caller
 // loadAgentRaw 读记录不做可见性过滤：updateAgent 内部用它，
 // 新建记录的场景下记录尚不存在也属合法。
 func (m *Manager) loadAgentRaw(ctx context.Context, conversationID, agentID string) (agentRecord, state.Checkpoint, bool, error) {
-	record, found, err := m.cfg.Store.Load(ctx, agentKey(conversationID, agentID))
+	key := agentKey(conversationID, agentID)
+	record, found, err := m.cfg.Store.Load(ctx, key)
 	if err != nil {
-		return agentRecord{}, state.Checkpoint{}, false, err
+		return agentRecord{}, state.Checkpoint{}, false, &PersistenceError{Key: key, Err: err}
 	}
 	if !found {
 		return agentRecord{}, state.Checkpoint{}, false, nil
@@ -206,14 +230,18 @@ func (m *Manager) saveAgent(ctx context.Context, conversationID string, agent ag
 	if err != nil {
 		return err
 	}
+	key := agentKey(conversationID, agent.AgentID)
 	_, err = m.cfg.Store.Save(ctx, state.Checkpoint{
-		ConversationID: agentKey(conversationID, agent.AgentID),
+		ConversationID: key,
 		ID:             latest.ID,
 		Version:        latest.Version,
 		RunID:          runID,
 		Result:         data,
 	})
-	return err
+	if err != nil {
+		return &PersistenceError{Key: key, Err: err}
+	}
+	return nil
 }
 
 // indexStatus 把记录的最新状态同步进索引项。
@@ -282,7 +310,11 @@ func (m *Manager) updateAgent(ctx context.Context, conversationID, agentID, runI
 		}
 		return nil
 	}
-	return fmt.Errorf("update sub-agent records for %q: persistent version conflicts", agentID)
+	key := agentKey(conversationID, agentID)
+	if agentID == "" {
+		key = indexKey(conversationID)
+	}
+	return &PersistenceError{Key: key, Err: fmt.Errorf("persistent version conflicts")}
 }
 
 // listForCaller 返回当前创建者可见的子 Agent 摘要。

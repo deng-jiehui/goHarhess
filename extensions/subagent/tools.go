@@ -308,7 +308,22 @@ func (m *Manager) followup(ctx context.Context, in tool.CallInput) (tool.Result,
 		taskID = callID("t-", conversationID+"/"+runID+"/"+agentID+"/"+task)
 	}
 
+	// 先校验保存配置并完成构建，再登记任务：登记即把 Agent 置为
+	// running，构建/校验在登记后失败会让记录停留在 running、后续任务
+	// 被 ErrAgentBusy 永久拒绝。重放本调用时记录已含该任务，登记分支
+	// 直接放行，settle 从命名空间子记录续跑。
 	var agent agentRecord
+	agent, _, err = m.loadAgent(ctx, conversationID, agentID, caller)
+	if err != nil {
+		return modelError(err)
+	}
+	resolved, err := m.specFromSaved(agent.Config, agent.BuilderID, agent.BuilderVersion)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	if _, err := m.build(ctx, resolved); err != nil {
+		return buildFailure(ctx, err)
+	}
 	err = m.updateAgent(ctx, conversationID, agentID, runID, func(index *agentIndex, rec *agentRecord, exists bool) error {
 		if !exists || rec.Creator != caller {
 			return ErrAgentNotFound
@@ -337,17 +352,6 @@ func (m *Manager) followup(ctx context.Context, in tool.CallInput) (tool.Result,
 	})
 	if err != nil {
 		return modelError(err)
-	}
-	agent, _, err = m.loadAgent(ctx, conversationID, agentID, caller)
-	if err != nil {
-		return modelError(err)
-	}
-	resolved, err := m.specFromSaved(agent.Config, agent.BuilderID, agent.BuilderVersion)
-	if err != nil {
-		return tool.Result{}, err
-	}
-	if _, err := m.build(ctx, resolved); err != nil {
-		return buildFailure(ctx, err)
 	}
 	return m.settle(ctx, conversationID, agentID, caller, runID, taskID, resolved, task)
 }

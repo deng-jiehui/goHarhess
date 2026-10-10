@@ -707,3 +707,90 @@ func TestResolveRegistryConstraints(t *testing.T) {
 		t.Fatalf("empty task err=%v", err)
 	}
 }
+
+// --- 阶段四补查回归 ---
+
+// P2：服务重启后追加任务，构建器临时失败不应把子 Agent 永久标为忙碌——
+// 登记任务在配置校验与构建之前完成，失败路径没有遗留 running 任务。
+func TestFailedFollowupBuildDoesNotLeaveBusyAgent(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	initialConfig := baseConfig(store)
+	initial := newManager(t, initialConfig)
+	firstRun := &parentRun{}
+	if _, err := newParent(t, initial, firstRun, spawnStep(map[string]any{"task": "第一轮"})).Invoke(ctx,
+		[]schema.Message{schema.UserMessage("first")}, runOpts(store, "conv")...); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := decode(t, firstRun.seen()[0].Text)["agent_id"].(string)
+	broken := true
+	cfg := baseConfig(store)
+	cfg.BuilderID = "flaky-builder"
+	cfg.Builder = func(_ context.Context, _ subagent.ResolvedSpec) (subagent.Runner, error) {
+		if broken {
+			return nil, errors.New("构建器暂时无法获取依赖")
+		}
+		a, err := agent.New(cfg.Models["main"])
+		if err != nil {
+			return nil, err
+		}
+		return subagent.FromAgent(a), nil
+	}
+	m := newManager(t, cfg)
+	followup := func(callID, task string) step {
+		return func([]toolOut) schema.Message {
+			return toolCall(callID, "followup_task", map[string]any{"agent_id": id, "task": task})
+		}
+	}
+	secondRun := &parentRun{}
+	if _, err := newParent(t, m, secondRun, followup("c-second", "第二轮")).Invoke(ctx,
+		[]schema.Message{schema.UserMessage("second")}, runOpts(store, "conv")...); err != nil {
+		t.Fatal(err)
+	}
+	broken = false
+	thirdRun := &parentRun{}
+	if _, err := newParent(t, m, thirdRun, followup("c-third", "第三轮")).Invoke(ctx,
+		[]schema.Message{schema.UserMessage("third")}, runOpts(store, "conv")...); err != nil {
+		t.Fatal(err)
+	}
+	if seen := thirdRun.seen(); len(seen) != 1 || strings.Contains(seen[0].Text, "task in progress") {
+		t.Fatalf("构建器恢复后子 Agent 仍无法接任务：%+v", seen)
+	}
+}
+
+type failSettleStore struct {
+	*state.MemoryStore
+	failed bool
+	err    error
+}
+
+// 只让子 Agent 的完成记录保存失败，其余根图、子图与索引写入正常。
+func (s *failSettleStore) Save(ctx context.Context, record state.Checkpoint) (state.Checkpoint, error) {
+	var probe struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(record.Result, &probe)
+	if !s.failed && strings.HasPrefix(record.ConversationID, "conv/agents/sa-") && probe.Status == "idle" {
+		s.failed = true
+		return state.Checkpoint{}, s.err
+	}
+	return s.MemoryStore.Save(ctx, record)
+}
+
+// P1：子任务运行成功但完成记录保存失败时，持久化错误必须向上传递——
+// 父运行保持可恢复的失败，而不是以「子 Agent 仍 running」的成功状态结束。
+func TestSessionSaveFailurePropagates(t *testing.T) {
+	saveErr := errors.New("注入：子 Agent 完成记录保存失败")
+	store := &failSettleStore{MemoryStore: state.NewMemoryStore(), err: saveErr}
+	m := newManager(t, baseConfig(store))
+	run := &parentRun{}
+	parent := newParent(t, m, run, spawnStep(map[string]any{"task": "调研"}))
+	_, err := parent.Invoke(context.Background(), []schema.Message{schema.UserMessage("go")}, runOpts(store, "conv")...)
+	if !store.failed {
+		t.Fatal("没有命中完成记录保存边界")
+	}
+	if !errors.Is(err, saveErr) {
+		root, _, _ := store.Load(context.Background(), "conv")
+		t.Fatalf("子记录保存失败没有传给调用方：err=%v，父运行状态=%s，模型所见=%+v", err, root.Status, run.seen())
+	}
+}

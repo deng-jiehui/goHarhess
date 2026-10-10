@@ -92,8 +92,10 @@ func (g *Graph[I, O]) compileRecoveryMetadata() error {
 		contract.Dispatches[from] = item
 	}
 	// 路由按「来源→各预声明目标」投影为条件边条目，整图指纹
-	// 能看到与运行期一致的候选出边集合。
-	for from, route := range g.routes {
+	// 能看到与运行期一致的候选出边集合。来源与目标都来自 map，
+	// 必须排序后入指纹，否则同图重建会产生不同 revision。
+	for _, from := range slices.Sorted(maps.Keys(g.routes)) {
+		route := g.routes[from]
 		for _, target := range slices.Sorted(maps.Keys(route.targets)) {
 			contract.Edges = append(contract.Edges, revisionEdge{
 				From: from, To: target, Conditional: true, Input: typeName(route.inputType),
