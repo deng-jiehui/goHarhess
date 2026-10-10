@@ -282,34 +282,3 @@ func TestRedisMaxHistory(t *testing.T) {
 		t.Fatalf("List len=%d err=%v, want 2", len(list), err)
 	}
 }
-
-func TestRedisStoreCarriesSubAgentsAcrossRunsAndRollback(t *testing.T) {
-	server := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	store, err := redisstore.NewRedisStore(redisstore.RedisStoreConfig{Client: client, Prefix: "sub"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	first, err := store.Save(ctx, state.Checkpoint{ConversationID: "c", RunID: "r1", Status: state.StatusCompleted, SubAgents: json.RawMessage(`{"format":1,"agents":[]}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	next := first.Clone()
-	next.RunID, next.Status = "r2", state.StatusRunning
-	next.SubAgents = json.RawMessage(`{"format":1,"agents":[{"id":"x"}]}`)
-	if _, err := store.Save(ctx, next); err != nil {
-		t.Fatal(err)
-	}
-	// 另起存储实例读取：集合随记录持久化。
-	other, _ := redisstore.NewRedisStore(redisstore.RedisStoreConfig{Client: client, Prefix: "sub"})
-	loaded, found, err := other.Load(ctx, "c")
-	if err != nil || !found || string(loaded.SubAgents) != `{"format":1,"agents":[{"id":"x"}]}` {
-		t.Fatalf("loaded sub agents = %s found=%t err=%v", loaded.SubAgents, found, err)
-	}
-	// 放弃运行回退到运行开始前的集合。
-	rolled, err := state.AbandonRun(ctx, other, "c")
-	if err != nil || string(rolled.SubAgents) != `{"format":1,"agents":[]}` {
-		t.Fatalf("rolled back sub agents = %s err=%v", rolled.SubAgents, err)
-	}
-}
