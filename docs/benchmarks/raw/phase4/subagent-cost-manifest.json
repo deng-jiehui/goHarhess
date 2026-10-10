@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-10",
+  "git_head": "ac819864e8e323e562307679ed5ee2409acdbfc7",
+  "go_version": "go version go1.24.4 windows/amd64",
+  "cgo_enabled": "1",
+  "gogc": "unset",
+  "gomemlimit": "unset",
+  "cpu": 1,
+  "count": 10,
+  "benchtime": "1s",
+  "command": "go test -overlay [benchmark-overlay.json] -p=1 ./subagent -run ^$ -bench ^BenchmarkReviewStage4Subagent$ -benchmem -benchtime=1s -count=10 -cpu=1",
+  "source_sha256": "1f8075a8c2bc8af600d9b8914ea013f0fccfafb3d03d5f5bb11c969eac6855b2",
+  "samples": [
+    {
+      "name": "BenchmarkReviewStage4Subagent/ephemeral",
+      "ns/op": 139067.0,
+      "B/op": 127875.0,
+      "allocs/op": 2061.0
+    },
+    {
+      "name": "BenchmarkReviewStage4Subagent/session_spawn",
+      "ns/op": 536162.0,
+      "B/op": 347965.5,
+      "allocs/op": 3798.0
+    }
+  ],
+  "scope": "one parent ReAct tool call; local worker model; warm construction; separate conversation per session iteration; parent/child/agent-record persistence included"
+}

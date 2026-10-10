@@ -1,0 +1,26 @@
+goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/extensions/subagent
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkReviewStage4Subagent/ephemeral         	    7706	    134959 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8792	    134869 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8644	    136697 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8502	    139515 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8907	    140877 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8498	    143824 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8636	    138046 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8461	    152025 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    7406	    141337 ns/op	         1.000 worker_calls/op	  127876 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/ephemeral         	    8474	    138619 ns/op	         1.000 worker_calls/op	  127875 B/op	    2061 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2602	    543078 ns/op	         1.000 worker_calls/op	  347964 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2836	    548493 ns/op	         1.000 worker_calls/op	  347937 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2551	    516939 ns/op	         1.000 worker_calls/op	  347970 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2685	    542024 ns/op	         1.000 worker_calls/op	  347953 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2398	    537624 ns/op	         1.000 worker_calls/op	  347992 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2580	    535587 ns/op	         1.000 worker_calls/op	  347967 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2541	    519426 ns/op	         1.000 worker_calls/op	  347971 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2526	    514808 ns/op	         1.000 worker_calls/op	  347974 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2672	    536737 ns/op	         1.000 worker_calls/op	  347956 B/op	    3798 allocs/op
+BenchmarkReviewStage4Subagent/session_spawn     	    2640	    520174 ns/op	         1.000 worker_calls/op	  347958 B/op	    3798 allocs/op
+PASS
+ok  	github.com/goharness/goharness/extensions/subagent	27.078s

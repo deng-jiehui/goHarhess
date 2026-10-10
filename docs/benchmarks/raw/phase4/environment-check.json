@@ -1,0 +1,27 @@
+{
+  "baseline_ref": "pre-slim",
+  "baseline_commit": "2335b1a900aaa758acc30df35f755e3bde123f7b",
+  "baseline_source": "D:\\Development\\Go\\goHarness\\.bench\\results\\review-slim-stage4-final\\pre-slim-source",
+  "verified_source_files": 254,
+  "source_differences": [],
+  "candidate_commit": "ac819864e8e323e562307679ed5ee2409acdbfc7",
+  "candidate_environment": {
+    "profile": "Full",
+    "count": 10,
+    "benchtime": "1s",
+    "cpu": 1,
+    "fixture_version": "fixture-v2",
+    "bench_version": "bench-v2",
+    "go_version": "go version go1.24.4 windows/amd64",
+    "goos": "windows",
+    "goarch": "amd64",
+    "gomaxprocs": 1,
+    "gogc": "unset",
+    "gomemlimit": "unset",
+    "cgo_enabled": "1",
+    "cpu_model": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "machine": "Windows_NT AMD64"
+  },
+  "full_environment_matches": true,
+  "benchmark_changed_entry": "parallelnode is now forkjoin; six replacement scenarios reported separately"
+}

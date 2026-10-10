@@ -1,0 +1,16 @@
+goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/schema
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  564312	      1976 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  602554	      1979 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  604256	      2025 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  581809	      2081 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  578466	      2061 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  592177	      2129 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  548535	      2061 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  528813	      2066 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  546612	      2062 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  559422	      2073 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/schema	11.943s

@@ -1,82 +1,67 @@
 # 阶段四基准：引擎收敛（pre-slim 对照）
 
-2026-10-10 在阶段四收口态上按《轻量化改良方案》性能验收规则跑基准。
-因阶段四改动集中在 Graph 引擎（并行统一、检查点简化、命名空间嵌套记录、
-受管任务删除），本轮采样范围为 **Graph 侧 24 个场景子集**（
-ParallelGraph / PersistedGraph / ResumeGraph / SequentialGraph），
-与 `pre-slim` Full 基线同名场景逐项比较。结论：**通过**——24 项全部
-在 ±10% 阈值内或为改善，0 项超阈；恢复与并行路径改善显著
-（ns/op 最大 -56.7%，B/op 最大 -46.8%，allocs/op 最大 -55.2%）。
+验收日期：2026-10-10。代码：`ac81986`。**性能验收通过。**
 
-阶段四改动：删除 `AddParallelNode`（`parallelnode` 场景名保留、改走
-forkjoin 同一路径）、条目化契约改整图指纹、嵌套执行树改命名空间独立
-记录、受管任务与会话子 Agent 移出核心。均为删除与换径，无新增热路径
-开销；恢复路径不再聚合嵌套执行树，完成态检查点恢复显著变快。
+Full 原始记录包含 99 个场景，每个十次，共 990 条样本。与固定 pre-slim 基线逐项比较，分配字节数和分配次数没有超标；只有十条文本消息克隆的耗时首轮增加 22.1%，按方案做同条件双侧各十次复测后，差异为 -0.6%，三个指标均满足既定门槛。
 
-## 环境
+本次使用已经生成的当前提交 Full 记录，独立核验场景完整性、环境与原始中位数，并现场补做超标项复测；没有重复运行完整 Full。代码与功能修复复核的源码一致。
 
-| 项 | 值 |
+## 环境与采样
+
+| 项目 | 条件 |
 | --- | --- |
-| 日期 | 2026-10-10 |
-| 代码 | `de7ac02` 加工作区文档改动（基准二进制于 `de7ac02` 内容编译） |
-| Go | go1.24.4 windows/amd64 |
-| OS / 架构 | Windows / amd64 |
-| CPU | AMD Ryzen 7 9700X 8-Core |
-| GOMAXPROCS | 1（`-cpu=1` 固定） |
-| 采样范围 | Graph 侧 24 个场景，每个 10 次，共 240 条样本 |
-
-## 运行命令
+| Full 候选提交 | `ac819864e8e323e562307679ed5ee2409acdbfc7` |
+| 固定基线 | `pre-slim`：`2335b1a900aaa758acc30df35f755e3bde123f7b` |
+| 工具链 | Go 1.24.4，Windows/amd64 |
+| 机器 | AMD Ryzen 7 9700X 8-Core |
+| 参数 | Full、Count=10、Benchtime=1s、Cpu=1 |
+| 运行时 | CGO=1，GOGC、GOMEMLIMIT 均未设置 |
+| 场景与 fixture | bench-v2、fixture-v2 |
 
 ```powershell
-go test -p=1 ./pkg/graph -run '^$' `
-  -bench 'BenchmarkGHFull/(ParallelGraph|ResumeGraph|PersistedGraph|SequentialGraph)' `
-  -benchmem -benchtime=1s -count=10 -cpu=1
+./scripts/bench.ps1 -Profile Full -Count 10 -Benchtime 1s -Cpu 1 -OutputDirectory .bench/results/phase4-full
 ```
 
-原始输出归档在 [raw/phase4/graph-subset.txt](raw/phase4/graph-subset.txt)；
-基线原始数据见 [raw/pre-slim/core-cpu1.txt](raw/pre-slim/core-cpu1.txt)。
-另跑 Smoke 组 14 场景 ×5 样本于 `.bench/results/phase4-smoke/`（该组无
-pre-slim 同名基线，仅作冒烟通过记录）。
+两版 Full 的环境字段一致；候选 manifest 记录 clean 的 `ac81986`。本轮未改变采样代码。复测基线从 pre-slim 标签重新提取，254 个源码、测试及模块文件与该标签逐一核对一致；两侧顺序运行。
 
-## 对照结论（中位数，Δ 相对 pre-slim）
+## 比较口径
 
-| 场景 | 基线 ns/op | 本轮 ns/op | Δns | 基线 B/op | 本轮 B/op | ΔB | 基线 allocs | 本轮 allocs | Δa |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| ParallelGraph/forkjoin/branches=2/1K | 45,606 | 48,710 | +6.8% | 59,541 | 58,933 | -1.0% | 345 | 332 | -3.8% |
-| ParallelGraph/forkjoin/branches=32/1K | 582,660 | 416,361 | -28.5% | 708,150 | 533,774 | -24.6% | 5,792 | 2,596 | -55.2% |
-| ParallelGraph/forkjoin/branches=8/mc=1 | 158,996 | 108,197 | -31.9% | 159,469 | 152,284 | -4.5% | 1,015 | 808 | -20.4% |
-| ParallelGraph/forkjoin/branches=8/mc=8 | 161,114 | 109,417 | -32.1% | 160,255 | 153,070 | -4.5% | 1,022 | 815 | -20.3% |
-| ParallelGraph/forkjoin/branches=8/1K | 125,163 | 118,465 | -5.4% | 159,343 | 152,158 | -4.5% | 1,003 | 796 | -20.6% |
-| ParallelGraph/forkjoin/branches=8/64K | 3,980,793 | 4,123,311 | +3.6% | 7,183,848 | 7,176,664 | -0.1% | 1,016 | 809 | -20.4% |
-| ParallelGraph/parallelnode/branches=2/1K | 71,498 | 46,730 | -34.6% | 93,848 | 58,933 | -37.2% | 497 | 332 | -33.2% |
-| ParallelGraph/parallelnode/branches=32/1K | 714,209 | 398,872 | -44.2% | 946,336 | 533,774 | -43.6% | 4,232 | 2,596 | -38.7% |
-| ParallelGraph/parallelnode/branches=8/mc=1 | 249,655 | 108,223 | -56.7% | 263,110 | 152,284 | -42.1% | 1,274 | 808 | -36.6% |
-| ParallelGraph/parallelnode/branches=8/mc=8 | 242,256 | 109,817 | -54.7% | 263,898 | 153,070 | -42.0% | 1,281 | 815 | -36.4% |
-| ParallelGraph/parallelnode/branches=8/1K | 198,511 | 120,365 | -39.4% | 262,577 | 152,158 | -42.1% | 1,257 | 796 | -36.7% |
-| ParallelGraph/parallelnode/branches=8/64K | 7,408,633 | 3,830,766 | -48.3% | 13,247,096 | 7,176,677 | -45.8% | 1,281 | 809 | -36.8% |
-| PersistedGraph/4K/checkpoint=async | 971,076 | 612,283 | -36.9% | 1,542,396 | 1,269,553 | -17.7% | 3,264 | 2,090 | -36.0% |
-| PersistedGraph/4K/checkpoint=off | 44,991 | 32,954 | -26.8% | 45,474 | 41,026 | -9.8% | 573 | 536 | -6.5% |
-| PersistedGraph/4K/checkpoint=sync | 960,706 | 614,209 | -36.1% | 1,541,020 | 1,268,206 | -17.7% | 3,291 | 2,117 | -35.7% |
-| PersistedGraph/64K/checkpoint=async | 9,375,875 | 7,571,197 | -19.2% | 17,931,412 | 17,321,354 | -3.4% | 3,295 | 2,121 | -35.6% |
-| PersistedGraph/64K/checkpoint=off | 50,992 | 33,349 | -34.6% | 106,918 | 102,468 | -4.2% | 573 | 536 | -6.5% |
-| PersistedGraph/64K/checkpoint=sync | 9,655,214 | 7,590,425 | -21.4% | 17,898,217 | 17,299,557 | -3.3% | 3,330 | 2,157 | -35.2% |
-| ResumeGraph/completed_result/sync | 16,355 | 5,933 | -63.7% | 10,369 | 5,904 | -43.1% | 121 | 77 | -36.4% |
-| ResumeGraph/completed_result/async | 16,229 | 5,779 | -64.4% | 10,369 | 5,904 | -43.1% | 121 | 77 | -36.4% |
-| ResumeGraph/parallel_suspend/sync | 272,996 | 169,688 | -37.8% | 227,548 | 179,707 | -21.0% | 2,212 | 1,820 | -17.7% |
-| ResumeGraph/parallel_suspend/async | 276,786 | 167,254 | -39.6% | 227,564 | 179,723 | -21.0% | 2,211 | 1,819 | -17.7% |
-| ResumeGraph/sequential_suspend/sync | 115,618 | 55,144 | -52.3% | 107,412 | 57,147 | -46.8% | 930 | 674 | -27.5% |
-| ResumeGraph/sequential_suspend/async | 115,022 | 52,160 | -54.7% | 107,459 | 57,194 | -46.8% | 926 | 670 | -27.6% |
+93 个场景保留原来的工作量与计时范围，按三个指标分别判定。六个 `entry=parallelnode` 场景对应已删除的 AddParallelNode，当前入口改用 Fork/Join；它们单列为替代实现的成本参照，不能解释为旧接口仍然存在。这六项也没有超标；Fork/Join 自身原有场景继续参与正式回归判断。
 
-## 判定
+Agent 基准相对 pre-slim 的构造入口变化来自阶段二 API 适配，任务、模型与计时范围相同。新增的子 Agent 扩展使用单独场景记录成本，不拿新数字与语义不同的旧受管任务作性能比较。
 
-- 确定性指标 `B/op`、`allocs/op`：0 项超阈，全部一致或改善。
-- `ns/op`：两项在阈内正向波动（forkjoin/branches=2 +6.8%、
-  forkjoin/64K +3.6%），无超阈项，无需复测。
-- 改善来源：恢复路径不再序列化/聚合嵌套执行树；`AddParallelNode`
-  展开包装层消失（`parallelnode` 场景现为 forkjoin 等价路径）；
-  受管任务簿记从超步路径移除。
+## 首轮超标项与双侧复测
 
-未采样的 75 个场景（MessageClone、ToolBatch、ContextTrim、ReAct、
-AgentPersist、AgentStream、CheckpointCodec、MemoryStore 等）在阶段四
-无相关代码路径变更，按前阶段（phase1–3 全量）结论沿用；阶段五如需
-可补跑一次 Full 组归档。
+| 指标 | 冻结基线 Full | 阶段四 Full | 基线复测 | 候选复测 | 复测变化 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ns/op | 2,058.5 | 2,513.5 | 2,073.0 | 2,061.5 | -0.55% |
+| B/op | 3,568.0 | 3,568.0 | 3,568.0 | 3,568.0 | +0.00% |
+| allocs/op | 71.0 | 71.0 | 71.0 | 71.0 | +0.00% |
+
+场景：`MessageClone/messages=10/kind=text`。复测命令在 pre-slim 源码目录和当前仓库根目录分别执行：
+
+```powershell
+go test -p=1 ./pkg/schema -run '^$' -bench '^BenchmarkGHFull$/^MessageClone$/^messages=10$/^kind=text$' -benchmem -benchtime=1s -count=10 -cpu=1
+```
+
+两侧十次中位数回到门槛内，且分配指标相同，因此按既定复测规则通过。完整原始数据和计算结果保留，首轮的超标数字没有删去。
+
+## 子 Agent 扩展的独立成本
+
+使用本地确定性模型：父 ReAct 通过一个工具执行一次子 Agent，子模型真实调用一次，返回后父模型结束。构建在计时外预热；结果解析与检查计入运行成本。会话场景每次创建独立会话，包含父图、子图检查点和子 Agent 会话记录的保存；一次性场景关闭检查点。两者职责不同，表格用于说明各自成本，不据此判断一个实现比另一个好。
+
+| 场景 | ns/op 中位数 | B/op 中位数 | allocs/op 中位数 |
+| --- | ---: | ---: | ---: |
+| ephemeral | 139,067.0 | 127,875.0 | 2,061.0 |
+| session_spawn | 536,162.0 | 347,965.5 | 3,798.0 |
+
+两组均十次、Benchtime=1s、Cpu=1，每次均核对一个真实子模型调用和正确最终结果。数字不包含远程模型服务延迟，也不代表所有业务图的耗时。
+
+## 原始记录
+
+- [Full 990 条样本](raw/phase4/core-cpu1.txt)与[环境清单](raw/phase4/manifest.json)。
+- [逐项中位数与判定](raw/phase4/comparison.json)及[环境、代码核对](raw/phase4/environment-check.json)。
+- [双侧复测](raw/phase4/rerun/)及其中的环境记录。
+- [子 Agent 成本样本](raw/phase4/subagent-cost.txt)、[环境与场景说明](raw/phase4/subagent-cost-manifest.json)、[独立基准源码](raw/phase4/subagent-benchmark.go.txt)。
+- 早期的[二十四项图侧子集](raw/phase4/graph-subset.txt)保留为历史记录；阶段四本次结论以 Full 和双侧复测为准。
+- [最终验收记录](../../.bench/results/review-slim-stage4-final/verification.md)。

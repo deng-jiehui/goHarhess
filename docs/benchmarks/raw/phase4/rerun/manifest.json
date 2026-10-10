@@ -1,0 +1,14 @@
+{
+  "go": "go version go1.24.4 windows/amd64",
+  "cgo": "1",
+  "gogc": "unset",
+  "gomemlimit": "unset",
+  "cpu": 1,
+  "count": 10,
+  "benchtime": "1s",
+  "pattern": "^BenchmarkGHFull$/^MessageClone$/^messages=10$/^kind=text$",
+  "baselineRef": "pre-slim",
+  "baselineSource": "git archive pre-slim -> pre-slim-source",
+  "candidateHead": "ac819864e8e323e562307679ed5ee2409acdbfc7",
+  "finishedAt": "2026-10-10T18:02:26.4946472+08:00"
+}

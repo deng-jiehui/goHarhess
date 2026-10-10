@@ -1,0 +1,87 @@
+package subagent_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync/atomic"
+	"testing"
+
+	"github.com/goharness/goharness/extensions/subagent"
+	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
+)
+
+// 独立记录新扩展的实际运行成本：本地模型、一次子调用，构建在计时外预热。
+// 会话场景每次使用独立会话，并包含父图、子图及子 Agent 记录的持久化成本。
+func BenchmarkReviewStage4Subagent(b *testing.B) {
+	for _, session := range []bool{false, true} {
+		name := "ephemeral"
+		if session {
+			name = "session_spawn"
+		}
+		b.Run(name, func(b *testing.B) {
+			ctx := context.Background()
+			store := state.NewMemoryStore()
+			var calls atomic.Int64
+			worker := llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+				calls.Add(1)
+				return []schema.Message{schema.AssistantMessage("worker-done")}, nil
+			})
+			manager, err := subagent.New(subagent.Config{Models: map[string]llm.ChatModel{"worker": worker}, DefaultModel: "worker", Store: store})
+			if err != nil {
+				b.Fatal(err)
+			}
+			toolName := subagent.ToolRun
+			if session {
+				toolName = subagent.ToolSpawn
+			}
+			parentModel := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+				last := request.Messages[len(request.Messages)-1]
+				if results := last.FunctionToolResults(); len(results) > 0 {
+					var text string
+					for _, block := range results[0].ContentBlocks {
+						if block.Text != nil {
+							text += block.Text.Text
+						}
+					}
+					var result map[string]any
+					if err := json.Unmarshal([]byte(text), &result); err != nil || result["status"] != "completed" || result["result"] != "worker-done" {
+						return nil, fmt.Errorf("子 Agent 没有完成：%s", text)
+					}
+					return []schema.Message{schema.AssistantMessage("parent-done")}, nil
+				}
+				return []schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("child", toolName, `{"task":"固定任务"}`))}, nil
+			})
+			parent, err := agent.New(parentModel, agent.WithName("benchmark-parent"), agent.WithTools(manager.Tools()...))
+			if err != nil {
+				b.Fatal(err)
+			}
+			invoke := func(index int) {
+				var options []runnable.Option
+				if session {
+					options = append(options, agent.WithCheckpoint(store, fmt.Sprintf("bench-%d", index)))
+				}
+				output, err := parent.Invoke(ctx, []schema.Message{schema.UserMessage("start")}, options...)
+				if err != nil || len(output) == 0 || output[len(output)-1].JoinedText("") != "parent-done" {
+					b.Fatalf("运行失败：%v，结果：%v", err, output)
+				}
+			}
+			invoke(-1)
+			calls.Store(0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				invoke(index)
+			}
+			b.StopTimer()
+			if calls.Load() != int64(b.N) {
+				b.Fatalf("工作模型次数=%d，预期=%d", calls.Load(), b.N)
+			}
+			b.ReportMetric(float64(calls.Load())/float64(b.N), "worker_calls/op")
+		})
+	}
+}

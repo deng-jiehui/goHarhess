@@ -1,0 +1,2241 @@
+{
+  "full_scenarios": 99,
+  "unchanged_scenarios": 93,
+  "replacement_scenarios": 6,
+  "samples_per_scenario": 10,
+  "full_exceeded_by_metric": {
+    "ns/op": 1,
+    "B/op": 0,
+    "allocs/op": 0
+  },
+  "full_exceeded": [
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=10/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2058.5,
+        "candidate": 2513.5,
+        "change_percent": 22.103473402963324,
+        "exceeded": true
+      },
+      "B/op": {
+        "baseline": 3568.0,
+        "candidate": 3568.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 71.0,
+        "candidate": 71.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    }
+  ],
+  "missing_reruns": [],
+  "unresolved_reruns": [],
+  "full": [
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=10/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 6042895.0,
+        "candidate": 4375800.5,
+        "change_percent": -27.58767941524716,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 5522993.5,
+        "candidate": 5214124.5,
+        "change_percent": -5.592420125064423,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 24375.0,
+        "candidate": 22156.0,
+        "change_percent": -9.103589743589746,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=10/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2060441.5,
+        "candidate": 1546171.0,
+        "change_percent": -24.959238105037194,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1020530.5,
+        "candidate": 865676.0,
+        "change_percent": -15.173921798515577,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 14282.0,
+        "candidate": 12459.0,
+        "change_percent": -12.764318722867952,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=10/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 5952539.5,
+        "candidate": 4377867.0,
+        "change_percent": -26.453793376759617,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 5522982.5,
+        "candidate": 5214121.5,
+        "change_percent": -5.592286414088765,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 24377.0,
+        "candidate": 22157.0,
+        "change_percent": -9.106945071173644,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=50/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 150922800.0,
+        "candidate": 93452254.5,
+        "change_percent": -38.07943233229174,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 123504362.5,
+        "candidate": 120102442.0,
+        "change_percent": -2.7544941985348848,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 458052.5,
+        "candidate": 418938.5,
+        "change_percent": -8.539195834538615,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=50/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 53745727.0,
+        "candidate": 34091672.5,
+        "change_percent": -36.56858990855218,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 19326844.0,
+        "candidate": 16461997.0,
+        "change_percent": -14.823149604767337,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 261815.0,
+        "candidate": 224618.5,
+        "change_percent": -14.207169184347723,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentPersist/model_calls=50/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 147684143.0,
+        "candidate": 93248654.0,
+        "change_percent": -36.85939999665367,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 123504337.5,
+        "candidate": 120102605.0,
+        "change_percent": -2.7543425347308137,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 458053.5,
+        "candidate": 418942.5,
+        "change_percent": -8.53852224685544,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentStream/mode=events/text_bytes=16384",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 413894.5,
+        "candidate": 295188.5,
+        "change_percent": -28.68025547573113,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 248183.0,
+        "candidate": 266496.0,
+        "change_percent": 7.3788293315819375,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2625.0,
+        "candidate": 2740.0,
+        "change_percent": 4.380952380952374,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentStream/mode=events_lifecycle/text_bytes=16384",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 431249.5,
+        "candidate": 302841.0,
+        "change_percent": -29.775918580775162,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 250228.0,
+        "candidate": 268541.0,
+        "change_percent": 7.318525504739681,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2683.0,
+        "candidate": 2798.0,
+        "change_percent": 4.286246738725308,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentStream/mode=invoke/text_bytes=16384",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 102311.5,
+        "candidate": 56633.0,
+        "change_percent": -44.64649623942567,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 142378.0,
+        "candidate": 138056.0,
+        "change_percent": -3.035581339813731,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 995.0,
+        "candidate": 960.0,
+        "change_percent": -3.5175879396984966,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/AgentStream/mode=stream/text_bytes=16384",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 103215.5,
+        "candidate": 56647.5,
+        "change_percent": -45.11725467589655,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 142378.0,
+        "candidate": 138056.0,
+        "change_percent": -3.035581339813731,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 995.0,
+        "candidate": 960.0,
+        "change_percent": -3.5175879396984966,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 316.85,
+        "candidate": 234.45,
+        "change_percent": -26.005996528325714,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 4912.0,
+        "candidate": 4912.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2.0,
+        "candidate": 2.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 30793.5,
+        "candidate": 22764.5,
+        "change_percent": -26.07368438144414,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 30026.0,
+        "candidate": 29978.0,
+        "change_percent": -0.15986145340705082,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 27.0,
+        "candidate": 27.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 23250.0,
+        "candidate": 16232.5,
+        "change_percent": -30.182795698924735,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 10177.0,
+        "candidate": 10128.0,
+        "change_percent": -0.4814778421931787,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 8.0,
+        "candidate": 8.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 33239.0,
+        "candidate": 26625.5,
+        "change_percent": -19.896807966545328,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 532528.0,
+        "candidate": 532528.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2.0,
+        "candidate": 2.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 3257580.5,
+        "candidate": 2502471.5,
+        "change_percent": -23.180056486708466,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 3693943.0,
+        "candidate": 3693891.0,
+        "change_percent": -0.00140770986449823,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 38.0,
+        "candidate": 38.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2713651.5,
+        "candidate": 1962219.5,
+        "change_percent": -27.6908070177766,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1065516.0,
+        "candidate": 1065470.5,
+        "change_percent": -0.004270231512248923,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 9.0,
+        "candidate": 9.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 4641.5,
+        "candidate": 3456.5,
+        "change_percent": -25.53053969621889,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 73776.0,
+        "candidate": 73776.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2.0,
+        "candidate": 2.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 435688.0,
+        "candidate": 324783.0,
+        "change_percent": -25.45514221185803,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 482419.0,
+        "candidate": 482370.0,
+        "change_percent": -0.010157145551892288,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 31.0,
+        "candidate": 31.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 346772.5,
+        "candidate": 247694.0,
+        "change_percent": -28.571613954393726,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 147920.0,
+        "candidate": 147869.0,
+        "change_percent": -0.03447809626825338,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 8.0,
+        "candidate": 8.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/DropOld/turns=100/kind=cjk",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 428843.5,
+        "candidate": 269133.5,
+        "change_percent": -37.24202418831112,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 263870.0,
+        "candidate": 263867.5,
+        "change_percent": -0.0009474362375416767,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3442.0,
+        "candidate": 3442.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/DropOld/turns=100/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1211230.5,
+        "candidate": 869279.5,
+        "change_percent": -28.23170321421067,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 267969.0,
+        "candidate": 267968.0,
+        "change_percent": -0.00037317749441712067,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3442.0,
+        "candidate": 3442.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/DropOld/turns=100/kind=tool",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2129069.0,
+        "candidate": 1498304.5,
+        "change_percent": -29.626306146019687,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 811555.0,
+        "candidate": 811551.0,
+        "change_percent": -0.000492880950764274,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 10900.0,
+        "candidate": 10900.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/DropOld/turns=1000/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 9311911.5,
+        "candidate": 6572780.5,
+        "change_percent": -29.415346140263466,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2352225.0,
+        "candidate": 2352213.0,
+        "change_percent": -0.0005101552785102825,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 37536.0,
+        "candidate": 37536.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/DropOld/turns=1000/kind=tool",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 20334957.5,
+        "candidate": 14290317.5,
+        "change_percent": -29.725363330609365,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 7492139.5,
+        "candidate": 7492113.0,
+        "change_percent": -0.0003537040387469048,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 110810.0,
+        "candidate": 110809.0,
+        "change_percent": -0.0009024456276485182,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/NoTrim/turns=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 168010.0,
+        "candidate": 119638.5,
+        "change_percent": -28.790845782989106,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 29073.0,
+        "candidate": 29073.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 379.0,
+        "candidate": 379.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/NoTrim/turns=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1543917.0,
+        "candidate": 1096611.5,
+        "change_percent": -28.972120910644804,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 284354.0,
+        "candidate": 284354.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3442.0,
+        "candidate": 3442.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/NoTrim/turns=1000",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 15335207.5,
+        "candidate": 10884510.0,
+        "change_percent": -29.02274064436363,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2630771.0,
+        "candidate": 2630759.0,
+        "change_percent": -0.000456140044113873,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 37537.0,
+        "candidate": 37536.0,
+        "change_percent": -0.0026640381490250498,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ContextTrim/OversizedLatest/input_bytes=65536",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 11361623.0,
+        "candidate": 8442671.0,
+        "change_percent": -25.691329486993187,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 779281.5,
+        "candidate": 779282.0,
+        "change_percent": 6.416166686840086e-05,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 407.0,
+        "candidate": 407.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/get_oldest/history=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 385.0,
+        "candidate": 305.20000000000005,
+        "change_percent": -20.727272727272716,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 296.0,
+        "candidate": 296.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6.0,
+        "candidate": 6.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/get_oldest/history=1000",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 415.65,
+        "candidate": 332.95000000000005,
+        "change_percent": -19.89654757608563,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 296.0,
+        "candidate": 296.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6.0,
+        "candidate": 6.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 4477.5,
+        "candidate": 3962.0,
+        "change_percent": -11.513121161362372,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 15576.0,
+        "candidate": 14280.0,
+        "change_percent": -8.320493066255775,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 71.0,
+        "candidate": 71.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 38255.5,
+        "candidate": 33221.5,
+        "change_percent": -13.158892185437388,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 143342.0,
+        "candidate": 126940.0,
+        "change_percent": -11.442563937994443,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 617.0,
+        "candidate": 617.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 5387.0,
+        "candidate": 4403.5,
+        "change_percent": -18.256914794876554,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 15576.0,
+        "candidate": 14280.0,
+        "change_percent": -8.320493066255775,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 71.0,
+        "candidate": 71.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 54024.5,
+        "candidate": 37297.5,
+        "change_percent": -30.96187840701904,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 143344.0,
+        "candidate": 126941.0,
+        "change_percent": -11.443101908695164,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 617.0,
+        "candidate": 617.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/load_history=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 350.65,
+        "candidate": 298.55,
+        "change_percent": -14.858120633109928,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 296.0,
+        "candidate": 296.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6.0,
+        "candidate": 6.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/save_empty",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 11319.5,
+        "candidate": 8473.5,
+        "change_percent": -25.14245328857282,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 11211.0,
+        "candidate": 11163.0,
+        "change_percent": -0.42815092320043213,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 15.0,
+        "candidate": 15.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MemoryStore/save_history=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 10609.0,
+        "candidate": 8985.5,
+        "change_percent": -15.303044584786507,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 10074.0,
+        "candidate": 10075.0,
+        "change_percent": 0.009926543577520874,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 12.0,
+        "candidate": 12.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=10/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2058.5,
+        "candidate": 2513.5,
+        "change_percent": 22.103473402963324,
+        "exceeded": true
+      },
+      "B/op": {
+        "baseline": 3568.0,
+        "candidate": 3568.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 71.0,
+        "candidate": 71.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 25924.5,
+        "candidate": 16716.5,
+        "change_percent": -35.51852494744354,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 21320.5,
+        "candidate": 21320.0,
+        "change_percent": -0.002345160760774956,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 399.0,
+        "candidate": 399.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=100/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 35462.5,
+        "candidate": 22957.0,
+        "change_percent": -35.26401127952062,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 36193.0,
+        "candidate": 36193.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 701.0,
+        "candidate": 701.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 274414.5,
+        "candidate": 161822.0,
+        "change_percent": -41.03008405168094,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 215235.0,
+        "candidate": 215233.0,
+        "change_percent": -0.0009292169024566199,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3999.0,
+        "candidate": 3999.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=1000/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 417079.5,
+        "candidate": 271867.0,
+        "change_percent": -34.81650380802701,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 365652.0,
+        "candidate": 365651.0,
+        "change_percent": -0.000273484077761843,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 8489.0,
+        "candidate": 8489.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 3204130.0,
+        "candidate": 2120478.0,
+        "change_percent": -33.8204754488738,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2168329.0,
+        "candidate": 2168323.0,
+        "change_percent": -0.0002767107759038545,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 42233.0,
+        "candidate": 42232.0,
+        "change_percent": -0.002367816636283937,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=2/state_bytes=1024",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 45605.5,
+        "candidate": 43868.0,
+        "change_percent": -3.809847496464247,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 59541.0,
+        "candidate": 58957.0,
+        "change_percent": -0.9808367343511204,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 345.0,
+        "candidate": 332.0,
+        "change_percent": -3.7681159420289823,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=32/state_bytes=1024",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 582659.5,
+        "candidate": 379563.0,
+        "change_percent": -34.856807449290706,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 708150.0,
+        "candidate": 533798.0,
+        "change_percent": -24.62077243521853,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 5792.0,
+        "candidate": 2596.0,
+        "change_percent": -55.17955801104972,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=8/max_concurrency=1",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 158995.5,
+        "candidate": 111132.0,
+        "change_percent": -30.103682179684334,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 159469.0,
+        "candidate": 152500.0,
+        "change_percent": -4.370128363506387,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1015.0,
+        "candidate": 808.0,
+        "change_percent": -20.39408866995074,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=8/max_concurrency=8",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 161113.5,
+        "candidate": 112023.5,
+        "change_percent": -30.469203387673904,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 160255.0,
+        "candidate": 153286.0,
+        "change_percent": -4.3486942685095675,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1022.0,
+        "candidate": 815.0,
+        "change_percent": -20.25440313111546,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=8/state_bytes=1024",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 125162.5,
+        "candidate": 110612.0,
+        "change_percent": -11.62528712673524,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 159343.0,
+        "candidate": 152182.0,
+        "change_percent": -4.494078811118152,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1003.0,
+        "candidate": 796.0,
+        "change_percent": -20.638085742771683,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=forkjoin/branches=8/state_bytes=65536",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 3980793.0,
+        "candidate": 3873985.5,
+        "change_percent": -2.683070935866294,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 7183847.5,
+        "candidate": 7176688.0,
+        "change_percent": -0.09966107994358042,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1016.0,
+        "candidate": 809.0,
+        "change_percent": -20.374015748031493,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=2/state_bytes=1024",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 71498.0,
+        "candidate": 44442.0,
+        "change_percent": -37.84161794735517,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 93848.0,
+        "candidate": 58957.0,
+        "change_percent": -37.17820305174324,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 497.0,
+        "candidate": 332.0,
+        "change_percent": -33.199195171026155,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=32/state_bytes=1024",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 714208.5,
+        "candidate": 387826.5,
+        "change_percent": -45.69841999920191,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 946336.0,
+        "candidate": 533798.0,
+        "change_percent": -43.593184661684646,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 4232.0,
+        "candidate": 2596.0,
+        "change_percent": -38.657844990548206,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=8/max_concurrency=1",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 249654.5,
+        "candidate": 110895.0,
+        "change_percent": -55.58061240634557,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 263110.0,
+        "candidate": 152500.0,
+        "change_percent": -42.03945118011478,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1274.0,
+        "candidate": 808.0,
+        "change_percent": -36.57770800627943,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=8/max_concurrency=8",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 242255.5,
+        "candidate": 111756.5,
+        "change_percent": -53.868333226696606,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 263898.0,
+        "candidate": 153286.0,
+        "change_percent": -41.9146791563407,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1281.0,
+        "candidate": 815.0,
+        "change_percent": -36.37782982045277,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=8/state_bytes=1024",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 198511.0,
+        "candidate": 109286.0,
+        "change_percent": -44.94713139322254,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 262577.0,
+        "candidate": 152182.0,
+        "change_percent": -42.04290550962194,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1257.0,
+        "candidate": 796.0,
+        "change_percent": -36.67462211614956,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ParallelGraph/entry=parallelnode/branches=8/state_bytes=65536",
+      "replacement": true,
+      "ns/op": {
+        "baseline": 7408633.0,
+        "candidate": 3873556.0,
+        "change_percent": -47.71564470800483,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 13247096.0,
+        "candidate": 7176688.0,
+        "change_percent": -45.82444333459952,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1281.0,
+        "candidate": 809.0,
+        "change_percent": -36.84621389539422,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=4096/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 971076.0,
+        "candidate": 612839.5,
+        "change_percent": -36.890675910021464,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1542396.0,
+        "candidate": 1269936.5,
+        "change_percent": -17.664691817146828,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3264.0,
+        "candidate": 2090.0,
+        "change_percent": -35.96813725490197,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=4096/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 44990.5,
+        "candidate": 33625.5,
+        "change_percent": -25.260888409775394,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 45474.0,
+        "candidate": 41410.0,
+        "change_percent": -8.936974974710822,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 573.0,
+        "candidate": 536.0,
+        "change_percent": -6.457242582897038,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=4096/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 960705.5,
+        "candidate": 622659.0,
+        "change_percent": -35.187318069897586,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1541020.0,
+        "candidate": 1268588.5,
+        "change_percent": -17.678647908528124,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3291.0,
+        "candidate": 2117.0,
+        "change_percent": -35.67304770586448,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=65536/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 9375875.0,
+        "candidate": 7625975.0,
+        "change_percent": -18.66385803991627,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 17931412.0,
+        "candidate": 17325045.5,
+        "change_percent": -3.3815881314868013,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3295.0,
+        "candidate": 2121.0,
+        "change_percent": -35.62974203338391,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=65536/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 50991.5,
+        "candidate": 34132.0,
+        "change_percent": -33.06335369620427,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 106918.0,
+        "candidate": 102852.0,
+        "change_percent": -3.8029143829850898,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 573.0,
+        "candidate": 536.0,
+        "change_percent": -6.457242582897038,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/PersistedGraph/nodes=16/state_bytes=65536/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 9655214.0,
+        "candidate": 7737073.5,
+        "change_percent": -19.866369611279456,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 17898216.5,
+        "candidate": 17299940.5,
+        "change_percent": -3.3426570742397743,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3330.0,
+        "candidate": 2156.0,
+        "change_percent": -35.25525525525526,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ReAct/model_calls=10/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2029184.5,
+        "candidate": 1567800.5,
+        "change_percent": -22.73741002851145,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1020332.0,
+        "candidate": 865477.0,
+        "change_percent": -15.1769228055182,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 14279.0,
+        "candidate": 12456.0,
+        "change_percent": -12.767000490230407,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ReAct/model_calls=100/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 173500767.0,
+        "candidate": 136281412.5,
+        "change_percent": -21.451982687776816,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 77457717.0,
+        "candidate": 66530678.0,
+        "change_percent": -14.107101814012923,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 999138.5,
+        "candidate": 854718.5,
+        "change_percent": -14.45445251083809,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ReAct/model_calls=50/checkpoint=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 43677475.5,
+        "candidate": 33880518.0,
+        "change_percent": -22.43022836793761,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 19326340.0,
+        "candidate": 16461682.0,
+        "change_percent": -14.822558228821393,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 261807.0,
+        "candidate": 224614.0,
+        "change_percent": -14.206266448185112,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ReAct/model_calls=50/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 42864417.5,
+        "candidate": 33842306.5,
+        "change_percent": -21.048019607405145,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 19326254.5,
+        "candidate": 16461711.5,
+        "change_percent": -14.822028758857542,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 261805.5,
+        "candidate": 224614.0,
+        "change_percent": -14.205774897777168,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ReAct/model_calls=50/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 43606959.5,
+        "candidate": 34026758.5,
+        "change_percent": -21.969431278509568,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 19515223.5,
+        "candidate": 16650726.0,
+        "change_percent": -14.678271555537147,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 261856.0,
+        "candidate": 224664.0,
+        "change_percent": -14.203226200659902,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeAgent/tool_suspend/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1007775.5,
+        "candidate": 600373.0,
+        "change_percent": -40.425918272472394,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 765890.0,
+        "candidate": 726019.5,
+        "change_percent": -5.205773675070835,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6112.0,
+        "candidate": 5755.0,
+        "change_percent": -5.840968586387429,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeAgent/tool_suspend/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1021980.5,
+        "candidate": 602540.5,
+        "change_percent": -41.0418789790999,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 765900.5,
+        "candidate": 726003.5,
+        "change_percent": -5.209162286746127,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6114.0,
+        "candidate": 5756.0,
+        "change_percent": -5.85541380438338,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/completed_result/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 16228.5,
+        "candidate": 5863.0,
+        "change_percent": -63.872200141725976,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 10369.0,
+        "candidate": 5904.0,
+        "change_percent": -43.06104735268589,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 121.0,
+        "candidate": 77.0,
+        "change_percent": -36.36363636363637,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/completed_result/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 16354.5,
+        "candidate": 5844.5,
+        "change_percent": -64.26365832033997,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 10369.0,
+        "candidate": 5904.0,
+        "change_percent": -43.06104735268589,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 121.0,
+        "candidate": 77.0,
+        "change_percent": -36.36363636363637,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/parallel_suspend/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 276786.0,
+        "candidate": 170739.5,
+        "change_percent": -38.313534644093274,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 227564.0,
+        "candidate": 179747.0,
+        "change_percent": -21.012550315515632,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2211.0,
+        "candidate": 1819.0,
+        "change_percent": -17.729534147444593,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/parallel_suspend/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 272996.0,
+        "candidate": 171406.5,
+        "change_percent": -37.21281630500081,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 227548.0,
+        "candidate": 179731.0,
+        "change_percent": -21.01402780951711,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 2212.0,
+        "candidate": 1820.0,
+        "change_percent": -17.721518987341767,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/sequential_suspend/checkpoint=async",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 115021.5,
+        "candidate": 53201.0,
+        "change_percent": -53.746908186730316,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 107459.0,
+        "candidate": 57290.0,
+        "change_percent": -46.68664327790134,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 926.0,
+        "candidate": 670.0,
+        "change_percent": -27.64578833693304,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ResumeGraph/sequential_suspend/checkpoint=sync",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 115617.5,
+        "candidate": 56312.5,
+        "change_percent": -51.29413799814042,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 107412.0,
+        "candidate": 57242.0,
+        "change_percent": -46.70800283022382,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 930.0,
+        "candidate": 674.0,
+        "change_percent": -27.526881720430108,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/build_compile/nodes=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 69558.0,
+        "candidate": 34279.0,
+        "change_percent": -50.71882457804997,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 54405.0,
+        "candidate": 40131.0,
+        "change_percent": -26.236559139784944,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 802.0,
+        "candidate": 615.0,
+        "change_percent": -23.316708229426432,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/build_compile/nodes=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 625897.0,
+        "candidate": 322567.5,
+        "change_percent": -48.46316566463811,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 520506.5,
+        "candidate": 389045.0,
+        "change_percent": -25.256456931853876,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 7084.0,
+        "candidate": 5523.0,
+        "change_percent": -22.03557312252964,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/compile_only/nodes=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 472383.5,
+        "candidate": 249619.0,
+        "change_percent": -47.157553132147925,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 407545.0,
+        "candidate": 279270.0,
+        "change_percent": -31.47505183476671,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 5455.0,
+        "candidate": 3894.0,
+        "change_percent": -28.615948670944093,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/nodes=1",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 4734.0,
+        "candidate": 3386.5,
+        "change_percent": -28.464300802703846,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 5392.0,
+        "candidate": 4808.0,
+        "change_percent": -10.830860534124632,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 72.0,
+        "candidate": 65.0,
+        "change_percent": -9.722222222222221,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/nodes=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 30321.5,
+        "candidate": 19713.5,
+        "change_percent": -34.985076595814846,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 25825.0,
+        "candidate": 23153.0,
+        "change_percent": -10.346563407550825,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 367.0,
+        "candidate": 342.0,
+        "change_percent": -6.811989100817439,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SequentialGraph/nodes=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 440543.5,
+        "candidate": 268975.0,
+        "change_percent": -38.94473530990696,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 428087.0,
+        "candidate": 404529.0,
+        "change_percent": -5.503086989326933,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3433.0,
+        "candidate": 3228.0,
+        "change_percent": -5.971453539178562,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SessionGrowth/requests=10",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 12496183.5,
+        "candidate": 7729191.5,
+        "change_percent": -38.14758322010876,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 10014224.5,
+        "candidate": 9581786.5,
+        "change_percent": -4.3182375230353625,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 100179.0,
+        "candidate": 97985.0,
+        "change_percent": -2.190079757234553,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/SessionGrowth/requests=100",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1186371450.0,
+        "candidate": 745535350.0,
+        "change_percent": -37.15835373482732,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 874996220.0,
+        "candidate": 870329086.0,
+        "change_percent": -0.5333890470978209,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 9035952.0,
+        "candidate": 9014054.0,
+        "change_percent": -0.24234303148135128,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=1/turns=100/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 175978.5,
+        "candidate": 117767.5,
+        "change_percent": -33.078472654329936,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 211243.0,
+        "candidate": 209227.0,
+        "change_percent": -0.9543511500972768,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3856.0,
+        "candidate": 3837.0,
+        "change_percent": -0.4927385892116165,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=1/turns=100/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 179077.5,
+        "candidate": 117777.0,
+        "change_percent": -34.23126858483059,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 244013.0,
+        "candidate": 241997.0,
+        "change_percent": -0.826185490117326,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 3857.0,
+        "candidate": 3838.0,
+        "change_percent": -0.49261083743842304,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=32/turns=100/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 429208.0,
+        "candidate": 370513.5,
+        "change_percent": -13.675071294104491,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 588716.0,
+        "candidate": 524198.0,
+        "change_percent": -10.95910422003139,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 8328.0,
+        "candidate": 7720.0,
+        "change_percent": -7.3006724303554265,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=32/turns=100/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 742231.0,
+        "candidate": 493418.0,
+        "change_percent": -33.52231313432071,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 1637358.0,
+        "candidate": 1572836.0,
+        "change_percent": -3.940616529799834,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 8362.0,
+        "candidate": 7754.0,
+        "change_percent": -7.270987801961248,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=8/turns=10/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 115881.0,
+        "candidate": 74245.0,
+        "change_percent": -35.92996263408151,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 116534.0,
+        "candidate": 100405.0,
+        "change_percent": -13.84059587759795,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1517.0,
+        "candidate": 1365.0,
+        "change_percent": -10.019775873434412,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=8/turns=100/history=mixed",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 283215.5,
+        "candidate": 194216.0,
+        "change_percent": -31.424657195669027,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 427000.5,
+        "candidate": 410870.0,
+        "change_percent": -3.7776302369669335,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 4871.0,
+        "candidate": 4719.0,
+        "change_percent": -3.1205091357010883,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=8/turns=100/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 267633.0,
+        "candidate": 176772.0,
+        "change_percent": -33.94984923383888,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 295920.0,
+        "candidate": 279792.0,
+        "change_percent": -5.450121654501217,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 4867.0,
+        "candidate": 4715.0,
+        "change_percent": -3.1230737620710936,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=8/turns=100/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 311539.5,
+        "candidate": 195417.0,
+        "change_percent": -37.27376464300674,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 558078.0,
+        "candidate": 541950.0,
+        "change_percent": -2.8899186135271426,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 4875.0,
+        "candidate": 4723.0,
+        "change_percent": -3.1179487179487153,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolBatch/calls=8/turns=1000/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2505602.0,
+        "candidate": 1829289.5,
+        "change_percent": -26.992016289897602,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2091776.5,
+        "candidate": 2075651.0,
+        "change_percent": -0.7708997591281852,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 42669.0,
+        "candidate": 42517.0,
+        "change_percent": -0.35623051864350774,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=0/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 266526.5,
+        "candidate": 176812.0,
+        "change_percent": -33.660630368837616,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 298992.0,
+        "candidate": 279792.0,
+        "change_percent": -6.421576497030024,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 4891.0,
+        "candidate": 4715.0,
+        "change_percent": -3.598446125536703,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=0/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1578929.5,
+        "candidate": 210020.0,
+        "change_percent": -86.69858280562876,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2168670.0,
+        "candidate": 541950.0,
+        "change_percent": -75.01002918839657,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 34709.0,
+        "candidate": 4723.0,
+        "change_percent": -86.39257829381428,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=1/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 288042.0,
+        "candidate": 197776.0,
+        "change_percent": -31.337791016587857,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 337587.0,
+        "candidate": 306929.0,
+        "change_percent": -9.081510840168605,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 5251.0,
+        "candidate": 4939.0,
+        "change_percent": -5.941725385640828,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=1/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 4357255.5,
+        "candidate": 1161096.5,
+        "change_percent": -73.3525725080845,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 5422315.0,
+        "candidate": 2176608.0,
+        "change_percent": -59.858326194623515,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 94690.0,
+        "candidate": 34757.0,
+        "change_percent": -63.293906431513356,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=4/history=off",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 358313.0,
+        "candidate": 197964.5,
+        "change_percent": -44.75095796133548,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 453370.0,
+        "candidate": 306929.0,
+        "change_percent": -32.300549220283656,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 6331.0,
+        "candidate": 4939.0,
+        "change_percent": -21.987047859737796,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkGHFull/ToolCallbacks/calls=8/callbacks=4/history=on",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 13814030.0,
+        "candidate": 1167036.5,
+        "change_percent": -91.55180276863449,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 15183173.0,
+        "candidate": 2176607.0,
+        "change_percent": -85.66434697147955,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 274626.0,
+        "candidate": 34757.0,
+        "change_percent": -87.34387858396511,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkMessageTransport/delta",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 58196.5,
+        "candidate": 59577.0,
+        "change_percent": 2.3721357813614175,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 133579.0,
+        "candidate": 133579.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 547.0,
+        "candidate": 547.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    },
+    {
+      "name": "BenchmarkMessageTransport/snapshot",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 1069835.5,
+        "candidate": 1147762.5,
+        "change_percent": 7.284017028786205,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 2366727.0,
+        "candidate": 2366727.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 1039.0,
+        "candidate": 1039.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    }
+  ],
+  "rerun": [
+    {
+      "name": "BenchmarkGHFull/MessageClone/messages=10/kind=text",
+      "replacement": false,
+      "ns/op": {
+        "baseline": 2073.0,
+        "candidate": 2061.5,
+        "change_percent": -0.5547515677761683,
+        "exceeded": false
+      },
+      "B/op": {
+        "baseline": 3568.0,
+        "candidate": 3568.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      },
+      "allocs/op": {
+        "baseline": 71.0,
+        "candidate": 71.0,
+        "change_percent": 0.0,
+        "exceeded": false
+      }
+    }
+  ]
+}
