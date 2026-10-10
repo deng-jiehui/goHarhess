@@ -1,0 +1,16 @@
+﻿goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/schema
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7032	    156338 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7729	    156187 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7734	    155997 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7360	    155863 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7702	    155960 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7791	    155096 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7386	    156685 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7569	    155685 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7426	    155931 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta         	    7615	    155882 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/schema	11.935s

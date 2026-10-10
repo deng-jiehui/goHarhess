@@ -1,0 +1,16 @@
+﻿goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/state
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4549767	       266.8 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4500369	       272.9 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4424168	       273.1 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4447986	       272.4 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4369314	       273.4 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4414590	       272.1 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4388193	       273.3 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4400942	       273.7 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4322953	       274.7 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000         	 4385352	       272.2 ns/op	     296 B/op	       6 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/state	14.876s

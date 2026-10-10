@@ -1,0 +1,252 @@
+goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/schema
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  579805	      1972 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  580694	      1980 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  602406	      1988 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  606166	      1986 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  599408	      1988 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  608682	      1987 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  596488	      1993 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  609705	      2012 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  586693	      1984 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=text         	  598538	      1987 ns/op	        10.00 messages/op	    3568 B/op	      71 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   76934	     15335 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   78573	     15111 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   80070	     15088 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   79092	     15123 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   80690	     15223 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   79557	     15142 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   79072	     15129 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   77636	     15087 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   78925	     15117 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=10/kind=toolmeta     	   78384	     15705 ns/op	        10.00 messages/op	   21320 B/op	     399 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   52656	     19912 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60382	     19829 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60354	     19796 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60476	     19746 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60128	     19898 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   61029	     19775 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60685	     19859 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60477	     19857 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   60700	     19994 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=text        	   59852	     19808 ns/op	       100.0 messages/op	   36193 B/op	     701 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7554	    156210 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7568	    156970 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7738	    156780 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7269	    155899 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7473	    156557 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7777	    155721 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7760	    156934 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7486	    155871 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7784	    155951 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=100/kind=toolmeta    	    7671	    156281 ns/op	       100.0 messages/op	  215233 B/op	    3999 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    5409	    272506 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4575	    265012 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4546	    262489 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4436	    263744 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4548	    266471 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4459	    264776 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4448	    263628 ns/op	      1000 messages/op	  365651 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    4926	    227931 ns/op	      1000 messages/op	  365649 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    5308	    215878 ns/op	      1000 messages/op	  365648 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=text       	    5522	    214525 ns/op	      1000 messages/op	  365648 B/op	    8489 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     571	   2135394 ns/op	      1000 messages/op	 2168324 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     559	   2138209 ns/op	      1000 messages/op	 2168323 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     562	   2160610 ns/op	      1000 messages/op	 2168326 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     561	   2136264 ns/op	      1000 messages/op	 2168322 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     559	   2141615 ns/op	      1000 messages/op	 2168322 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     565	   2163885 ns/op	      1000 messages/op	 2168323 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     570	   2137004 ns/op	      1000 messages/op	 2168324 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     566	   2133142 ns/op	      1000 messages/op	 2168323 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     559	   2141269 ns/op	      1000 messages/op	 2168324 B/op	   42232 allocs/op
+BenchmarkGHFull/MessageClone/messages=1000/kind=toolmeta   	     562	   2161697 ns/op	      1000 messages/op	 2168324 B/op	   42232 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/schema	78.160s
+goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/state
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4811024	       243.5 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4920004	       246.6 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4843850	       249.1 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4160607	       244.6 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4875769	       245.1 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4923739	       244.8 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 4903857	       331.7 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 3501034	       341.1 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 3626738	       350.5 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/clone   	 3612270	       348.0 ns/op	    4912 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   63705	     18428 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   66147	     19119 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   64960	     18665 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   65835	     18646 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   67214	     17880 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   66472	     17822 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   65611	     17967 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   67026	     17877 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   66854	     17886 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/json    	   66915	     17889 ns/op	   10129 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   45847	     26482 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46513	     25743 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46495	     25507 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46642	     26175 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46749	     25659 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   47364	     25648 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46388	     25744 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46917	     25660 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46785	     25537 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=4096/decode  	   46992	     25618 ns/op	   29978 B/op	      27 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  376702	      3171 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  384760	      3207 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  377545	      3897 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  298154	      4041 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  330794	      4084 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  320524	      4076 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  274570	      4091 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  315098	      4067 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  310545	      4101 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/clone  	  302310	      4114 ns/op	   73776 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4556	    267319 ns/op	  147871 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4507	    268178 ns/op	  147871 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4462	    267161 ns/op	  147870 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4490	    265659 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4534	    267843 ns/op	  147870 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4532	    268297 ns/op	  147871 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4480	    268018 ns/op	  147872 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4536	    267757 ns/op	  147872 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4458	    268282 ns/op	  147871 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json   	    4524	    269490 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3211	    370425 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3277	    369107 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3259	    369932 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3273	    371912 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3196	    370456 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3226	    371016 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3208	    368769 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3280	    372746 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3130	    370820 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/decode 	    3256	    370569 ns/op	  482372 B/op	      31 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   44911	     26709 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   44520	     29520 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   41907	     28809 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   41504	     28035 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   43477	     27301 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   43029	     27320 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   43605	     27274 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   43915	     27272 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   44144	     27393 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/clone 	   43910	     27386 ns/op	  532528 B/op	       2 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     572	   2092326 ns/op	 1065462 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     568	   2100268 ns/op	 1065464 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     574	   2096624 ns/op	 1065464 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     576	   2090087 ns/op	 1065465 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     573	   2098464 ns/op	 1065465 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     568	   2097986 ns/op	 1065464 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     574	   2098726 ns/op	 1065465 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     571	   2094269 ns/op	 1065466 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     576	   2089356 ns/op	 1065464 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/json  	     565	   2092595 ns/op	 1065464 B/op	       9 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     417	   2855456 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     420	   2847055 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     418	   2845316 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     423	   2859610 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     420	   2846641 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     423	   2859022 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     422	   2855021 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     418	   2843983 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     420	   2854400 ns/op	 3693892 B/op	      38 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=524288/decode         	     415	   2846132 ns/op	 3693893 B/op	      38 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  133750	      8971 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  132963	      8923 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  134600	      9031 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  131552	      9070 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  133165	      9086 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  131443	      9051 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  132129	      9083 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  129075	      9013 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  131424	      9091 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_empty                              	  134396	      9018 ns/op	   11163 B/op	      15 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  143827	      8331 ns/op	   10074 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  147568	      8195 ns/op	   10079 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  146444	      8233 ns/op	   10075 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  148329	      8160 ns/op	   10080 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  147282	      8158 ns/op	   10076 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  146716	      8159 ns/op	   10078 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  146026	      8319 ns/op	   10080 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  146366	      8407 ns/op	   10076 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  142516	      8348 ns/op	   10073 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/save_history=100                        	  148069	      8361 ns/op	   10081 B/op	      12 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4729266	       254.3 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4694134	       255.2 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4706115	       254.5 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4690951	       257.3 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4679494	       258.8 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4678545	       256.0 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4718700	       256.0 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4741819	       254.6 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4737556	       254.5 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/load_history=100                        	 4689970	       255.0 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4752764	       251.0 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4729186	       251.7 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4726444	       252.3 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4793304	       256.1 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4749955	       251.8 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4718035	       255.3 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4738737	       252.7 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4712157	       252.8 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4797418	       252.2 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=100                  	 4748341	       252.7 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  357386	      3350 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  351680	      3318 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  361004	      3309 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  363122	      3307 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  362559	      3313 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  361429	      3320 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  363666	      3310 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  350607	      3317 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  365290	      3329 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10        	  345379	      3303 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42519	     28066 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42118	     28362 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42256	     28161 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42367	     28371 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42510	     28461 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42631	     28313 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42375	     28101 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42242	     28203 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42343	     28251 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100       	   42232	     28255 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4558956	       264.4 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4576838	       262.8 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4471287	       262.4 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4535642	       263.0 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4545722	       262.9 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4497272	       263.9 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4607122	       265.5 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4537436	       263.5 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4537304	       262.6 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/get_oldest/history=1000                 	 4520431	       263.6 ns/op	     296 B/op	       6 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  307639	      3634 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  324477	      3591 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  320312	      3630 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  326852	      3599 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  324274	      3607 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  326974	      3610 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  314798	      3590 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  322940	      3613 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  322699	      3611 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10       	  321570	      3616 ns/op	   14280 B/op	      71 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38890	     30760 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38928	     30563 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   39129	     30744 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38893	     30698 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38904	     30707 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38077	     30637 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   39013	     30672 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38883	     30638 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   38875	     30751 ns/op	  126941 B/op	     617 allocs/op
+BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100      	   39194	     31012 ns/op	  126941 B/op	     617 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/state	497.682s

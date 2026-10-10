@@ -1,0 +1,16 @@
+﻿goos: windows
+goarch: amd64
+pkg: github.com/goharness/goharness/pkg/state
+cpu: AMD Ryzen 7 9700X 8-Core Processor             
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4424	    266677 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4474	    263936 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4426	    264917 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4506	    266400 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4564	    264591 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4490	    265771 ns/op	  147870 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4538	    264384 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4564	    266599 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4536	    273582 ns/op	  147869 B/op	       8 allocs/op
+BenchmarkGHFull/CheckpointCodec/payload_bytes=65536/json    	    4539	    266520 ns/op	  147869 B/op	       8 allocs/op
+PASS
+ok  	github.com/goharness/goharness/pkg/state	12.299s

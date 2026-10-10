@@ -62,6 +62,18 @@ go test -p=1 ./pkg/state -run '^$' -bench '^BenchmarkGHFull$/^(CheckpointCodec|M
 - 同一份 pre-slim 源码的两次基线复测自身漂移 1.9%~9.1%；`MessageClone` 的 cand 值（2,919）落在二次基线（2,848）的噪声范围内，`65536/json` 相对二次基线差 9.7%。
 - `4096/clone`（300ns 量级）与 `list_latest`（4.7µs 量级）的 cand/base 残留差异（约 +40%/+24%）未被漂移完全覆盖。两个场景在阶段四采样时均快于基线（234ns、3,962ns），同一份代码在两轮之间没有变化；该量级微基准对代码布局与机器状态高度敏感，现有证据支持测量噪声而非本批改动引入的回归，如实记录残留数字供复核。
 
+## 修复后复测（2026-10-11，`634f0c3`）
+
+审核要求修复后按相同条件重新双侧采样。本轮对 `pkg/schema`、`pkg/state` 的全部 24 个 GHFull 场景做两次成对采样：第二轮为包级顺序采样（基线侧 `run.log` 完成后再跑候选侧），第三轮改为逐场景交错采样（每个场景基线、候选相邻执行，消除长时间漂移偏差）。机器采样时基本空闲（总 CPU ~2%），两侧均为 Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`。原始数据见 `raw/structured-output/rerun2/` 与 `raw/structured-output/rerun3/`。
+
+交错采样的中位数对比（全部 24 场景）：
+
+- 首轮四个超标项全部回落到门槛内：`MessageClone/10/text` +1.3%、`CheckpointCodec/4096/clone` +5.5%、`CheckpointCodec/65536/json` +9.3%、`MemoryStore/list_latest/100/10` +0.7%。
+- 20 个场景在 ±10% 内；`MemoryStore/list_latest/1000/limit=100` 反而 -21.9%。
+- 仍有 4 个场景耗时超阈：`CheckpointCodec` 三个负载档位的 `decode`（+12.1%/+13.5%/+13.8%）与 `MessageClone/messages=1000/kind=text`（+10.1%），B/op 与 allocs/op 全部持平。
+
+残留项取证：`DecodeCheckpoint` 在两侧逐字节相同，`benchfixture` 负载生成未变，`Checkpoint` 结构体只少一个 `SubAgents` 字段，工作量严格不增。对 `524288/decode` 各采 3 秒 CPU profile：两侧前四帧同为 `encoding/json` 扫描器（`stateInString`/`readValue`/`checkValid`/`skip`，合计约 90%），goHarness 自有函数零自耗时；差异集中在 `Validate → json.Valid` 的 stdlib 扫描帧（1.17s vs 1.02s），即同一函数对字节相同输入的耗时差——属于每个二进制固定的链接布局/对齐效应，不是语义回归。`MessageClone` 场景代码自 `pre-slim` 以来仅有删除未用类型的 26 行差异，分配指标持平。
+
 ## 结论
 
-102 个场景覆盖校验通过。新增能力成本已单独记录；旧场景中 `MessageClone` 与 `65536/json` 复测回到可解释区间，`4096/clone` 与 `list_latest` 的残留耗时差异与本批代码改动无因果路径（改动不含这两个包的源码），按既有证据判为采样噪声，同时保留全部原始数据。若后续复核在安静机器上仍复现同等残留，应另行立项排查。
+102 个场景覆盖校验通过，新增能力成本已单独记录。功能修复后重新双侧采样：首轮超标项全部达标；`CheckpointCodec/decode` 与 `MessageClone/1000/text` 仍有 10%~14% 的 ns/op 差异，剖面证明为同一代码、同一输入、同一 stdlib 热循环上的二进制布局效应，与本次改动无因果路径。按约定门槛如实保留残留记录，性能项维持待验收，供独立复核裁定。若仍要求门槛内，建议在确认安静的环境重新提取基线整轮对跑，而不是叠加局部复测。
