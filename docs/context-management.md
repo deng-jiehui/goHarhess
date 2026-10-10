@@ -149,7 +149,7 @@ messages, err := value.Invoke(
 4. Agent 流成功结束后保存本轮输入、工具消息、最终输出和 State Values。
 5. LLM、工具或 Checkpoint 保存失败时不提交半成品会话。
 
-不提供 Checkpoint Store 时使用 `WithConversationID` 会明确报错。嵌套 Agent（经 `agent.NewAgentNode` 接入图、或以受管子任务运行的 Agent）自动绕过重复 Checkpoint，只由最外层运行提交会话。
+不提供 Checkpoint Store 时使用 `WithConversationID` 会明确报错。嵌套 Agent（经 `agent.NewAgentNode` 接入图，或作为 `extensions/subagent` 子 Agent 运行）自动绕过重复 Checkpoint，只由最外层运行提交会话。
 
 Retriever、Middleware 和 Tool 可以从调用 context 安全读取当前状态快照：
 

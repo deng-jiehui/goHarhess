@@ -47,8 +47,8 @@ Agent 使用 `agent.WithResume(id, value)`，通过 `agent.Resume`、`agent.Resu
 - 节点循环的下一次执行具有新的问题 ID。未知、重复、已回答的 ID 会被拒绝；携带输入只能调用 Resume 系列入口。
 - 输入在执行节点前持久化。若后续执行失败，可用不带 WithResume 的 Resume 重试已接受输入，不能重复提交同一个 ID。接受输入后的运行会在节点提交并完成路由后推进检查点到下一节点，清理当前节点的输入记录；整次 Graph 执行完成后保存结果；之后不带输入的 Resume 直接读取结果，再提交人工输入则返回错误。
 - 节点前的外部副作用可能重放；将写操作放在交互之后，或使用幂等键。State 快照不会回滚数据库或远程请求。
-- PostHandler、路由函数、并行合并器内不支持动态 Interrupt，调用会返回明确错误。嵌套 Graph / 子 Agent 内的顺序节点支持 Interrupt：挂起经执行树传播到根运行，统一返回 `InterruptedError`，从根入口 Resume 恢复；子调用已完成的结果在恢复时直接复用。并行分支（原生 fork 任务、`AddParallelNode` 成员、动态分派成员）节点体内也支持直接调用 Interrupt：每个成员拥有独立的交互日志与入口 State，`AddParallelNode` 成员的待答问题节点身份为 `组名/分支名`；只回答部分成员时其余成员保持等待且不重放，分批回答后全部就绪才合并。工具节点内不同调用各自的 Interrupt 按调用身份归属日志，可分批回答并正确恢复；同一调用内并发发起多个 Interrupt 的顺序仍无法稳定重放，不受支持。
-- 经 `agent.NewAgentNode` 接入图的子 Agent（如 examples/routing、examples/groupchat 编排）属于嵌套 Graph：子 Agent 内的 Interrupt 会使整个运行挂起并从根入口恢复，不会被转成模型可见的观察结果，也不会让父级“成功”结束。未配置根检查点时嵌套 Interrupt 仍以 `graph.ErrInterruptUnsupported` 失败。`pkg/subagent` 受管任务内的审批同样作为待答问题递归汇总到根：只回答其中一个任务时该任务先推进，其余任务保持挂起；已完成父任务不重跑，根执行到末尾等待全部任务收敛后才提交最终结果。
+- PostHandler、路由函数、并行合并器内不支持动态 Interrupt，调用会返回明确错误。嵌套 Graph / 子 Agent 内的顺序节点支持 Interrupt：挂起经执行树传播到根运行，统一返回 `InterruptedError`，从根入口 Resume 恢复；子调用已完成的结果在恢复时直接复用。并行分支（原生 fork 任务、动态分派成员）节点体内也支持直接调用 Interrupt：每个成员拥有独立的交互日志与入口 State；只回答部分成员时其余成员保持等待且不重放，分批回答后全部就绪才合并。工具节点内不同调用各自的 Interrupt 按调用身份归属日志，可分批回答并正确恢复；同一调用内并发发起多个 Interrupt 的顺序仍无法稳定重放，不受支持。
+- 经 `agent.NewAgentNode` 接入图的子 Agent（如 examples/routing、examples/groupchat 编排）属于嵌套 Graph：子 Agent 内的 Interrupt 会使整个运行挂起并从根入口恢复，不会被转成模型可见的观察结果，也不会让父级“成功”结束。未配置根检查点时嵌套 Interrupt 仍以 `graph.ErrInterruptUnsupported` 失败。`extensions/subagent` 工具内的子 Agent 审批同样作为待答问题沿命名空间执行树汇总到根：同批已完成的兄弟子 Agent 调用结果直接复用，只恢复仍等待的调用。
 - 不再回应挂起的交互时，可用 `state.AbandonRun` 或 Agent 的 `WithAbandonUnfinished` 放弃该运行，见 [统一检查点](checkpoints.md#放弃未完成的运行)。
 - 普通无检查点运行不增加 State 编码。配置检查点后，具备交互条件的节点会保存入口快照，并在启动下游前收集输出流以确认是否挂起；节点仍调用 Stream，公开消息增量继续实时发布。
 - 统一存储支持历史查询和版本冲突检查；应用仍必须串行化同一会话的运行与恢复请求。不保证并发恢复、崩溃或存储失败时外部操作恰好执行一次。完成标记写入失败后重试也可能重复副作用。

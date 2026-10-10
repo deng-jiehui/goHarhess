@@ -19,9 +19,8 @@ Agent 使用 `agent.StreamEvents(ctx, value, messages, stream.Config{Buffer: 64}
 不代表并行任务的全局因果关系。ID 为随机生成的不透明标识；不会因进程重启重新从 1 开始。
 这不等于提供持久化事件或重放功能。
 
-并行成员的事件 NodeID 使用公开成员身份：`AddParallelNode` 成员为 `组名/分支名`，
-动态分派成员为目标节点名；Namespace 携带成员所属分支名。框架生成的内部汇合节点
-（`组名/__join__`）不执行用户组件，不发布业务事件。
+并行成员的事件 NodeID 使用公开成员身份：动态分派成员为目标节点名；
+Namespace 携带成员所属分支名。
 
 成功时 result 后为 EOF。运行错误由 Recv 返回，保留原始错误链；随后 EOF。
 已入队事件先交付再返回运行错误；主动 Close 会丢弃尚未交付的事件并取消执行。
