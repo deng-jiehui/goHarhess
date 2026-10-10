@@ -50,17 +50,18 @@ agent：agent.New(model, opts...) 在同一引擎上装配 ReAct 图
 | 维度 | goHarness | LangGraph | Eino |
 | --- | --- | --- | --- |
 | 编排模型 | 单引擎：State 驱动图 + Fork/Join/Send | Graph + Send + Command | Chain/Graph/Agent 多层组件 |
-| 类型安全 | 泛型图边界 + 编译期校验的 Handler/分支/Codec | Python 动态 | 泛型组件，编排层运行时组装 |
-| 恢复语义 | 统一检查点（会话+执行），整图指纹判兼容 | checkpointer + interrupt | 依赖外层实现 |
-| 人工交互 | `Interrupt` + 按问题 ID 恢复，嵌套图/子 Agent 传播到根 | interrupt/resume | 无内建等价物 |
-| 观测 | `observe.With` 一行接入调用树/耗时/token | LangSmith 生态 | 依赖外部 APM |
+| 类型安全 | 泛型图边界；Handler/分支/Codec 在 `Compile` 校验 | Python 动态 | 泛型组件边界；compose 编译校验 |
+| 恢复语义 | 统一检查点（会话+执行），整图指纹判兼容 | checkpointer + interrupt | `CheckPointStore`/`CheckPointID`；ADK `Resume`/`ResumeWithParams`；无整图指纹约束 |
+| 人工交互 | `Interrupt` + 按问题 ID 恢复，嵌套图/子 Agent 传播到根 | interrupt/resume | `WithInterruptBeforeNodes`/`StatefulInterrupt`；ADK Resume 可携带数据 |
+| 观测 | `observe.With` 一行接入调用树/耗时/token | LangSmith 生态 | callbacks 接口；官方 Langfuse 扩展与 OTel 接入 |
 | 体量 | 核心约 2.1 万行（pkg+internal） | — | — |
 
 ## 性能
 
-各阶段以 `pre-slim` 固定基线、Full 99 场景 ×10 样本验收：阶段四 0 项超阈，
-并行与恢复路径显著改善（`ResumeGraph` ns/op −38%~−64%，`PersistedGraph`
-allocs −35%）。完整数据与口径见 [基准报告](docs/benchmarks/phase4.md)。
+各阶段以 `pre-slim` 固定基线、Full 99 场景 ×10 样本验收：阶段四唯一首轮
+超标项经双侧各十次复测通过，最终满足门槛；并行与恢复路径显著改善
+（`ResumeGraph` ns/op −38%~−64%，`PersistedGraph` allocs −35%）。
+完整数据与口径见 [基准报告](docs/benchmarks/phase4.md)。
 
 ## 文档地图
 

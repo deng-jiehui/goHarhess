@@ -11,8 +11,8 @@ runnable.Runnable[llm.Request, llm.Response]
 ```
 
 因此模型既能交给 Agent 快捷装配，也能作为普通 Runnable 使用。接入自定义 Graph 时，
-使用 `llm.NewChatModelNode(model)` 包装 provider 模型；该公开节点负责 ChatModel
-Start/End/Error 生命周期，并让 Graph 快照与 Callback 将其识别为 `chat_model`。直接调用
+使用 `llm.NewChatModelNode(model)` 包装 provider 模型；该公开节点负责发射 ChatModel
+start/end/error 观测事件（`observe.KindLLM`），并让 Graph 快照将其识别为 `chat_model`。直接调用
 模型时，消息、工具定义和生成参数都通过 provider-neutral 的 `llm.Request` 传入：
 
 ```go
@@ -100,7 +100,7 @@ Retry 只会重试首个实时增量产生前的可重试错误或静默截断�
 
 ## 规范化流
 
-Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `*runnable.StreamReader[llm.Response]` 返回。SSE 分帧、解压和 Provider 分片解码属于包内部细节。实时的部分 Response 通过类型化 Context EventStream 回调发布，绝不会进入 Reader 的最终结果数据面。
+Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `*runnable.StreamReader[llm.Response]` 返回。SSE 分帧、解压和 Provider 分片解码属于包内部细节。实时的部分 Response 通过 `pkg/stream` 公共事件流的 `KindMessage` 增量发布，绝不会进入 Reader 的最终结果数据面。
 
 名为 `reasoning_content`、`reasoning`、`thinking` 或 `thought` 的推理字段会规范化为有序 `Message.ContentBlocks` 切片中的 `schema.NewReasoningBlock` 条目。工具调用参数片段会在最终 Response 提交前合并为 `NewFunctionToolCallBlock` 条目。适配器保留 Block 顺序，并用 `RoleTool` 和 `NewFunctionToolResultBlock` 表示结果。不支持的 Provider 载荷会保留为 `NewOpaqueBlock` 值或产生明确错误；绝不会静默展平或丢弃。
 

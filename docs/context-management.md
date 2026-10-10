@@ -158,7 +158,7 @@ checkpoint, ok := state.FromContext(ctx)
 values := state.ValuesFromContext(ctx)
 ```
 
-Values 不会自动复制到 Callback 元数据，避免把可能敏感的业务状态写入监控后端。
+Values 不会自动复制到 `observe` 元数据，避免把可能敏感的业务状态写入监控后端。
 
 ## Builders
 

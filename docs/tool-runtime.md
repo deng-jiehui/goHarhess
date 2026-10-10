@@ -39,8 +39,8 @@ goHarness 将会改变业务结果的控制能力与只读观测能力分开：
 
 - `tool.Runtime` 负责 Middleware、超时、只读重试、递归深度、并发组、死锁检测、HTTP Client 和 panic 隔离。
 - `tool.BeforeBatchHook` 在整批 Tool Call 产生副作用前完成准入或挂起。
-- 各领域强类型 Callback 只观察生命周期，不改变主业务结果。
-- LLM Token、Tool 进度和 UI 数据通过 Context 中的 EventStream 发布。
+- 运行期观测统一走 `pkg/observe` 的 `Observer`：run / node / llm / tool / interrupt / checkpoint 事件只观察生命周期，不改变主业务结果。
+- LLM 增量、业务进度和 UI 数据通过 `pkg/stream` 公共事件流发布。
 
 Agent 和 `tool.ToolsNode` 共用公开的 `tool.Runtime`，不存在 Agent 私有的第二套工具执行路径。
 
@@ -56,7 +56,7 @@ ordered `FunctionToolResult` blocks; result blocks may themselves contain
 
 参数校验：`Spec.Parameters`（JSON Schema）在 `Runtime.Register` 时预编译（`google/jsonschema-go`）。工具声明先深拷贝为注册快照，`Binding.Spec()` 与 `ToolsNode.Definitions()` 导出的 `Parameters` 均为独立副本，注册后修改原参数表或导出的定义不会改变校验规则。schema 无法解析、引用无法解析或 `$schema` 声明为不受支持的版本（仅支持 draft-07 与 2020-12，未声明按默认处理）都会在注册期直接报错。`Scope.Execute` 在进入 Middleware、占用 worker 槽位之前校验 `CallInput.Args`；不满足 schema 的调用不会执行工具本体——`ToolsNode` 路径把它转为 `isError` 结果返回给模型（文本为 `tool "<name>" arguments violate the declared schema: …`），便于模型自纠重试；直调 Runtime 的调用方收到 `*tool.InvalidArgsError`，可用 `errors.Is(err, tool.ErrInvalidToolArgs)` 分类。未声明 `Parameters` 的工具回落到 `EmptyParameters`（任意 JSON 对象可用）。
 
-错误可见性：进入 `isError` 结果的文本与内部错误分离。默认模型只看到 `tool "<name>" failed`；参数 JSON 语法错误与 schema 违规、未注册工具名（`does not exist`）、权限拒绝（`permission denied`）与超时（`timed out`）有确定的模型可读文本。工具或中间件要给模型返回反馈（如"限流，30 秒后重试"、"缺少 write:files 权限"）时用 `tool.ModelVisible(err)` 显式包装，包括放在 `Deny` 理由内。内部错误原文、panic 值、中间件名等诊断信息不进入模型文本，完整错误始终由 `OnToolError`/`EndCallback` 携带。
+错误可见性：进入 `isError` 结果的文本与内部错误分离。默认模型只看到 `tool "<name>" failed`；参数 JSON 语法错误与 schema 违规、未注册工具名（`does not exist`）、权限拒绝（`permission denied`）与超时（`timed out`）有确定的模型可读文本。工具或中间件要给模型返回反馈（如"限流，30 秒后重试"、"缺少 write:files 权限"）时用 `tool.ModelVisible(err)` 显式包装，包括放在 `Deny` 理由内。内部错误原文、panic 值、中间件名等诊断信息不进入模型文本，完整错误始终由 `observe.Event.Err`（`KindTool` / `PhaseError`）携带。
 
 结果复用与幂等：节点挂起（`during_node`）时同批已完成的工具调用结果记入会话 pending 区随进度落盘；恢复重放整节点时命中登记的调用直接复用结果，不再执行工具本体。去重键 = `批次序号/调用基准键`：`ToolsNode.Invoke` 每次进入开一个新批次（`control.CallRecorder.BeginBatch`），序号在会话内单调递增且恢复重放顺序一致——同节点主动再调一批正常执行，只有同批次的恢复重放才命中；调用基准键取提供商调用 ID，缺失时用 `工具名:参数摘要`，同批重复追加序号。挂起型错误（`graph.Interrupt`、子调用挂起）不是完成结果，不登记——恢复后该调用重新执行以重放交互。
 
@@ -64,7 +64,7 @@ ordered `FunctionToolResult` blocks; result blocks may themselves contain
 
 复用与人工交互协调：工具内的 `Interrupt` 记录按调用键归属（`InterruptRecord.Call`），命中 pending 的调用连带标记其此前消费过的日志为已消费，后续调用按各自归属继续消费，不会错配审批答案。登记器经 `control.WithCallRecorder` 由图运行时注入，载荷为不透明字节；直调 `Runtime.Execute` 无登记器，行为不变。
 
-历史按需提供：`ToolsNode` 默认不向 `CallInput.Messages` 注入历史，该字段为 `nil`。需要读取会话的工具在 `Spec` 中声明 `NeedsMessages: true`，即可获得本次调用的完整历史，包括 system prompt 和此前的工具输出。批次入口对外部消息做一次深拷贝；同批声明历史需求的工具各自获得独立的消息切片，共享其中的嵌套内容，不再逐调用深拷贝整段历史。工具应把历史当作只读数据，修改内容块或元数据会影响同批其他读取历史的工具。回调获得独立副本。`FileAccess` 单独控制文件引用的提供，声明文件访问无需同时声明历史需求。模型仍正常接收工具调用与结果。
+历史按需提供：`ToolsNode` 默认不向 `CallInput.Messages` 注入历史，该字段为 `nil`。需要读取会话的工具在 `Spec` 中声明 `NeedsMessages: true`，即可获得本次调用的完整历史，包括 system prompt 和此前的工具输出。批次入口对外部消息做一次深拷贝；同批声明历史需求的工具各自获得独立的消息切片，共享其中的嵌套内容，不再逐调用深拷贝整段历史。工具应把历史当作只读数据，修改内容块或元数据会影响同批其他读取历史的工具。观测载荷经脱敏获得独立副本。`FileAccess` 单独控制文件引用的提供，声明文件访问无需同时声明历史需求。模型仍正常接收工具调用与结果。
 
 ```go
 node, err := tool.NewToolsNode(tool.ToolNodeConfig{
@@ -83,7 +83,7 @@ node, err := tool.NewToolsNode(tool.ToolNodeConfig{
 
 `RetryBackoff` 未配置时沿用默认 100ms；要显式关闭重试间隔（重试立即执行）需同时设置 `RetryBackoffSet: true`，否则结构体零值视为未配置。
 
-超时与取消是协作式约束：`Execute` 超时先返回，但忽略 `ctx` 的工具仍在后台占用全局 worker、批次与并发组槽位。框架把这类执行计为该工具的未归还数，每次放弃通过 `OnToolError` 派发 `AbandonedError` 告警（携带当前未归还数与阈值）；未归还数达到阈值后该工具的新调用直接拒绝，模型侧得到 `tool "<name>" is temporarily unavailable` 的 isError 结果，其他工具不受影响；后台执行归还后计数回落、熔断自动解除。工具实现必须在 `ctx.Done()` 后及时返回，长时间操作应定期检查取消信号。
+超时与取消是协作式约束：`Execute` 超时先返回，但忽略 `ctx` 的工具仍在后台占用全局 worker、批次与并发组槽位。框架把这类执行计为该工具的未归还数，每次放弃派发一条 `KindTool`/`PhaseError` 观测事件，其 `Err` 为 `*tool.AbandonedError`（携带当前未归还数与阈值）；未归还数达到阈值后该工具的新调用直接拒绝，模型侧得到 `tool "<name>" is temporarily unavailable` 的 isError 结果，其他工具不受影响；后台执行归还后计数回落、熔断自动解除。工具实现必须在 `ctx.Done()` 后及时返回，长时间操作应定期检查取消信号。
 
 熔断阈值在两个配置入口的零值语义不同：`ToolNodeConfig.MaxAbandoned = 0` 表示使用默认值 8（无法在该入口显式关闭）；直建 `Runtime` 时 `RuntimeConfig.MaxAbandoned = 0` 表示关闭熔断。两处上限均为全局 worker 数 128。
 

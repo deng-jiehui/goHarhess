@@ -50,7 +50,8 @@ Context Engine -> ChatModel (llm.ChatModel)
 ```
 
 - `llm.ChatModel` 是 provider-neutral 的模型契约，输入 `llm.Request`，输出
-  完整 `llm.Response`。实时模型增量通过 Context EventStream 发布。
+  完整 `llm.Response`。实时模型增量通过 `pkg/stream` 公共事件流发布，
+  生命周期观测走 `pkg/observe`。
 - `tool.ToolsNode` 只执行消息末尾连续的 assistant function calls，返回有序的
   tool-result 消息；它本身也是一个 `Runnable[[]schema.Message, []schema.Message]`。
 - `extensions/mcp` 将 MCP `tools/list` 和 `tools/call` 适配成 `tool.Tool` 与
@@ -84,7 +85,7 @@ Stream 仍按上述规则以流形态执行节点，不会退化为 Invoke。
 
 ## 原生并行分支
 
-`AddFork` 和 `AddJoin` 可以直接组织普通节点的扇出与汇合。调度器每轮执行一批任务，短分支到达后等待长分支；整轮成功后通过 `SetStepMerger` 合并 State，再保存下一轮任务和汇合记录。`SetMaxConcurrency` 限制并发数，`MaxSteps` 按累计节点任务数计算。`AddBranch` 继续保持首个命中语义。
+`AddFork` 和 `AddJoin` 可以直接组织普通节点的扇出与汇合。成员任务各持局部 State，成员路径上的后续节点沿该成员自己的 State 推进；短分支到达汇合点后保存终态等待，全部成员到齐后由合并器对各成员终态执行一次合并——按扇出点配置的 `SetForkMerger`（或 `NewState` 门面 `Parallel` 的 merge 参数）优先于图级 `SetStepMerger`。检查点每轮保存调度进度与成员 State 快照，那是进度持久化，不等于逐轮把成员状态并回主干。`SetMaxConcurrency` 限制并发数，`MaxSteps` 按累计节点任务数计算。`AddBranch` 继续保持首个命中语义。
 
 原生分支图要求普通节点有 PreHandler，并显式配置合并器。分支中的流在轮末提交前收集完毕，流执行失败不会提交 State。完整规则、限制与示例见 [并行与分支](graph-branches.md)。
 
@@ -103,7 +104,7 @@ Invoke(context.Context, NI, ...runnable.Option) (NO, error)
 ```
 
 ChatModelNode、ToolsNode、MCP、Retriever 和子 Agent 节点仍是普通 Runnable。它们不会导入或检查 Graph State。挂载前使用
-`llm.NewChatModelNode` 包装，使模型生命周期回调和 `chat_model` 节点类型附着在组件边界。`AddNode` 记录
+`llm.NewChatModelNode` 包装，使模型观测事件（`observe.KindLLM`）和 `chat_model` 节点类型附着在组件边界。`AddNode` 记录
 组件类型及输入/输出 `reflect.Type` 只记录一次；`Compile` 会在执行前校验每条边和 END 输出。
 
 ```go
@@ -127,7 +128,7 @@ _ = g.AddEdge("chat", "finish") // unconditional fallback
 ```
 
 处理函数另有一组编译期检查签名的入口，类型参数全部从函数签名推导，生成的闭包直接调用、不再经过反射：
-`graph.WithPreHandler`、`graph.WithPostHandler`、`graph.WithStateMerger` 本身就是泛型函数；`SetStateFactory`、`AddBranch`、`SetStepMerger` 因 Go 方法不能声明类型参数，提供同名包级函数 `graph.SetStateFactory(g, fn)`、`graph.AddBranch(g, from, to, label, fn)`、`graph.SetStepMerger(g, fn)`。两组入口混用合法，`Compile` 的类型与拓扑校验对两者完全一致。
+`graph.WithPreHandler`、`graph.WithPostHandler` 本身就是泛型函数；`SetStateFactory`、`AddBranch`、`SetStepMerger`、`SetForkMerger` 因 Go 方法不能声明类型参数，提供包级函数 `graph.SetStateFactory(g, fn)`、`graph.AddBranch(g, from, to, label, fn)`、`graph.SetStepMerger(g, fn)`、`graph.SetForkMerger(g, fork, fn)`。两组入口混用合法，`Compile` 的类型与拓扑校验对两者完全一致。
 
 ## Runtime State
 
@@ -148,16 +149,18 @@ _ = g.SetStateFactory(func(_ context.Context, input Request) (*ResearchState, er
 该精确指针。用户无需实现 `Clone`、调用 `GetState`，也不要从纯组件修改 State。由 Graph 所有的 Handler 负责映射边界：
 
 ```go
+// retriever 是 extensions/retrieval 的 *retrieval.HybridRetriever：
+// Runnable[retrieval.ReferenceRequest, string]
 _ = g.AddNode("search", retriever,
     graph.WithPreHandler(func(
         _ context.Context, state *ResearchState,
-    ) (retrieval.Query, error) {
-        return retrieval.Query{Text: state.Topic}, nil
+    ) (retrieval.ReferenceRequest, error) {
+        return retrieval.ReferenceRequest{Query: state.Topic}, nil
     }),
     graph.WithPostHandler(func(
-        _ context.Context, state *ResearchState, output retrieval.Result,
+        _ context.Context, state *ResearchState, output string,
     ) error {
-        state.Notes = append(state.Notes, output.Text)
+        state.Notes = append(state.Notes, output)
         return nil
     }),
 )
@@ -173,18 +176,18 @@ _ = g.AddNode("search", retriever,
 _ = g.AddNode("search", graph.StateNode(func(
     ctx context.Context, state *ResearchState,
 ) error {
-    result, err := retriever.Invoke(ctx, retrieval.Query{Text: state.Topic})
+    result, err := retriever.Invoke(ctx, retrieval.ReferenceRequest{Query: state.Topic})
     if err != nil {
         return err
     }
-    state.Notes = append(state.Notes, result.Text)
+    state.Notes = append(state.Notes, result)
     return nil
 }))
 ```
 
-State 节点自动携带恒等 PreHandler（`AddNode` 与并行分支识别该形态，显式 `WithPreHandler` 仍可覆盖），因此天然满足可恢复性与动态中断对 Pre 的要求，函数内的 `graph.Interrupt`、选项与回调照常生效。State 节点链可零胶水直连；接普通节点时由下游自己的 PreHandler 提取输入，作为图结束节点时由 finish 类节点声明输出。并行分支中的 State 节点修改分支自己的 State 副本，轮末仍由 merger 合并；未指定 Post 时默认为空操作。
+State 节点自动携带恒等 PreHandler（`AddNode` 与并行分支识别该形态，显式 `WithPreHandler` 仍可覆盖），因此天然满足可恢复性与动态中断对 Pre 的要求，函数内的 `graph.Interrupt`、选项与观测事件照常生效。State 节点链可零胶水直连；接普通节点时由下游自己的 PreHandler 提取输入，作为图结束节点时由 finish 类节点声明输出。并行分支中的 State 节点修改分支自己的局部 State，全部成员到齐后由合并器对各成员终态执行一次合并；未指定 Post 时默认为空操作。
 
-Graph 持有拓扑锁时不会运行用户函数。节点和 Handler 接收节点执行 Context，其中包含取消、截止时间、Trace 和 Callback span 值。
+Graph 持有拓扑锁时不会运行用户函数。节点和 Handler 接收节点执行 Context，其中包含取消、截止时间、Trace 和 observe span 值。
 
 ## State 快照
 
@@ -209,7 +212,7 @@ if err == nil {
 }
 ```
 
-Fan-Out 分支接收独立的 State 指针，并通过显式 `WithStateMerger` 按声明顺序合并。分支失败会取消兄弟分支并跳过合并。
+Fan-Out 分支各接收独立的局部 State 副本，全部成员到齐后由合并器按分支声明顺序对成员终态执行一次合并（`SetForkMerger` 优先于 `SetStepMerger`）。分支失败会取消兄弟分支并跳过合并。
 
 ## 持久化游标
 
@@ -243,11 +246,11 @@ ctx := observe.WithMetadata(ctx, map[string]any{
 ctx，`observe.MetadataFromContext` 返回独立副本；三者对 map、slice 与
 嵌套容器做递归复制，父调用与并行分支互不影响。框架在对应调用边界写入
 自身信息——Agent 加载会话后注入 `conversation_id`/`checkpoint_version`，
-Graph 节点与工具调用沿用既有回调入口的补充标签。组件需要分支级标签时
+Graph 节点与工具调用沿观测入口携带补充标签。组件需要分支级标签时
 创建自己的派生 ctx，只影响该分支及其下游。元数据不写入检查点；需要随
 会话保存的数据使用 `agent.WithStateValue`/`WithStateValues`。
 
-取消、截止时间、Trace、Callback 和身份信息仍保留在
+取消、截止时间、Trace、观测 span 和身份信息仍保留在
 `context.Context`。Graph Checkpoint、Durability、恢复输入等配置归属
 Graph 自身类型，在当前图入口消费，不会转发给纯节点。
 
@@ -263,11 +266,11 @@ Graph 自身类型，在当前图入口消费，不会转发给纯节点。
 
 每种配方有独立的 State（`ToolState`，公共部分为 Input/Messages/Response），
 这是运行状态的唯一真相源：Handler 直接读写 State，纯节点只通过 PreHandler 取输入。
-Context 只携带按配方实例隔离的只读运行配置（原始输入、模型调用预算、完成回调），
+Context 只携带按配方实例隔离的只读运行配置（原始输入、模型调用预算等），
 因此嵌套的子 Agent 无法读到父级配方的状态。ReAct 的模型调用预算在首次运行时写入 State，恢复时沿用。
 
 `agent.AgentNode` 是公开的子节点适配器。子 Agent 的业务失败以类型化 `runnable.Outcome` 返回，使 Supervisor 模式可以将其转为
-观测，而 Router 和 GroupChat 可以传播同一失败；控制类失败（中断、不支持的中断、缺少检查点、父级取消）直接作为错误返回，由父级 Graph 失败或挂起，绝不会变成模型可见的观测。子执行仍是真实的 Graph 节点，因此快照、回调和检查点中的恢复位置会暴露所选 Agent 名称，而不是不透明的分发步骤。
+观测，而 Router 和 GroupChat 可以传播同一失败；控制类失败（中断、不支持的中断、缺少检查点、父级取消）直接作为错误返回，由父级 Graph 失败或挂起，绝不会变成模型可见的观测。子执行仍是真实的 Graph 节点，因此快照、观测事件和检查点中的恢复位置会暴露所选 Agent 名称，而不是不透明的分发步骤。
 
 嵌套 Agent 和 Graph 创建独立的生命周期作用域。Graph 节点拥有自己的子 span，因此 APM 系统仍能保留节点级瀑布时序。
 除节点 ID 和 step 外，`graph.NodeExecution` 还携带编译后的节点类型及输入/输出类型。

@@ -2,8 +2,9 @@
 
 Graph 的并行有两套入口，共用同一调度循环与 `SetMaxConcurrency` 并发上限：
 
-- `AddFork`/`AddJoin` 原生分支把扇出与汇合画进拓扑，每轮任务的局部 State 经
-  `SetStepMerger` 合并；适合形状固定的并行查询，见 `examples/branches`。
+- `AddFork`/`AddJoin` 原生分支把扇出与汇合画进拓扑：成员各持局部 State，
+  全部到齐后对成员终态执行一次合并；适合形状固定的并行查询，见
+  `examples/branches`。
 - `graph.AddDispatch` 由运行到来源节点时的 State 生成任务清单，成员任务携带
   冻结输入、持有局部 State，全部收敛后按清单顺序汇合到 join；清单为空直接进入
   汇合。示例见 `examples/dispatch`。
@@ -42,19 +43,19 @@ g.AddEdge("summary", graph.End)
 
 原生分支图要求配置 State factory，并为普通节点设置 PreHandler。节点输入从 State 重建，跨轮传递的结果由 PostHandler 写入 State，不依赖上一节点的临时输出。开启检查点时，原生分支仍保存完成任务的输出，因此输出值须满足 JSON 往返稳定。
 
-每个任务使用独立的 State 副本。所有任务成功后，Graph 调用 `SetStepMerger` 配置的函数，将结果合并到另一份候选 State；路由和提交成功后才推进下一轮。合并器的签名如下：
+扇出后的成员任务各自持有独立的局部 State：每个成员从扇出点 State 解码出自己的副本，成员路径上的后续节点（如 `papers -> download`）沿该成员自己的局部 State 继续推进，不读公共 State。短分支到达汇合点后保存终态并等待；全部成员到齐后，Graph 才对各成员终态执行一次合并。合并器的签名如下：
 
 ```go
 func(context.Context, *MyState, []graph.StepResult[*MyState]) error
 ```
 
-第一个 State 参数是本轮入口的副本。每个 `StepResult` 包含 `TaskID`、`NodeID`、`GroupID`、`Branch` 和该任务的 `State`。结果按分支声明顺序提供，不按完成先后排序。短分支已经到齐后，不会继续出现在下一轮结果中。
+第一个 State 参数是扇出前公共 State 的候选副本。每个 `StepResult` 对应一条分支的**终态**：`TaskID`、`NodeID` 是该成员最后完成的任务，`Branch` 是成员身份，`State` 是成员终态。结果按分支声明顺序提供，不按完成先后排序；短分支提前完成后，其终态仍会进入这次最终合并。
 
-合并函数必须处理只有一个结果的情况：扇出前的普通节点、长分支剩余节点和汇合节点也经过它。原生分支要求显式配置合并函数；Graph 不猜测字段变化，也不强制使用字段 reducer。默认 State Codec 使用 JSON；包含特殊动态类型的 State 应配置能深度复制数据的自定义 Codec。
+扇出/分派组不做逐轮公共合并；无组的顺序轮仍按轮调用 `SetStepMerger`。按扇出点配置的合并器（`graph.SetForkMerger`，或 `graph.NewState` 门面 `Parallel` 的 merge 参数）优先于图级 `SetStepMerger`。检查点每轮仍会保存调度进度与各成员 State 快照——那是进度持久化，不等于把成员状态并回主干。合并函数只需处理一次终态合并；Graph 不猜测字段变化，也不强制使用字段 reducer。默认 State Codec 使用 JSON；包含特殊动态类型的 State 应配置能深度复制数据的自定义 Codec。
 
 ## 失败、取消与恢复
 
-任务、合并或路由失败时，该轮 State 不提交。开启检查点后，`Resume` 复用已经保存的完成任务结果，继续未完成任务，再合并这一轮；尚未持久化的执行仍可能重跑。已提交且到达汇合点的短分支不会重跑。外层循环再次经过同一扇出点，会创建新的分支组，不复用上次的到达记录。
+任务、合并或路由失败时，该轮 State 不提交。开启检查点后，`Resume` 复用已经保存的完成任务结果与成员终态，继续未完成任务；全部成员到齐后再执行合并。尚未持久化的执行仍可能重跑，已到达汇合点的短分支不会重跑。外层循环再次经过同一扇出点，会创建新的分支组，不复用上次的到达记录。
 
 统一 Checkpoint v3 的 `Execution` 把 State、累计任务数 `Step`、轮次 `Schedule.Round`、下一批任务及汇合记录保存在同一个检查点中。sync 模式每轮保存成功才推进；默认 async 模式允许下一轮与存储写入重叠，退出前 flush，完成或中断同步保存。进程崩溃可能重跑还没持久化的轮次，外部请求和已发送的流内容也不能回滚。涉及外部写入的节点仍需业务侧保证幂等。
 
@@ -84,7 +85,7 @@ err := graph.AddDispatch[string, string](g, "plan", []string{"worker"}, "collect
 ```
 
 - `targets` 声明允许的目标节点集合，清单里每项经 `graph.Send(node, input)` 指向其中一个；`input` 是该成员冻结的独立输入。目标到 `join` 的路径仍需显式连线，且路径上除成员入口外的节点都要能从 State 重建输入。
-- `from` 不能混用普通出边、条件出边或静态扇出；清单为空时不产生成员任务，直接进入汇合。每轮完成的任务结果按清单顺序经图级 `SetStepMerger` 并入候选 State，因此分派图必须配置合并器；全部成员到齐后才进入 `join` 节点。
+- `from` 不能混用普通出边、条件出边或静态扇出；清单为空时不产生成员任务，直接进入汇合。与静态分支相同，成员各持局部 State、全部到齐后按清单顺序对成员终态执行一次合并，因此分派图必须配置合并器。
 - 成员入口任务首次执行使用冻结的 `input`，不经过 PreHandler；同一节点在成员路径上被再次经过时按局部 State 重建输入。与静态分支成员相同，接续节点沿成员自己的局部 State 继续；完成任务的边输出始终编码，值必须 JSON 往返稳定，不能只靠 PostHandler 收进 State。完整示例见 `examples/dispatch`。
 
 检查点按当前格式保存和恢复。项目尚未投入使用，开发期旧格式不提供迁移或兼容承诺。

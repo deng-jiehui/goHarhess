@@ -115,7 +115,7 @@ reply, err := selected.Invoke(ctx, messages)
 - 明确每个 Agent 的最大模型调用数、工具超时、工具并发和 Graph 最大步数。
 - 所有可写工具都通过 Middleware 执行认证、租户隔离、权限校验和必要的幂等保护。
 - 以 `Context` 传递 Trace、请求取消和 `tool.Subject`，不把敏感数据拼入 Prompt。
-- 流式消费者只在收到 `Done` 后保存、扣费或声明成功；`Item.Err` 立即作为失败处理。
+- 流式消费者只在 `Recv` 返回 `io.EOF`、且已收到 `KindResult` 最终结果后保存、扣费或声明成功；`Recv` 返回的非 EOF 错误立即作为失败处理。
 - 自定义流适配器应在 Reader 关闭时取消上游；首个数据后的流错误不得自动重试。
 - Observer 保持短小、可取消；失败上报接入自己的日志、告警或死信流程。
 - 为会话和执行配置统一的耐久 `state.Store`，验证版本冲突、过期、挂起、保存失败、完成结果复用及外部工具幂等。

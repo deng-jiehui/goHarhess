@@ -37,8 +37,8 @@ app, err := graph.NewState[routeState]("dispatcher").
 
 子 Agent 收到的是主管作出路由决定之前的对话快照（`DispatchInput` 语义），
 不包含没有配对结果的主管工具调用消息。成员挂为真实的 `agent:<name>` Graph
-节点后，Graph Snapshot、节点 Callback 和检查点中的执行进度都能直接显示
-具体成员。
+节点后，Graph Snapshot、节点观测事件（`observe.KindNode`）和检查点中的执行
+进度都能直接显示具体成员。
 
 ## 编排多个 Agent
 
@@ -97,7 +97,7 @@ out, err := parent.Invoke(ctx, messages, agent.WithCheckpoint(store, "conversati
 
 - **一次性任务**：`run_subagent`（`task` 必填，可选 `instructions`、`model`、`tools`、`role`）同步运行一个临时子图并直接返回结果，不创建会话记录，无 `Store` 也可用。
 - **会话子 Agent**：`spawn_agent` 参数同上并多一个可选 `name`，创建持久记录并同步执行首个任务，返回 `agent_id`、`task_id` 与 `result`。`followup_task`（`agent_id` + `task`）给空闲子 Agent 追加任务并沿用其上下文；`list_agents`/`get_agent` 查看概览与历史；`close_agent` 关闭后记录仍可读取但拒绝新任务。会话记录以 `<conversationID>/agents/...` 独立键保存在 `Config.Store` 中，与父检查点分离。
-- **创建者作用域**：子 Agent 只能访问它的直接创建者（含子 Agent 自己创建的孙 Agent）；其它调用方得到 `not found`。
+- **创建者作用域**：每个调用方只能访问自己直接创建的子 Agent——子 Agent 也只能访问自己创建的孙 Agent；访问其他调用方创建的记录得到 `not found`。
 - **注册表约束**：模型与工具名称只能取自注册表；超出范围、未知角色或未知名称得到列出可用名称的模型可见错误结果，父 Agent 可据此修正。
 - **审批与恢复**：子 Agent 内的 `graph.Interrupt` 经命名空间执行树传播到根运行，统一返回 `InterruptedError`，从根入口用问题 ID `agent.Resume`；同批已完成的兄弟调用结果直接复用，不重复创建、不重复执行。父运行必须配置检查点，否则子 Agent 内的审批以 `ErrCheckpointRequired` 失败。
 - **并发**：同一工具批次内的多个子 Agent 调用并发执行；`Config.MaxConcurrent` 提供扩展内并发上限。
