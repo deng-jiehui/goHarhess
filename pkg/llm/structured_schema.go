@@ -88,6 +88,15 @@ func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 			// 匿名内嵌字段自身不对应独立属性；其提升字段由 VisibleFields
 			// 以各自名字返回，与推导逻辑一致。
 			if field.Anonymous {
+				// 推导无条件跳过匿名字段：带显式 json 名的内嵌字段在
+				// encoding/json 中会成为具名属性，但 Schema 中不存在，
+				// 两侧不一致，构造期拒绝。
+				if tag, ok := field.Tag.Lookup("json"); ok {
+					if name, _, _ := strings.Cut(tag, ","); name != "" && name != "-" {
+						return fmt.Errorf("field %s: anonymous field with explicit json name %q "+
+							"cannot be represented by the schema", path+"."+field.Name, name)
+					}
+				}
 				continue
 			}
 			info := jsonFieldInfo(field)

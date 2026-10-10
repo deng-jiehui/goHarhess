@@ -161,6 +161,21 @@ func TestStructuredOutputPointerFields(t *testing.T) {
 	}
 }
 
+type anonInner struct {
+	V string `json:"v"`
+}
+
+func TestStructuredOutputRejectsNamedAnonymousField(t *testing.T) {
+	// 带显式 json 名的匿名内嵌字段：encoding/json 视为具名属性，但推导
+	// Schema 不存在该属性，两侧不一致必须构造期拒绝。
+	type BadOuter struct {
+		anonInner `json:"in"`
+	}
+	if _, err := llm.NewStructuredOutput[BadOuter](); err == nil || !strings.Contains(err.Error(), "anonymous") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestStructuredOutputRejectsNonPointerOmitEmpty(t *testing.T) {
 	type bad struct {
 		Name string `json:"name,omitempty"`
