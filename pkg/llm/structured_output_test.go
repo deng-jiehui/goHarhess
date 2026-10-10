@@ -1,0 +1,457 @@
+package llm_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
+)
+
+type decision struct {
+	Approved bool   `json:"approved"`
+	Reason   string `json:"reason"`
+}
+
+type nestedAnswer struct {
+	Title  string `json:"title"`
+	Detail struct {
+		Score float64 `json:"score"`
+	} `json:"detail"`
+}
+
+type pointerFields struct {
+	Name    string   `json:"name"`
+	Comment *string  `json:"comment,omitempty"`
+	Note    *int     `json:"note"`
+	Tags    []string `json:"tags"`
+}
+
+func assistantOf(text string) schema.Message {
+	return schema.AssistantMessage(text)
+}
+
+func newDecisionOutput(t *testing.T, options ...llm.StructuredOutputOption) *llm.StructuredOutput[decision] {
+	t.Helper()
+	output, err := llm.NewStructuredOutput[decision](options...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func TestStructuredOutputDecodeSuccess(t *testing.T) {
+	output := newDecisionOutput(t)
+	value, err := output.Decode([]schema.Message{
+		schema.UserMessage("决定?"),
+		assistantOf(`{"approved":false,"reason":"拒绝"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Approved != false || value.Reason != "拒绝" {
+		t.Fatalf("value = %#v", value)
+	}
+}
+
+func TestStructuredOutputDecodeZeroValuesAccepted(t *testing.T) {
+	type zeros struct {
+		Count int    `json:"count"`
+		Flag  bool   `json:"flag"`
+		Text  string `json:"text"`
+	}
+	output, err := llm.NewStructuredOutput[zeros]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := output.Decode([]schema.Message{assistantOf(`{"count":0,"flag":false,"text":""}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Count != 0 || value.Flag || value.Text != "" {
+		t.Fatalf("value = %#v", value)
+	}
+}
+
+func TestStructuredOutputDecodeMissingRequiredField(t *testing.T) {
+	output := newDecisionOutput(t)
+	// 缺少 approved 不得静默填充零值。
+	value, err := output.Decode([]schema.Message{assistantOf(`{"reason":"ok"}`)})
+	if !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	if value != (decision{}) {
+		t.Fatalf("partial value delivered: %#v", value)
+	}
+}
+
+func TestStructuredOutputDecodeFailures(t *testing.T) {
+	output := newDecisionOutput(t)
+	cases := map[string]string{
+		"unknown field":     `{"approved":true,"reason":"ok","extra":1}`,
+		"wrong type":        `{"approved":"yes","reason":"ok"}`,
+		"malformed json":    `{"approved":true,`,
+		"trailing text":     `{"approved":true,"reason":"ok"} tail`,
+		"trailing value":    `{"approved":true,"reason":"ok"} {"x":1}`,
+		"markdown fence":    "```json\n{\"approved\":true,\"reason\":\"ok\"}\n```",
+		"prose around json": `sure: {"approved":true,"reason":"ok"}`,
+		"null":              `null`,
+		"array":             `[{"approved":true,"reason":"ok"}]`,
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			value, err := output.Decode([]schema.Message{assistantOf(text)})
+			if !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+				t.Fatalf("err = %v", err)
+			}
+			if value != (decision{}) {
+				t.Fatalf("partial value delivered: %#v", value)
+			}
+		})
+	}
+}
+
+func TestStructuredOutputDecodeNumericOverflow(t *testing.T) {
+	type small struct {
+		N int8 `json:"n"`
+	}
+	output, err := llm.NewStructuredOutput[small]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"n":300}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// UseNumber 精度：整数按原值进入目标类型。
+	if value, err := output.Decode([]schema.Message{assistantOf(`{"n":-5}`)}); err != nil || value.N != -5 {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+}
+
+func TestStructuredOutputPointerFields(t *testing.T) {
+	output, err := llm.NewStructuredOutput[pointerFields]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// omitempty 指针字段仍为 required，但允许 null。
+	value, err := output.Decode([]schema.Message{assistantOf(
+		`{"name":"x","comment":null,"note":null,"tags":null}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Comment != nil || value.Note != nil || value.Tags != nil {
+		t.Fatalf("value = %#v", value)
+	}
+	// 非指针字段带 null 拒绝。
+	if _, err := output.Decode([]schema.Message{assistantOf(
+		`{"name":null,"comment":null,"note":null,"tags":null}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// omitempty 指针字段缺失仍拒绝：nullable 不等于 optional。
+	if _, err := output.Decode([]schema.Message{assistantOf(
+		`{"name":"x","note":null,"tags":null}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputRejectsNonPointerOmitEmpty(t *testing.T) {
+	type bad struct {
+		Name string `json:"name,omitempty"`
+	}
+	if _, err := llm.NewStructuredOutput[bad](); err == nil || !strings.Contains(err.Error(), "omitempty") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputRejectsNonStructTypes(t *testing.T) {
+	if _, err := llm.NewStructuredOutput[*decision](); err == nil {
+		t.Fatal("pointer target accepted")
+	}
+	if _, err := llm.NewStructuredOutput[string](); err == nil {
+		t.Fatal("string target accepted")
+	}
+	if _, err := llm.NewStructuredOutput[[]decision](); err == nil {
+		t.Fatal("slice target accepted")
+	}
+	if _, err := llm.NewStructuredOutput[map[string]any](); err == nil {
+		t.Fatal("map target accepted")
+	}
+}
+
+type customCodec struct{ Inner string }
+
+func (c *customCodec) UnmarshalJSON([]byte) error  { return nil }
+func (c customCodec) MarshalJSON() ([]byte, error) { return []byte(`"x"`), nil }
+
+func TestStructuredOutputRejectsCustomCodec(t *testing.T) {
+	type bad struct {
+		Codec customCodec `json:"codec"`
+	}
+	if _, err := llm.NewStructuredOutput[bad](); err == nil || !strings.Contains(err.Error(), "codec") {
+		t.Fatalf("err = %v", err)
+	}
+	// json.RawMessage 字段同样是自定义编解码，推导 schema 与解码不一致。
+	type raw struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if _, err := llm.NewStructuredOutput[raw](); err == nil {
+		t.Fatal("json.RawMessage field accepted")
+	}
+}
+
+func TestStructuredOutputNestedStrict(t *testing.T) {
+	output, err := llm.NewStructuredOutput[nestedAnswer]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 嵌套对象缺 required 字段拒绝。
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"title":"t","detail":{}}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// 嵌套对象多余字段拒绝。
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"title":"t","detail":{"score":1.5,"x":0}}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	value, err := output.Decode([]schema.Message{assistantOf(`{"title":"t","detail":{"score":1.5}}`)})
+	if err != nil || value.Detail.Score != 1.5 {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+}
+
+func TestStructuredOutputMessageSelection(t *testing.T) {
+	output := newDecisionOutput(t)
+	good := `{"approved":true,"reason":"ok"}`
+
+	// 没有 assistant 消息。
+	if _, err := output.Decode([]schema.Message{schema.UserMessage("q")}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// 最后一条 assistant 带工具调用：不回退到更早的回答。
+	messages := []schema.Message{
+		assistantOf(good),
+		schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("c1", "search", `{"q":"x"}`)),
+	}
+	if _, err := output.Decode(messages); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// 只有 reasoning 没有文本。
+	reasoningOnly := schema.NewMessage(schema.RoleAssistant, schema.NewReasoningBlock("think", ""))
+	if _, err := output.Decode([]schema.Message{reasoningOnly}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// reasoning + text 正常解码：reasoning 不阻塞。
+	mixed := schema.NewMessage(schema.RoleAssistant,
+		schema.NewReasoningBlock("think", ""), schema.NewTextBlock(good))
+	if value, err := output.Decode([]schema.Message{mixed}); err != nil || !value.Approved {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+	// 拒绝回答。
+	refusal := assistantOf("")
+	refusal.Extra = map[string]any{"llm.refusal": "cannot comply"}
+	if _, err := output.Decode([]schema.Message{refusal}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+	// 截断与内容过滤。
+	for _, reason := range []string{"length", "content_filter"} {
+		truncated := assistantOf(`{"approved":true,"reason":"ok"}`)
+		truncated.ResponseMeta = &schema.ResponseMeta{FinishReason: reason}
+		if _, err := output.Decode([]schema.Message{truncated}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+			t.Fatalf("finish_reason=%s err = %v", reason, err)
+		}
+	}
+	// 无 ResponseMeta 的消息仍按文本校验。
+	if value, err := output.Decode([]schema.Message{assistantOf(good)}); err != nil || !value.Approved {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+}
+
+func TestStructuredOutputFormat(t *testing.T) {
+	output, err := llm.NewStructuredOutput[decision](
+		llm.WithOutputName("decision"), llm.WithOutputDescription("审批结论"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	format := output.Format()
+	if format.Name != "decision" || format.Description != "审批结论" || !format.Strict {
+		t.Fatalf("format = %#v", format)
+	}
+	// 返回值是独立副本。
+	format.Name = "mutated"
+	format.Schema[0] = ' '
+	again := output.Format()
+	if again.Name != "decision" || string(again.Schema) == string(format.Schema) {
+		t.Fatalf("format not isolated: %#v", again)
+	}
+	// schema 包含严格约束。
+	var doc map[string]any
+	if err := json.Unmarshal(again.Schema, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["additionalProperties"] != false {
+		t.Fatalf("schema = %v", doc)
+	}
+	required, _ := doc["required"].([]any)
+	if len(required) != 2 {
+		t.Fatalf("required = %v", required)
+	}
+}
+
+func TestStructuredOutputNameRules(t *testing.T) {
+	// 默认名称由类型名推导。
+	output := newDecisionOutput(t)
+	if output.Format().Name != "decision" {
+		t.Fatalf("name = %q", output.Format().Name)
+	}
+	// 非法显式名称构造期报错。
+	for _, bad := range []string{"has space", "中文", "", strings.Repeat("a", 65)} {
+		if _, err := llm.NewStructuredOutput[decision](llm.WithOutputName(bad)); err == nil {
+			t.Fatalf("name %q accepted", bad)
+		}
+	}
+	if _, err := llm.NewStructuredOutput[decision](llm.WithOutputName("ok-name_1")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStructuredOutputConcurrentReuse(t *testing.T) {
+	output := newDecisionOutput(t)
+	var group sync.WaitGroup
+	for index := 0; index < 16; index++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			if _, err := output.Decode([]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)}); err != nil {
+				t.Error(err)
+			}
+			if _, err := output.Decode([]schema.Message{assistantOf(`{"broken":true}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+				t.Errorf("err = %v", err)
+			}
+			_ = output.Format()
+		}()
+	}
+	group.Wait()
+}
+
+func TestStructuredOutputInvokeRejectsOptions(t *testing.T) {
+	output := newDecisionOutput(t)
+	if _, err := output.Invoke(context.Background(),
+		[]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)},
+		llm.WithDeltaStream(true)); err == nil {
+		t.Fatal("options accepted")
+	}
+	if len(output.OptionTypes()) != 0 {
+		t.Fatal("OptionTypes should be empty")
+	}
+}
+
+func TestStructuredOutputStreamDeliversOnce(t *testing.T) {
+	output := newDecisionOutput(t)
+	reader, err := output.Stream(context.Background(), []schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := reader.Recv()
+	if err != nil || !value.Approved {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+	if _, err := reader.Recv(); err != io.EOF {
+		t.Fatalf("second recv err = %v", err)
+	}
+	// 失败路径交付错误。
+	bad, err := output.Stream(context.Background(), []schema.Message{assistantOf(`{"x":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.Recv(); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputCollectWaitsForStreamEnd(t *testing.T) {
+	output := newDecisionOutput(t)
+	reader, writer := runnable.Pipe[[]schema.Message](context.Background())
+	go func() {
+		_ = writer.Send([]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)})
+		_ = writer.Close()
+	}()
+	value, err := output.Collect(context.Background(), reader)
+	if err != nil || !value.Approved {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+}
+
+func TestStructuredOutputCollectPropagatesTailError(t *testing.T) {
+	output := newDecisionOutput(t)
+	tail := errors.New("upstream tail error")
+	reader, writer := runnable.Pipe[[]schema.Message](context.Background())
+	go func() {
+		_ = writer.Send([]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)})
+		_ = writer.CloseWithError(tail)
+	}()
+	if _, err := output.Collect(context.Background(), reader); !errors.Is(err, tail) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputTransformSemantics(t *testing.T) {
+	output := newDecisionOutput(t)
+	// 正常路径：输入结束后交付一次 T。
+	input, writer := runnable.Pipe[[]schema.Message](context.Background())
+	reader, err := output.Transform(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = writer.Send([]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)})
+		_ = writer.Close()
+	}()
+	value, err := reader.Recv()
+	if err != nil || !value.Approved {
+		t.Fatalf("value = %#v, err = %v", value, err)
+	}
+	if _, err := reader.Recv(); err != io.EOF {
+		t.Fatalf("err = %v", err)
+	}
+
+	// 输入尾部错误不被吞掉。
+	input2, writer2 := runnable.Pipe[[]schema.Message](context.Background())
+	reader2, err := output.Transform(context.Background(), input2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := errors.New("tail")
+	go func() {
+		_ = writer2.Send([]schema.Message{assistantOf(`{"approved":true,"reason":"ok"}`)})
+		_ = writer2.CloseWithError(tail)
+	}()
+	if _, err := reader2.Recv(); !errors.Is(err, tail) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStructuredOutputTransformCloseReleasesUpstream(t *testing.T) {
+	output := newDecisionOutput(t)
+	input, writer := runnable.Pipe[[]schema.Message](context.Background())
+	reader, err := output.Transform(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 上游还未产出即关闭输出读者：上游写入应被取消而不是永久阻塞。
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- writer.Send([]schema.Message{assistantOf(`{}`)}) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream not released after reader close")
+	}
+}

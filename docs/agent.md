@@ -112,5 +112,8 @@ out, err := parent.Invoke(ctx, messages, agent.WithCheckpoint(store, "conversati
 
 - [核心概念](concepts.md)
 - [工具运行时](tool-runtime.md)
+- [结构化输出](structured-output.md)：模型 Option 经 Agent 现有分发到达模型；
+  推荐显式组成「业务 Agent → 整理模型 → decode」，多一次模型调用但格式化
+  失败不会重新调用业务工具
 - [检查点与中断](checkpoints-interrupts.md)
 - [Cookbook](cookbook.md)

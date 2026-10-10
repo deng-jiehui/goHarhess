@@ -102,7 +102,7 @@ func TestOpenAICompatibleNonStreamingAndCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities := model.Capabilities()
-	if !capabilities.Streaming || !capabilities.ToolCalls || !capabilities.JSONSchema {
+	if !capabilities.Streaming || !capabilities.ToolCalls || capabilities.JSONSchema {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
 	response, err := model.Invoke(context.Background(), llm.Request{})

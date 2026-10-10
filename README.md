@@ -69,7 +69,7 @@ agent：agent.New(model, opts...) 在同一引擎上装配 ReAct 图
 - [工具](docs/tool-runtime.md) · [模型](docs/llm-providers.md) · [上下文](docs/context-management.md)
 - [观测](docs/observability.md) · [流式输出](docs/public-stream.md)
 - [检查点与中断](docs/checkpoints-interrupts.md) · [并行与分支](docs/graph-branches.md)
-- [扩展](docs/extensions.md) · [Cookbook](docs/cookbook.md)
+- [结构化输出](docs/structured-output.md) · [扩展](docs/extensions.md) · [Cookbook](docs/cookbook.md)
 - [设计取舍](docs/设计取舍.md)：砍掉/外移的能力与理由；`pre-slim` tag 保留完整版
 - 过程文档：[docs/design/archive/](docs/design/archive)；面试与学习材料：[docs/showcase/](docs/showcase)
 

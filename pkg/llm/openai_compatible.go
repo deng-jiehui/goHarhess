@@ -74,7 +74,7 @@ func openAICompatibleFactory(defaultBaseURL string, reasoning bool) Factory {
 		if baseURL == "" {
 			baseURL = defaultBaseURL
 		}
-		return NewOpenAICompatibleModel(OpenAICompatibleConfig{
+		return newOpenAICompatibleModel(OpenAICompatibleConfig{
 			Model:                   cfg.Model,
 			BaseURL:                 baseURL,
 			APIKey:                  cfg.APIKey,
@@ -83,13 +83,24 @@ func openAICompatibleFactory(defaultBaseURL string, reasoning bool) Factory {
 			Headers:                 rawHeaders(cfg.Raw),
 			IncludeReasoningContent: reasoning || rawBool(cfg.Raw, "include_reasoning_content"),
 			MaxResponseBytes:        rawInt64(cfg.Raw, "max_response_bytes"),
-		})
+		}, cfg.Capabilities)
 	}
 }
 
 // NewOpenAICompatibleModel creates a model using a reusable HTTP client. A
 // nil client receives the framework's pooled default client.
+// 零值 Capabilities 采用默认声明（JSONSchema 默认关闭）；需要显式全 false
+// 时经 llm.Config.Capabilities 指针传入。
 func NewOpenAICompatibleModel(cfg OpenAICompatibleConfig) (*OpenAICompatibleModel, error) {
+	if cfg.Capabilities != (Capabilities{}) {
+		return newOpenAICompatibleModel(cfg, &cfg.Capabilities)
+	}
+	return newOpenAICompatibleModel(cfg, nil)
+}
+
+// newOpenAICompatibleModel 区分「未声明」与「显式声明」：declared 为 nil 时
+// 采用默认能力，非 nil 时按内容原样使用（包括全 false）。
+func newOpenAICompatibleModel(cfg OpenAICompatibleConfig, declared *Capabilities) (*OpenAICompatibleModel, error) {
 	model := strings.TrimSpace(cfg.Model)
 	if model == "" {
 		return nil, errors.New("OpenAI-compatible model requires a model name")
@@ -98,14 +109,14 @@ func NewOpenAICompatibleModel(cfg OpenAICompatibleConfig) (*OpenAICompatibleMode
 	if err != nil {
 		return nil, err
 	}
-	capabilities := cfg.Capabilities
-	if capabilities == (Capabilities{}) {
-		capabilities = Capabilities{
-			Streaming:  true,
-			ToolCalls:  true,
-			JSONSchema: true,
-			Reasoning:  cfg.IncludeReasoningContent,
-		}
+	capabilities := Capabilities{
+		Streaming:  true,
+		ToolCalls:  true,
+		JSONSchema: false,
+		Reasoning:  cfg.IncludeReasoningContent,
+	}
+	if declared != nil {
+		capabilities = *declared
 	}
 	maxResponseBytes := cfg.MaxResponseBytes
 	if maxResponseBytes <= 0 {
@@ -164,6 +175,9 @@ func (m *OpenAICompatibleModel) request(ctx context.Context, input Request, opts
 	}
 	if len(input.Functions) > 0 && !m.capabilities.ToolCalls {
 		return nil, errors.New("OpenAI-compatible model does not support tool calls")
+	}
+	if opts.ResponseFormat != nil && !m.capabilities.JSONSchema {
+		return nil, fmt.Errorf("model %q: %w (JSONSchema capability not declared)", m.model, ErrResponseFormatUnsupported)
 	}
 
 	payload, err := m.requestPayload(input.Messages, input.Functions, opts, streaming)
@@ -258,8 +272,15 @@ func (m *OpenAICompatibleModel) Transform(ctx context.Context, input *runnable.S
 
 func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functions []schema.FunctionDefinition, opts Options, streaming bool) (map[string]any, error) {
 	payload := map[string]any{}
-	for key, value := range MergeGenerateConfig(m.generateConfig, opts.ExtraGenerateConfig) {
+	merged := MergeGenerateConfig(m.generateConfig, opts.ExtraGenerateConfig)
+	if opts.ResponseFormat != nil && merged["response_format"] != nil {
+		return nil, ErrResponseFormatConflict
+	}
+	for key, value := range merged {
 		payload[key] = value
+	}
+	if opts.ResponseFormat != nil {
+		payload["response_format"] = encodeResponseFormat(*opts.ResponseFormat)
 	}
 	payload["model"] = m.model
 	encodedMessages, err := encodeOpenAIMessages(messages, m.includeReasoningContent)
@@ -369,6 +390,7 @@ type openAIMessage struct {
 	Reasoning        json.RawMessage     `json:"reasoning"`
 	Thinking         json.RawMessage     `json:"thinking"`
 	Thought          json.RawMessage     `json:"thought"`
+	Refusal          json.RawMessage     `json:"refusal"`
 	Name             string              `json:"name"`
 	FunctionCall     *openAIFunctionCall `json:"function_call,omitempty"`
 	ToolCalls        []openAIToolCall    `json:"tool_calls,omitempty"`
@@ -470,11 +492,20 @@ func openAIMessageToSchema(value openAIMessage, indexed bool) ([]schema.Message,
 		}
 	}
 	base := schema.NewMessage(role, blocks...)
+	if refusal := flexibleText(value.Refusal); refusal != "" {
+		if base.Extra == nil {
+			base.Extra = map[string]any{}
+		}
+		base.Extra["llm.refusal"] = refusal
+	}
 	if indexed && contentArray {
 		if value.FunctionCall != nil || len(value.ToolCalls) > 0 {
 			return nil, errors.New("stream delta content array cannot be combined with function_call or tool_calls")
 		}
-		base.Extra = map[string]any{openAIAppendBlocksExtraKey: len(blocks)}
+		if base.Extra == nil {
+			base.Extra = map[string]any{}
+		}
+		base.Extra[openAIAppendBlocksExtraKey] = len(blocks)
 	}
 
 	if value.FunctionCall != nil {
@@ -625,6 +656,23 @@ func decodeUsage(value *openAIUsage) *Usage {
 		ReasoningTokens:  value.CompletionTokenDetails.ReasoningTokens,
 		CacheReadTokens:  value.PromptTokenDetails.CachedTokens,
 		CacheWriteTokens: value.PromptTokenDetails.CacheWriteTokens,
+	}
+}
+
+// encodeResponseFormat 把类型化输出格式编码为 OpenAI-compatible
+// response_format 请求字段。
+func encodeResponseFormat(format ResponseFormat) map[string]any {
+	schemaField := map[string]any{
+		"name":   format.Name,
+		"strict": format.Strict,
+		"schema": format.Schema,
+	}
+	if format.Description != "" {
+		schemaField["description"] = format.Description
+	}
+	return map[string]any{
+		"type":        "json_schema",
+		"json_schema": schemaField,
 	}
 }
 

@@ -12,15 +12,16 @@ import (
 
 // 各示例输出中必须出现的片段，断言表与《轻量化改良方案》阶段零一致。
 var wantOutput = map[string][]string{
-	"basic":       {"tool call finished"},
-	"graph":       {"research completed", "review completed"},
-	"stream":      {`"kind":"result"`},
-	"branches":    {"news: ", "papers: ", "download: "},
-	"dispatch":    {"done:alpha"},
-	"interaction": {"Hello, Ada"},
-	"routing":     {"routing done"},
-	"groupchat":   {"analyst:", "critic:"},
-	"react":       {"sunny, 24C"},
+	"basic":             {"tool call finished"},
+	"graph":             {"research completed", "review completed"},
+	"stream":            {`"kind":"result"`},
+	"branches":          {"news: ", "papers: ", "download: "},
+	"dispatch":          {"done:alpha"},
+	"interaction":       {"Hello, Ada"},
+	"routing":           {"routing done"},
+	"groupchat":         {"analyst:", "critic:"},
+	"react":             {"sunny, 24C"},
+	"structured-output": {"one-shot: approved=false", "pipeline: approved=false", "fixture verified"},
 }
 
 // TestExamples 逐个 go run 各示例，要求 2 分钟内退出码为 0 且输出包含预期片段。

@@ -106,7 +106,9 @@ Provider 将私有线路事件归约为一个完整的 `llm.Response`，通过 `
 
 ## 能力
 
-每个 `llm.ChatModel` 都通过 `Capabilities()` 声明对流式、工具调用、视觉、JSON-schema 和推理的支持。
+每个 `llm.ChatModel` 都通过 `Capabilities()` 声明对流式、工具调用、视觉、JSON-schema 和推理的支持。`llm.Config.Capabilities *Capabilities` 为 nil 时采用 Provider 默认，非 nil 使用完整内容（包括显式全 false），框架不按模型名猜测。
+
+注意：OpenAI-compatible 族未显式声明能力时保留 Streaming/ToolCalls 默认，但 `JSONSchema` 默认为 **false**。`llm.WithResponseFormat` 下发的类型化输出格式只在声明该能力的端点上启用，未声明返回 `llm.ErrResponseFormatUnsupported`，与 `GenerateConfig["response_format"]` 冲突时返回 `llm.ErrResponseFormatConflict`——两者都在发 HTTP 请求之前报错。详见[结构化输出](structured-output.md)。
 
 ## 可选重试
 

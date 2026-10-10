@@ -136,7 +136,10 @@ $expectedScenarios = @{
         'BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=10',
         'BenchmarkGHFull/MemoryStore/list_latest/history=100/limit=100',
         'BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=10',
-        'BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100'
+        'BenchmarkGHFull/MemoryStore/list_latest/history=1000/limit=100',
+        'BenchmarkGHFull/StructuredOutput/construct',
+        'BenchmarkGHFull/StructuredOutput/decode/fields=3',
+        'BenchmarkGHFull/StructuredOutput/decode/fields=9_children=16'
     )
     Stress = @(
         'BenchmarkGHStress/MessageClone/messages=1/media_bytes=1048576',

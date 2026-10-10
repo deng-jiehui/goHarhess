@@ -12,6 +12,10 @@ import (
 type Options struct {
 	DeltaStream         bool
 	ExtraGenerateConfig GenerateConfig
+	// ResponseFormat 是本次调用的类型化输出格式；nil 表示普通消息输出。
+	// 与 ExtraGenerateConfig["response_format"] 同时配置属于冲突，Provider
+	// 在发送请求前返回 ErrResponseFormatConflict。
+	ResponseFormat *ResponseFormat
 }
 
 // optionTypesProvider 是可选的组件描述接口：模型与包装器声明自己额外

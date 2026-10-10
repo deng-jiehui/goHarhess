@@ -2,6 +2,7 @@ package llm_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -602,5 +603,58 @@ func waitForShared(t *testing.T, model *cachellm.CachedModel, want uint64) {
 	}
 	if model.Stats().Shared != want {
 		t.Fatalf("shared=%d, want %d", model.Stats().Shared, want)
+	}
+}
+
+// ResponseFormat 进入缓存身份：同一份 Schema/名称/Strict 命中，任一变化
+// 产生不同键；调用方修改格式副本不污染已冻结的键。
+func TestCachedModelResponseFormatIdentity(t *testing.T) {
+	upstream := &testModel{response: response("answer")}
+	cached := newMemoryCachedModel(t, upstream, cachellm.CacheConfig{ModelID: "fmt"})
+	format := func(name, schemaJSON string, strict bool) *llm.ResponseFormat {
+		return &llm.ResponseFormat{Name: name, Schema: json.RawMessage(schemaJSON), Strict: strict}
+	}
+	schemaA := `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}`
+	schemaB := `{"type":"object","properties":{"b":{"type":"string"}},"required":["b"],"additionalProperties":false}`
+	for index, item := range []struct {
+		format    *llm.ResponseFormat
+		wantCalls int
+	}{
+		{format("d", schemaA, true), 1},  // 首次未命中
+		{format("d", schemaA, true), 1},  // 同格式命中
+		{format("d", schemaB, true), 2},  // Schema 不同不命中
+		{format("e", schemaA, true), 3},  // 名称不同不命中
+		{format("d", schemaA, false), 4}, // Strict 不同不命中
+		{format("d", schemaA, true), 4},  // 回到首组仍命中（不新增调用）
+	} {
+		if _, err := cached.Invoke(context.Background(), request("same"),
+			llm.WithResponseFormat(item.format)); err != nil {
+			t.Fatalf("case %d err=%v", index, err)
+		}
+		if upstream.Calls() != item.wantCalls {
+			t.Fatalf("case %d calls=%d, want %d", index, upstream.Calls(), item.wantCalls)
+		}
+	}
+	// 选项应用后修改调用方的格式副本：已冻结身份不变，仍命中第一组。
+	mutable := format("d", schemaA, true)
+	if _, err := cached.Invoke(context.Background(), request("same"),
+		llm.WithResponseFormat(mutable)); err != nil {
+		t.Fatal(err)
+	}
+	mutable.Name = "mutated"
+	mutable.Schema[0] = ' '
+	if _, err := cached.Invoke(context.Background(), request("same"),
+		llm.WithResponseFormat(format("d", schemaA, true))); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.Calls() != 4 {
+		t.Fatalf("calls=%d, want 4 (cached identity unaffected by caller mutation)", upstream.Calls())
+	}
+	// 清除类型化格式的调用使用另一条身份，不命中带格式组。
+	if _, err := cached.Invoke(context.Background(), request("same")); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.Calls() != 5 {
+		t.Fatalf("calls=%d, want 5 (plain request is a distinct identity)", upstream.Calls())
 	}
 }

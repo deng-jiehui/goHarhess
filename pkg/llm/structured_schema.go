@@ -1,0 +1,191 @@
+package llm
+
+import (
+	"encoding"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
+)
+
+// compiledSchema 是构造期产物：规范化后的 Schema 字节与编译好的校验器。
+// 一份 Schema 同时用于 ResponseFormat（发给模型）与本地校验，保证两侧一致。
+type compiledSchema struct {
+	raw      json.RawMessage
+	resolved *jsonschema.Resolved
+}
+
+var (
+	jsonMarshalerType    = reflect.TypeFor[json.Marshaler]()
+	jsonUnmarshalerType  = reflect.TypeFor[json.Unmarshaler]()
+	textMarshalerType    = reflect.TypeFor[encoding.TextMarshaler]()
+	textUnmarshalerType  = reflect.TypeFor[encoding.TextUnmarshaler]()
+	stdlibSchemaTypes    = map[reflect.Type]bool{}
+	errStructuredNilType = errors.New("structured output type is nil")
+)
+
+func init() {
+	// 与 jsonschema-go initialSchemaMap 对齐：这些标准库类型实现了自定义
+	// 编解码，但库推导出的 Schema 与解码行为一致，可以保留。
+	for _, t := range []reflect.Type{
+		reflect.TypeFor[time.Time](),
+		reflect.TypeFor[slog.Level](),
+		reflect.TypeFor[big.Int](),
+		reflect.TypeFor[big.Rat](),
+		reflect.TypeFor[big.Float](),
+	} {
+		stdlibSchemaTypes[t] = true
+	}
+}
+
+// compileStructuredSchema 为目标类型推导严格模式的 JSON Schema 并在构造期
+// 编译校验器。T 必须是结构体；规范化为：对象禁止额外字段、所有导出字段
+// required、omitempty/omitzero 只允许指针字段（保持 required 但允许 null）、
+// 推导与 JSON 解码行为不一致的自定义编解码类型被拒绝。
+func compileStructuredSchema(t reflect.Type) (*compiledSchema, error) {
+	if t == nil {
+		return nil, errStructuredNilType
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("structured output type %s must be a struct", t)
+	}
+	schemaObj, err := jsonschema.ForType(t, nil)
+	if err != nil {
+		return nil, fmt.Errorf("derive schema for %s: %w", t, err)
+	}
+	if err := normalizeStrict(t, schemaObj, t.Name()); err != nil {
+		return nil, err
+	}
+	raw, err := schemaObj.MarshalJSON()
+	if err != nil {
+		return nil, fmt.Errorf("marshal schema for %s: %w", t, err)
+	}
+	resolved, err := schemaObj.Resolve(nil)
+	if err != nil {
+		return nil, fmt.Errorf("resolve schema for %s: %w", t, err)
+	}
+	return &compiledSchema{raw: raw, resolved: resolved}, nil
+}
+
+// normalizeStrict 沿 Go 类型与 Schema 并行下钻，把 strict 规则应用到每个
+// 嵌套对象：所有导出字段进入 required，额外字段已由推导禁止。
+func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if s == nil {
+		return fmt.Errorf("field %s: type %s has no derived schema", path, t)
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		for _, field := range reflect.VisibleFields(t) {
+			// 匿名内嵌字段自身不对应独立属性；其提升字段由 VisibleFields
+			// 以各自名字返回，与推导逻辑一致。
+			if field.Anonymous {
+				continue
+			}
+			info := jsonFieldInfo(field)
+			if info.omit {
+				continue
+			}
+			fieldPath := path + "." + info.name
+			fieldType := field.Type
+			for fieldType.Kind() == reflect.Pointer {
+				fieldType = fieldType.Elem()
+			}
+			if err := rejectCustomCodec(fieldPath, fieldType); err != nil {
+				return err
+			}
+			optional := info.settings["omitempty"] || info.settings["omitzero"]
+			if optional && field.Type.Kind() != reflect.Pointer {
+				return fmt.Errorf("field %s: omitempty/omitzero requires a pointer field; "+
+					"make it *%s or remove the tag", fieldPath, fieldType)
+			}
+			prop := s.Properties[info.name]
+			if prop == nil {
+				return fmt.Errorf("field %s: derived schema lacks property %q", fieldPath, info.name)
+			}
+			if !containsString(s.Required, info.name) {
+				s.Required = append(s.Required, info.name)
+			}
+			if err := normalizeStrict(field.Type, prop, fieldPath); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		return normalizeStrict(t.Elem(), s.Items, path+"[]")
+	case reflect.Map:
+		if s.AdditionalProperties != nil {
+			return normalizeStrict(t.Elem(), s.AdditionalProperties, path+"{}")
+		}
+	}
+	return nil
+}
+
+// rejectCustomCodec 拒绝推导结果与 encoding/json 实际编解码不一致的类型：
+// 自定义 Marshaler/Unmarshaler/TextMarshaler/TextUnmarshaler 会改变线路
+// 形态，推导出的 Schema 无法准确描述。
+func rejectCustomCodec(path string, t reflect.Type) error {
+	if stdlibSchemaTypes[t] {
+		return nil
+	}
+	if t.Kind() == reflect.Interface {
+		// any 等接口类型推导为不限制约束的 Schema，与解码行为一致。
+		return nil
+	}
+	pt := reflect.PointerTo(t)
+	if t.Implements(jsonMarshalerType) || pt.Implements(jsonMarshalerType) ||
+		t.Implements(jsonUnmarshalerType) || pt.Implements(jsonUnmarshalerType) ||
+		t.Implements(textMarshalerType) || pt.Implements(textMarshalerType) ||
+		t.Implements(textUnmarshalerType) || pt.Implements(textUnmarshalerType) {
+		return fmt.Errorf("field %s: type %s uses custom JSON encoding that the schema cannot describe; "+
+			"convert it to a plain field type", path, t)
+	}
+	return nil
+}
+
+// jsonInfo 描述 encoding/json 对结构体字段的处理方式（名字与省略设置），
+// 与 jsonschema-go 内部实现保持同一规则。
+type jsonInfo struct {
+	omit     bool
+	name     string
+	settings map[string]bool
+}
+
+func jsonFieldInfo(f reflect.StructField) jsonInfo {
+	if !f.IsExported() {
+		return jsonInfo{omit: true}
+	}
+	info := jsonInfo{name: f.Name}
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		name, rest, found := strings.Cut(tag, ",")
+		if name == "-" && !found {
+			return jsonInfo{omit: true}
+		}
+		if name != "" {
+			info.name = name
+		}
+		if rest != "" {
+			info.settings = map[string]bool{}
+			for _, s := range strings.Split(rest, ",") {
+				info.settings[s] = true
+			}
+		}
+	}
+	return info
+}
+
+func containsString(list []string, name string) bool {
+	for _, item := range list {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}

@@ -17,6 +17,7 @@
 | 交互中断与恢复输入 | `examples/interaction` |
 | 公共流消费 | `examples/stream` |
 | 观测调用树 | `examples/observe` |
+| 结构化输出（单次 + Agent 后整理节点） | `examples/structured-output` |
 | 子 Agent（extensions 模块） | `extensions/examples/subagent` |
 
 ## 用底层节点显式构建 Agent 图
@@ -158,3 +159,25 @@ function call，PostHandler 写回消息；ToolsNode 只执行消息尾部的新
 - 工具批次审批：`agent.WithBeforeToolBatch` + `control.RequestInterrupt`，
   见[检查点与中断](checkpoints-interrupts.md#交互中断与输入恢复)与 `examples/basic`。
 - 图内动态交互：`graph.Interrupt` + `WithResume`，见 `examples/interaction`。
+
+## 结构化输出
+
+让模型输出经严格 JSON Schema 校验解码为 Go 结构体，可直接挂成图节点：
+
+```go
+output, err := llm.NewStructuredOutput[Decision](llm.WithOutputName("decision"))
+if err != nil {
+    return err
+}
+messages, err := assistant.Invoke(ctx, input, llm.WithResponseFormat(output.Format()))
+if err != nil {
+    return err
+}
+decision, err := output.Decode(messages) // 校验失败返回 ErrInvalidStructuredOutput
+```
+
+`omitempty` 只允许指针字段（仍 required 但允许 null）；`ResponseFormat` 与
+`GenerateConfig["response_format"]` 冲突在发请求前报错；默认能力声明中
+`JSONSchema=false`，需要时显式 `llm.Config.Capabilities`。带工具 Agent 的完整
+图接线（业务 Agent → 整理模型 → decode，多一次模型调用但不重跑业务工具）见
+`examples/structured-output` 与[结构化输出](structured-output.md)。

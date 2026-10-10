@@ -43,7 +43,7 @@ if ($Redis) {
     $workDir = $repoRoot
     $goArgs = @('test', '-p=1',
         './pkg/schema', './pkg/contextengine', './pkg/tool',
-        './pkg/graph', './pkg/agent', './pkg/state',
+        './pkg/graph', './pkg/agent', './pkg/state', './pkg/llm',
         '-run', '^$', '-bench', $benchPattern, '-benchmem',
         "-benchtime=$Benchtime", "-count=$Count", "-cpu=$Cpu")
 }

@@ -21,7 +21,10 @@ type Config struct {
 	// A nil value makes a provider create its package default client.
 	HTTPClient     *http.Client
 	GenerateConfig GenerateConfig
-	Raw            map[string]any
+	// Capabilities 显式声明模型端点能力：nil 采用 Provider 默认，非 nil
+	// 使用其完整内容（包括显式全 false，不回落为默认）。不根据模型名猜测。
+	Capabilities *Capabilities
+	Raw          map[string]any
 }
 
 // Request is the provider-neutral model invocation envelope carrying only
@@ -41,6 +44,10 @@ func (r Request) Clone() Request {
 // Clone 返回配置的独立副本，防止调用方在解析后修改共享 map。
 func (o Options) Clone() Options {
 	o.ExtraGenerateConfig = GenerateConfig(cloneAnyMap(o.ExtraGenerateConfig))
+	if o.ResponseFormat != nil {
+		cloned := o.ResponseFormat.Clone()
+		o.ResponseFormat = &cloned
+	}
 	return o
 }
 
