@@ -44,7 +44,7 @@ go test ./pkg/agent -run '^$' -bench '^BenchmarkGHFull$/^AgentPersist$/^model_ca
 
 ## 第二轮复核
 
-2026-10-04：原八项实际问题的回归通过，补查确认一项 P1：Redis 前缀缓存失配为零时，把未提交的重试响应当作成功。修改建议见[实施方案第二轮复核](../架构改进实施方案.md#review-1-5-history-v2)。
+2026-10-04：原八项实际问题的回归通过，补查确认一项 P1：Redis 前缀缓存失配为零时，把未提交的重试响应当作成功。修改建议见[实施方案第二轮复核](../design/archive/架构改进实施方案.md#review-1-5-history-v2)。
 
 ### 正确性
 
@@ -83,7 +83,7 @@ State、Graph、Agent、BenchFixture 及 Redis Store 的竞态检测通过，含
 
 ## 第三轮复核
 
-2026-10-04：通过。上轮 Redis 保存确认问题已修复，未发现影响本项验收的新问题；实现与验收结论见[实施方案](../架构改进实施方案.md#review-1-5-history-v3)。
+2026-10-04：通过。上轮 Redis 保存确认问题已修复，未发现影响本项验收的新问题；实现与验收结论见[实施方案](../design/archive/架构改进实施方案.md#review-1-5-history-v3)。
 
 本轮修改仅涉及 Redis 实现与回归测试。重新运行第二轮两份独立复现，跨实例改写、TTL 到期和另一实例删除后的会话重建均通过；作者新增的四项测试也通过，包括非零前缀失配重试。原零前缀分叉、历史裁剪后放弃、不同会话并发保存/删除继续通过，共十个针对性场景。源码见 [原 Redis 复现](../../.bench/results/review-15-v3/reproducers/extensions/state/redis/review_15_storage_test.go) 和 [缓存失效复现](../../.bench/results/review-15-v3/reproducers/extensions/state/redis/review_15_v2_cache_test.go)，输出见 [redis-supplementary.txt](../../.bench/results/review-15-v3/redis-supplementary.txt)。
 

@@ -4,9 +4,9 @@
 
 2.3 上下文裁剪优化已通过独立复核，最新短测见[2.3 性能复核](review-2-3.md)。本文 ContextTrim 表格与热点判断记录优化前的情况，保留为历史参考。
 
-2.1 消息拷贝优化已完成（2026-10-04）。本文 `ReAct`、`AgentPersist`、`SessionGrowth`、`ContextTrim`、`MemoryStore`、`CheckpointCodec` 各行均为优化前代码的 baseline-v2 记录，保留为历史参考；优化后同口径（Go 1.24.4、`cpu=1`、`-benchtime=1s -count=10`）中位对比与原始采样文件见[实施方案 2.1](../架构改进实施方案.md#task-2-1)，主要场景耗时下降约 25%–61%，B/op 与 allocs 约减半。
+2.1 消息拷贝优化已完成（2026-10-04）。本文 `ReAct`、`AgentPersist`、`SessionGrowth`、`ContextTrim`、`MemoryStore`、`CheckpointCodec` 各行均为优化前代码的 baseline-v2 记录，保留为历史参考；优化后同口径（Go 1.24.4、`cpu=1`、`-benchtime=1s -count=10`）中位对比与原始采样文件见[实施方案 2.1](../design/archive/架构改进实施方案.md#task-2-1)，主要场景耗时下降约 25%–61%，B/op 与 allocs 约减半。
 
-**收尾状态（2026-10-04）**：四个流式场景各 10 次、共 40 条原始记录已补齐，摘要已按原文重算。新补采的源码归档经独立恢复、哈希核对与测试通过，详见[流式正式基线](baseline-v3-stream.md)。旧 baseline-v2 补丁仍无法直接恢复，保留为历史参考；后续优化的前后对照通过新脚本另存归档。2.11 本轮收尾完成，记录见[实施方案](../架构改进实施方案.md#completion-2-11-stream)。真实 Redis 组仍未测，按需另行补采。
+**收尾状态（2026-10-04）**：四个流式场景各 10 次、共 40 条原始记录已补齐，摘要已按原文重算。新补采的源码归档经独立恢复、哈希核对与测试通过，详见[流式正式基线](baseline-v3-stream.md)。旧 baseline-v2 补丁仍无法直接恢复，保留为历史参考；后续优化的前后对照通过新脚本另存归档。2.11 本轮收尾完成，记录见[实施方案](../design/archive/架构改进实施方案.md#completion-2-11-stream)。真实 Redis 组仍未测，按需另行补采。
 
 ## 环境
 

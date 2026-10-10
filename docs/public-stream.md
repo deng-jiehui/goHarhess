@@ -1,10 +1,43 @@
-# 公共运行事件流
+# 流式输出
 
 Graph 使用 `compiled.StreamEvents(ctx, input, stream.Config{Buffer: 64}, options...)`。
 Agent 使用 `agent.StreamEvents(ctx, value, messages, stream.Config{Buffer: 64}, options...)`。
 返回 `*stream.Reader[O]`：只公开 `Recv()` 和 `Close()`，内部复用
 `runnable.StreamReader[stream.Event[O]]`，不提供混合事件的 Collect。
 普通调用继续使用 Invoke，节点之间的 Stream/Collect/Transform 契约保持不变。
+
+Agent 的 `Stream` 返回 `*runnable.StreamReader[[]schema.Message]`，数据面只包含 END 节点的
+最终结果。LLM 增量和 Agent 中间状态经 `pkg/stream` 公共事件流发布，因此不会污染 Graph 的
+输出类型；`agent.StreamEvents` 一行接入：
+
+```go
+events, err := agent.StreamEvents(ctx, assistant, []schema.Message{
+    schema.NewMessage(schema.RoleUser, schema.NewTextBlock("总结这份材料。")),
+}, stream.Config{}, agent.WithDeltaStream(true))
+if err != nil {
+    return err
+}
+defer events.Close()
+for {
+    event, err := events.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        return err
+    }
+    switch event.Kind {
+    case stream.KindMessage:
+        pushModelChunk(ctx, event.Message)
+    case stream.KindResult:
+        output = *event.Result
+    }
+}
+```
+
+服务端将请求 `Context` 透传到模型、Graph 节点、工具、中间件与 Observer；客户端断开
+或上游超时应取消该 Context。对于输出已开始的流，不要自动重试整条请求，以免重复执行
+工具或重复计费。
 
 ## 四类信息
 

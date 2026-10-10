@@ -48,7 +48,7 @@ checkpoint.Messages = append(checkpoint.Messages, newMessages...)
 saved, err := store.Save(ctx, checkpoint)
 ```
 
-所有 Store 都会克隆消息、Values 和执行数据，调用方修改返回值不会污染已保存状态。`Load` 读取最新记录，`Get` 读取指定检查点，`List` 按新到旧分页，`Delete` 删除会话及其全部历史。每次 `Save` 都增加版本，因此版本不再表示对话轮数。详细契约见 [统一检查点](checkpoints.md)。
+所有 Store 都会克隆消息、Values 和执行数据，调用方修改返回值不会污染已保存状态。`Load` 读取最新记录，`Get` 读取指定检查点，`List` 按新到旧分页，`Delete` 删除会话及其全部历史。每次 `Save` 都增加版本，因此版本不再表示对话轮数。详细契约见 [检查点与中断](checkpoints-interrupts.md)。
 
 ## Graph Interrupt 与 Resume
 

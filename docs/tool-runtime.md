@@ -1,4 +1,39 @@
-# Tool Runtime、Middleware 与 Callback
+# 工具
+
+工具由 `tool.Spec` 描述，并用 `tool.NewFunctionTool` 包装函数。参数必须是 JSON
+Object；空参数会规范化为 `{}`，数组、`null` 和不完整 JSON 会被拒绝。
+
+```go
+echo := tool.NewFunctionTool(tool.Spec{
+    Name:        "echo",
+    Description: "返回 text 参数。",
+    Parameters: map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "text": map[string]any{"type": "string"},
+        },
+        "required": []string{"text"},
+    },
+    IsReadOnly: true,
+}, func(ctx context.Context, input tool.CallInput) (tool.Result, error) {
+    return tool.TextResult(input.Args["text"].(string)), nil
+})
+
+toolsNode, err := tool.NewToolsNode(tool.ToolNodeConfig{
+    Name:           "tools",
+    Tools:          []tool.Tool{echo},
+    MaxConcurrency: 4,
+})
+```
+
+`ToolsNode` 的输入是完整消息历史，但只执行末尾连续的 assistant function-call 消息，
+不会重放历史工具调用；输出是与调用顺序一致的 function-result 消息。调用方把结果追加到
+历史，再进入下一个 ChatModel 节点。多数业务不必手写循环，把相同的工具交给 `agent.New`
+即可让框架自动生成 `llm -> tools -> llm` 图。
+
+`tool.Spec.Concurrency` 控制工具批次和 `ToolsNode` 的并发策略。未声明策略的工具
+默认串行，避免把有副作用的操作无意并行化。对外部写操作应保持
+`IsReadOnly: false`，并只在已验证幂等性和权限边界后配置重试。
 
 goHarness 将会改变业务结果的控制能力与只读观测能力分开：
 
@@ -138,50 +173,12 @@ approval := tool.BeforeBatchFunc(func(ctx context.Context, batch tool.Batch) err
 
 返回 typed interrupt 时整批执行数为零，由外层 Graph 保存检查点。Resume 会重新运行 Hook，审批凭证由应用通过 Context 或自己的存储提供。
 
-## 生命周期观测
+## 生命周期观测与实时事件流
 
 运行期观测统一走 `pkg/observe`：`observe.With` 注册的 Observer 会收到本次运行的全部
-run / node / llm / tool / interrupt / checkpoint 事件（retrieval、MCP 等扩展使用自定义
-`Kind`）。事件携带 Trace（TraceID/RunID/SpanID/ParentSpanID）、耗时、token 用量与少量
-结构化属性；`Attrs` 里有 `graph.node_id`、`graph.step` 等键。
-
-```go
-observer := observe.ObserverFunc(func(_ context.Context, event observe.Event) {
-    switch {
-    case event.Kind == observe.KindNode && event.Phase == observe.PhaseEnd:
-        log.Printf("node=%s step=%v duration=%s", event.Name, event.Attrs["graph.step"], event.Duration)
-    case event.Kind == observe.KindLLM && event.Phase == observe.PhaseEnd:
-        if event.Usage != nil {
-            log.Printf("tokens=%d", event.Usage.TotalTokens)
-        }
-    case event.Kind == observe.KindTool && event.Phase == observe.PhaseError:
-        log.Printf("tool=%s err=%v", event.Name, event.Err)
-    }
-})
-ctx = observe.With(ctx, observer)
-output, err := assistant.Invoke(ctx, input)
-```
-
-Observer 同步直调、按注册顺序运行。Observer 的 panic 会被隔离并记录到 `slog`，不会替换
-Agent、Graph、Model 或 Tool 的业务结果；接口不返回 error，失败重试由接入方自行排队。
-
-Observer 只做快速记录：整理事件、更新计数、写入本地日志或提交到有界队列，远程发送、
-通知等耗时工作交给接入的日志 SDK、告警组件或 `observe.Async` 包装在后台完成。执行期限
-结束会触发返回流程，但实际返回仍要等待同步 Observer 结束——慢 Observer 会拖延 `Execute`
-返回，框架不强制终止用户观测者。放弃告警（`AbandonedError`）以 `Kind==tool`、
-`Phase==error`、`Attrs["tool.abandoned"]==true` 的事件派发，并在调用方 Context 上发射。
-接入组件使用队列时要有容量限制，队列满时明确拒绝或丢弃并计数，不做无界入队——
-`observe.Async(observer, 256, true)` 已内置这一策略并暴露 `Dropped()` 计数。
-
-Graph 为每个节点创建独立子 Span；节点事件的 `Name` 是节点 ID，`Attrs` 携带
-`graph.node_id`、`graph.node_kind`、`graph.step`、输入输出类型名，不依赖通用 metadata 字符串。
-
-## 实时事件流
-
-实时数据不进入观测事件流，而走 `pkg/stream` 公共流（`KindMessage`/`KindActivity`/
-`KindLifecycle`/`KindResult`）。组件用 `stream.PublishMessage`/`PublishSnapshots`/
-`PublishActivity` 发布，Agent/Graph 运行期间自动生效；裸组件可用 `stream.Run` 开启
-作用域，调用方从 `stream.Reader` 逐条 `Recv` 事件。
+run / node / llm / tool / interrupt / checkpoint 事件。工具事件 `Name` 为工具名，
+`Attrs` 携带 `tool.abandoned` 等键。实时数据（消息增量、业务进度、生命周期通知）走
+`pkg/stream` 公共流。完整的接入方式、同步语义与异步包装见[观测](observability.md)。
 
 ## Agent 装配
 

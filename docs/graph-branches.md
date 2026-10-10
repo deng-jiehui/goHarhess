@@ -1,4 +1,14 @@
-# Graph 原生并行分支
+# 并行与分支
+
+Graph 的并行有两套入口，共用同一调度循环与 `SetMaxConcurrency` 并发上限：
+
+- `AddFork`/`AddJoin` 原生分支把扇出与汇合画进拓扑，每轮任务的局部 State 经
+  `SetStepMerger` 合并；适合形状固定的并行查询，见 `examples/branches`。
+- `graph.AddDispatch` 由运行到来源节点时的 State 生成任务清单，成员任务携带
+  冻结输入、持有局部 State，全部收敛后按清单顺序汇合到 join；清单为空直接进入
+  汇合。示例见 `examples/dispatch`。
+
+## 原生并行分支
 
 当一个流程需要同时查两类资料，再等资料齐全后汇总，可以直接把这些步骤画进 Graph。每个步骤仍然是普通节点。
 

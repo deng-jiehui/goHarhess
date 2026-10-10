@@ -1108,7 +1108,7 @@ return nil, fmt.Errorf(
 
 根模块与 extensions 常规全量 `go test`、`go vet` 通过；Subagent、Graph、Agent、State、Control、Tool、Stream 及 Redis Store 的常规竞态检测通过，相关 Go 文件格式检查无输出。常规测试单独排除了 `TestAudit`，所有作者测试均执行；五项原独立检查通过，两项新增补查失败，均保留普通与竞态执行日志。
 
-环境为 Go 1.26.4，GCC 位于 `D:\Program Files\msys64\ucrt64\bin\gcc.exe`，GOCACHE 使用工作区 `.bench/go-cache`。两份临时测试、三十八份实现与作者测试源码快照、SHA256 清单及日志归档于 `.bench/results/review-1-6-subagent-stage3-v2/`，汇总见该目录 [verification.md](../.bench/results/review-1-6-subagent-stage3-v2/verification.md)。源码与快照哈希一致；临时测试按原字节归档、核验后已从 pkg/subagent 清理，审核期间生产代码未修改。
+环境为 Go 1.26.4，GCC 位于 `D:\Program Files\msys64\ucrt64\bin\gcc.exe`，GOCACHE 使用工作区 `.bench/go-cache`。两份临时测试、三十八份实现与作者测试源码快照、SHA256 清单及日志归档于 `.bench/results/review-1-6-subagent-stage3-v2/`，汇总见该目录 [verification.md](../../../.bench/results/review-1-6-subagent-stage3-v2/verification.md)。源码与快照哈希一致；临时测试按原字节归档、核验后已从 pkg/subagent 清理，审核期间生产代码未修改。
 
 阶段 2、2.1 保持已完成。下一步修正本节两项错误处理问题，复核阶段 3 后，再推进阶段 4 并行节点展开与阶段 5 示例文档。
 
@@ -1156,7 +1156,7 @@ return nil, fmt.Errorf(
 
 根模块与 extensions 全量 `go test`、`go vet` 通过；Subagent、Graph、Agent、State、Control、Tool、Stream 及 Redis Store 的常规竞态检测通过，相关 Go 文件格式检查无输出。
 
-环境为 Go 1.26.4，GCC 位于 `D:\Program Files\msys64\ucrt64\bin\gcc.exe`，GOCACHE 使用工作区 `.bench/go-cache`。三份临时测试、三十九份实现与作者测试源码快照、SHA256 清单及日志归档于 `.bench/results/review-1-6-subagent-stage3-v3/`，汇总见该目录 [verification.md](../.bench/results/review-1-6-subagent-stage3-v3/verification.md)。源码与快照哈希一致，临时测试核验后已清理，审核期间生产代码未修改。
+环境为 Go 1.26.4，GCC 位于 `D:\Program Files\msys64\ucrt64\bin\gcc.exe`，GOCACHE 使用工作区 `.bench/go-cache`。三份临时测试、三十九份实现与作者测试源码快照、SHA256 清单及日志归档于 `.bench/results/review-1-6-subagent-stage3-v3/`，汇总见该目录 [verification.md](../../../.bench/results/review-1-6-subagent-stage3-v3/verification.md)。源码与快照哈希一致，临时测试核验后已清理，审核期间生产代码未修改。
 
 阶段 1、2、2.1、3 均已验收。下一步推进阶段 4：展开现有并行包装节点，并完成接口兼容与恢复验收；随后按阶段 5 补齐示例、文档和集成复核。
 
@@ -1268,7 +1268,7 @@ fan → sink → End
 
 根模块与 extensions 全量 `go test`、`go vet` 通过；Graph、Agent、Subagent、State、Control、Tool、Stream 及 Redis Store 常规竞态检测通过。四项独立检查中的两项失败场景在普通执行与竞态检测下均复现，另两项恢复检查在 sync、async 下均通过。相关 Go 文件格式检查无输出。
 
-两份临时测试、六十七份当前源码及作者测试快照、八份展开前源码、真实旧检查点、SHA256 清单和日志归档于 `.bench/results/review-1-6-parallel-stage4/`，详细命令和结果见该目录 [verification.md](../.bench/results/review-1-6-parallel-stage4/verification.md)。源码与快照哈希一致，临时测试核验后已清理，生产代码未修改。
+两份临时测试、六十七份当前源码及作者测试快照、八份展开前源码、真实旧检查点、SHA256 清单和日志归档于 `.bench/results/review-1-6-parallel-stage4/`，详细命令和结果见该目录 [verification.md](../../../.bench/results/review-1-6-parallel-stage4/verification.md)。源码与快照哈希一致，临时测试核验后已清理，生产代码未修改。
 
 阶段 1、2、2.1、3 保持已完成。下一步只需修正本节两项问题并补齐回归，再复核阶段 4；通过后进入阶段 5 的示例、文档与集成验收。
 
@@ -1333,7 +1333,7 @@ fan → sink → End
 
 五项独立检查及七项作者回归在普通执行和竞态检测下全部通过。根模块与 extensions 全量 `go test`、`go vet` 通过；Graph、Agent、Subagent、State、Control、Tool、Stream 及 Redis Store 常规竞态检测通过，相关 Go 文件格式检查无输出。
 
-三份临时测试、六十八份实现及作者测试源码快照、真实旧检查点副本、SHA256 清单及日志归档于 `.bench/results/review-1-6-parallel-stage4-v2/`，完整命令与结果见该目录 [verification.md](../.bench/results/review-1-6-parallel-stage4-v2/verification.md)。源码与快照哈希一致，临时测试核验后已清理，审核期间生产代码未修改。
+三份临时测试、六十八份实现及作者测试源码快照、真实旧检查点副本、SHA256 清单及日志归档于 `.bench/results/review-1-6-parallel-stage4-v2/`，完整命令与结果见该目录 [verification.md](../../../.bench/results/review-1-6-parallel-stage4-v2/verification.md)。源码与快照哈希一致，临时测试核验后已清理，审核期间生产代码未修改。
 
 阶段 1、2、2.1、3、4 均已验收。下一项为阶段 5：补齐动态任务和子 Agent 示例、公开接口文档，并完成集成复核；1.6 扩展整体在阶段 5 验收前仍保持未完成。
 
@@ -1412,7 +1412,7 @@ fan → sink → End
 
 上述常规检查在加入临时补查前完成。针对当时文档承诺的独立检查随后运行：动态输出说明与旧 schema 例外说明在普通执行和竞态检测下均未通过；原生 fork 三轮合并正例通过，没有数据竞争报告。其中旧 schema 检查在本次范围调整后不再用于当前验收。示例通信与取消的缺口由交付范围和实际调用流程核实。
 
-一份临时测试、九十份源码与文档快照、旧包装检查点副本、SHA256 清单和日志归档于 `.bench/results/review-1-6-stage5/`，命令与结果见 [verification.md](../.bench/results/review-1-6-stage5/verification.md)。该归档记录首次审核时的范围。临时测试已核验归档并清理，生产代码与用户原有测试未修改。剩余两项交付补齐后再复核阶段 5，1.6 扩展整体仍保持未完成。
+一份临时测试、九十份源码与文档快照、旧包装检查点副本、SHA256 清单和日志归档于 `.bench/results/review-1-6-stage5/`，命令与结果见 [verification.md](../../../.bench/results/review-1-6-stage5/verification.md)。该归档记录首次审核时的范围。临时测试已核验归档并清理，生产代码与用户原有测试未修改。剩余两项交付补齐后再复核阶段 5，1.6 扩展整体仍保持未完成。
 
 <a id="fix-stage5-v1"></a>
 
@@ -1472,7 +1472,7 @@ fan → sink → End
 
 独立行为检查进一步确认原生 fork 三轮调用三次合并器、原生分支仍保存边输出，以及 `AddParallelNode` 的 State-only 成员可以省略输出。sync、async 的普通执行和竞态检测均通过；检查点拒绝不稳定输出是该核实的预期结果，不是本轮常规测试失败。
 
-九十份源码与文档原始快照、两份独立测试、SHA256 清单和日志归档于 `.bench/results/review-1-6-stage5-v2/`，完整命令与结论见 [verification.md](../.bench/results/review-1-6-stage5-v2/verification.md)。独立测试通过 Go overlay 加入，未在源码包留下临时测试，也未修改生产代码或示例。剩余两处文档补齐后再验收阶段 5；此前已完成阶段的状态保持。
+九十份源码与文档原始快照、两份独立测试、SHA256 清单和日志归档于 `.bench/results/review-1-6-stage5-v2/`，完整命令与结论见 [verification.md](../../../.bench/results/review-1-6-stage5-v2/verification.md)。独立测试通过 Go overlay 加入，未在源码包留下临时测试，也未修改生产代码或示例。剩余两处文档补齐后再验收阶段 5；此前已完成阶段的状态保持。
 
 <a id="fix-stage5-v2"></a>
 
@@ -1498,10 +1498,10 @@ fan → sink → End
 
 ### 44.2 验证范围与证据
 
-本轮对照上轮九十份快照逐项核验，八十一份相关 Go 文件（含示例和作者测试）均未改变，变化仅涉及两份公开文档和实施、审查记录。因此不重复上轮全量测试、静态检查、相关包竞态检测及示例十次竞态运行；这些结果与同一份代码对应，见[第二轮验证记录](../.bench/results/review-1-6-stage5-v2/verification.md)。
+本轮对照上轮九十份快照逐项核验，八十一份相关 Go 文件（含示例和作者测试）均未改变，变化仅涉及两份公开文档和实施、审查记录。因此不重复上轮全量测试、静态检查、相关包竞态检测及示例十次竞态运行；这些结果与同一份代码对应，见[第二轮验证记录](../../../.bench/results/review-1-6-stage5-v2/verification.md)。
 
 本轮重新运行 `go run ./examples/subagent` 与 `go run ./examples/dispatch`，均退出 0。子 Agent 的两次审批恢复、补充消息、`completed` / `cancelled` 状态与手册相符；动态任务按清单顺序输出，空清单示例正常结束。七份相关文档的文件链接核验通过。
 
-九十份原始快照、与上轮的差异清单、SHA256 核验及运行日志归档于 `.bench/results/review-1-6-stage5-v3/`，完整命令与结果见 [verification.md](../.bench/results/review-1-6-stage5-v3/verification.md)。本轮未改生产代码、示例和用户原有测试，也未创建临时包内测试。
+九十份原始快照、与上轮的差异清单、SHA256 核验及运行日志归档于 `.bench/results/review-1-6-stage5-v3/`，完整命令与结果见 [verification.md](../../../.bench/results/review-1-6-stage5-v3/verification.md)。本轮未改生产代码、示例和用户原有测试，也未创建临时包内测试。
 
 阶段 1、2、2.1、3、4、5 均已验收，1.6 动态分派、受管子 Agent、会话内跨轮次复用、模型管理工具、并行节点展开和示例文档的既定范围全部完成。开发期旧检查点迁移按使用者要求不属于本次交付；其余架构任务继续按审查报告排期。
