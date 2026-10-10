@@ -390,7 +390,7 @@ type taskOutcome struct {
 // 各自推进到自己的边界，所有未答问题聚合后统一收敛；业务失败取消其余任务
 // 并返回首个错误。扇出/分派组的成员任务共用此并发入口。
 // slots 是共享并发额度：nil 不限；容量即根运行并发上限——批内任务与
-// 受管协程从同一池子取额度，父子合计并发不超过上限。
+// 命名空间子运行从同一池子取额度，父子合计并发不超过上限。
 func runTaskBatch(ctx context.Context, count int, slots chan struct{}, run func(context.Context, int) taskOutcome) ([]taskOutcome, error) {
 	limit := count
 	if slots != nil && cap(slots) < limit {
@@ -1065,15 +1065,7 @@ func (g *Graph[I, O]) runNativeStep(ctx context.Context, base any, s *StepSchedu
 		taskCtx = context.WithValue(taskCtx, inputSessionKey{}, session)
 		taskCtx = withCallRecorder(taskCtx, session, task.ID)
 		if coord != nil {
-			managedOwner := ""
-			if ms := managedSiteFromContext(taskCtx); ms != nil {
-				managedOwner = ms.managed.ID
-			}
-			recordKey := childPrefixFromContext(taskCtx)
-			if managedOwner != "" {
-				recordKey += "/" + managedOwner
-			}
-			taskCtx = withCallSite(taskCtx, &callSite{coord: coord, frame: frame, taskID: task.ID, step: step + index, owner: managedOwner, recordKey: recordKey})
+			taskCtx = withCallSite(taskCtx, &callSite{coord: coord, frame: frame, taskID: task.ID, step: step + index, recordKey: childPrefixFromContext(taskCtx)})
 		}
 		event := lifecycleEvent{Type: eventNodeStart, NodeID: task.Node, Step: step + index}
 		taskCtx = bindEventContext(taskCtx, event)

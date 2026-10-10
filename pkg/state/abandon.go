@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -59,7 +58,6 @@ func AbandonRun(ctx context.Context, store Store, conversationID string) (Checkp
 	next.Result = nil
 	next.Messages = cloneMessages(base.Messages)
 	next.Values = cloneMap(base.Values)
-	next.SubAgents = append(json.RawMessage(nil), base.SubAgents...)
 	return store.Save(ctx, next)
 }
 

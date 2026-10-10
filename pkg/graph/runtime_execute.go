@@ -252,7 +252,6 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	}
 	// 子调用现场在进入本运行时被消费；本运行内部的子调用由调度循环重新绑定。
 	site := callSiteFromContext(ctx)
-	ms := managedSiteFromContext(ctx)
 	callKey, _ := control.CallKeyFromContext(ctx)
 	ctx = context.WithValue(ctx, callSiteKey{}, (*callSite)(nil))
 	ctx = control.WithoutCallKey(ctx)
@@ -260,14 +259,14 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	ctx = context.WithValue(ctx, inputRunKey{}, &inputRun{nested: parentInputRun != nil || site != nil})
 	// 禁止继承父节点的交互现场。
 	ctx = context.WithValue(ctx, inputSessionKey{}, (*inputSession)(nil))
-	if site != nil || parentInputRun != nil || ms != nil {
+	if site != nil || parentInputRun != nil {
 		// 嵌套运行不得看到父级的 State 视图与快照提供者——业务 State 不跨
 		// 调用边界共享，子图只通过自己的 stateFactory 或恢复进度获取。
 		ctx = withRuntimeState(ctx, nil)
 		ctx = withoutRuntimeStateCheckpointProvider(ctx)
 	}
 
-	// 嵌套/受管运行在调用方工作单元持有额度令牌时先让出：图内节点各自
+	// 嵌套运行在调用方工作单元持有额度令牌时先让出：图内节点各自
 	// 向同一额度池领取，包装层不持额度包围整图；本运行结束后取回令牌，
 	// 外层工作单元恢复记账。根运行没有继承令牌，不受影响。
 	if lease := slotLeaseFromContext(ctx); lease != nil {
@@ -332,112 +331,54 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 			// 旧错误保留在记录中用于诊断，不作为永久结果缓存。
 			site.coord.retryChild(child)
 		}
-		// 子执行持有自己的协调器与独立命名空间记录：并发额度与受管
-		// 构建注册表跟父级共享，会话 Agent 操作经 owner 归集到根，
-		// 单写者语义按各记录分别成立。
+		// 子执行持有自己的协调器与独立命名空间记录：并发额度跟父级
+		// 共享，单写者语义按各记录分别成立。
 		childCoord := &runCoordinator{
-			timeout: site.coord.timeout, runCtx: site.coord.runCtx,
-			builders: site.coord.builders, slots: site.coord.slots,
+			timeout: site.coord.timeout, slots: site.coord.slots,
 			store: site.coord.store, durability: site.coord.durability,
-			owner: site.coord, storeless: site.coord.storeless,
-		}
-		if site.coord.storeless {
-			// 无存储运行：子进度保留在内存槽位中（不落盘），供本轮内
-			// waitManaged 等内存挂起重驱。
-			if child.frame == nil {
-				child.frame = &executionProgress{}
-			}
-			childCoord.root = child.frame
-			setup.checkpoint = checkpointConfig{coord: childCoord, frame: childCoord.root, Timeout: site.coord.timeout}
-			progress = childCoord.root
-		} else {
-			setup.checkpoint = checkpointConfig{
-				Store:   site.coord.store,
-				Key:     child.Key,
-				Timeout: site.coord.timeout,
-				coord:   childCoord,
-				record:  &recordView{},
-			}
-			setup.checkpoint.writer = newCheckpointWriter(setup.checkpoint, site.coord.durability)
-			childCoord.writer = setup.checkpoint.writer
-			childCoord.record = setup.checkpoint.record
-			childCoord.root = &executionProgress{}
-			setup.checkpoint.frame = childCoord.root
-			setup.configured = true
-			// 已有进度的子记录恢复边界；无记录即全新执行——父级崩溃窗口
-			// 中登记的子调用按新执行重放，语义与重试一致。
-			loaded, lerr := g.loadNestedProgress(ctx, setup.checkpoint)
-			if lerr != nil {
-				return zero, lerr
-			}
-			if loaded != nil {
-				prepared, pErr := g.prepareRecoveredFrame(loaded, ErrResumeIncompatible)
-				if pErr != nil {
-					return zero, pErr
-				}
-				if inputs := filterResumeInputs(prepared, resumeInputsFromContext(ctx)); len(inputs) > 0 {
-					if applyErr := applyResumeInputTree(prepared, inputs); applyErr != nil {
-						return zero, applyErr
-					}
-					if saveErr := saveInterruptedCheckpoint(ctx, setup.checkpoint, *prepared); saveErr != nil {
-						return zero, saveErr
-					}
-				}
-				*childCoord.root = *prepared
-				// 受管任务随子记录一并恢复驱动：协程生命周期与登记时一致，
-				// 绑在根运行上下文上，不随本次重驱退出而取消。
-				if err := childCoord.resumeManaged(site.coord.runCtx, childCoord.root); err != nil {
-					return zero, err
-				}
-				progress = childCoord.root
-			} else {
-				setup.checkpoint.record.store(state.Checkpoint{
-					ConversationID: setup.checkpoint.Key,
-					RunID:          state.NewID(),
-					Status:         state.StatusRunning,
-				})
-			}
-		}
-	} else if ms != nil {
-		// 受管子执行：任务记录由 SpawnManaged 登记（含最终配置与冻结
-		// 输入），这里只认领图身份并绑定它的进度槽位；同样不允许独立
-		// 检查点、恢复输入或显式 Resume。
-		if resume {
-			return zero, fmt.Errorf("%w: managed run cannot be resumed directly", ErrResumeIncompatible)
-		}
-		if len(setup.inputs) > 0 {
-			return zero, fmt.Errorf("%w: managed run cannot accept resume inputs", ErrResumeIncompatible)
-		}
-		if setup.configured {
-			return zero, fmt.Errorf("%w: managed run cannot open its own checkpoint", ErrResumeIncompatible)
-		}
-		managed := ms.managed
-		revision, _ := g.recoveryMetadata()
-		if idErr := ms.coord.claimManagedIdentity(managed, g.Name(), revision); idErr != nil {
-			return zero, idErr
-		}
-		if managed.Frame != nil && managed.Frame.GraphName != "" {
-			if _, pErr := g.prepareRecoveredFrame(managed.Frame, ErrResumeIncompatible); pErr != nil {
-				return zero, pErr
-			}
-			if managed.Revision != revision {
-				if pubErr := ms.coord.adoptPreparedManaged(ctx, managed, managed.Frame, revision); pubErr != nil {
-					return zero, pubErr
-				}
-			}
-			progress = managed.Frame
-		} else if managed.Revision != revision {
-			return zero, fmt.Errorf("%w: managed task %s bound to graph %q/%q, now %q/%q",
-				ErrResumeIncompatible, managed.ID, managed.Graph, managed.Revision, g.Name(), revision)
+			owner: site.coord,
 		}
 		setup.checkpoint = checkpointConfig{
-			coord:   ms.coord,
-			frame:   managed.Frame,
-			writer:  ms.coord.writer,
-			record:  ms.coord.record,
-			Timeout: ms.coord.timeout,
+			Store:   site.coord.store,
+			Key:     child.Key,
+			Timeout: site.coord.timeout,
+			coord:   childCoord,
+			record:  &recordView{},
 		}
+		setup.checkpoint.writer = newCheckpointWriter(setup.checkpoint, site.coord.durability)
+		childCoord.writer = setup.checkpoint.writer
+		childCoord.record = setup.checkpoint.record
+		childCoord.root = &executionProgress{}
+		setup.checkpoint.frame = childCoord.root
 		setup.configured = true
+		// 已有进度的子记录恢复边界；无记录即全新执行——父级崩溃窗口
+		// 中登记的子调用按新执行重放，语义与重试一致。
+		loaded, lerr := g.loadNestedProgress(ctx, setup.checkpoint)
+		if lerr != nil {
+			return zero, lerr
+		}
+		if loaded != nil {
+			prepared, pErr := g.prepareRecoveredFrame(loaded, ErrResumeIncompatible)
+			if pErr != nil {
+				return zero, pErr
+			}
+			if inputs := filterResumeInputs(prepared, resumeInputsFromContext(ctx)); len(inputs) > 0 {
+				if applyErr := applyResumeInputTree(prepared, inputs); applyErr != nil {
+					return zero, applyErr
+				}
+				if saveErr := saveInterruptedCheckpoint(ctx, setup.checkpoint, *prepared); saveErr != nil {
+					return zero, saveErr
+				}
+			}
+			*childCoord.root = *prepared
+			progress = childCoord.root
+		} else {
+			setup.checkpoint.record.store(state.Checkpoint{
+				ConversationID: setup.checkpoint.Key,
+				RunID:          state.NewID(),
+				Status:         state.StatusRunning,
+			})
+		}
 	} else if parentInputRun != nil {
 		setup.configured = false
 		setup.checkpoint = checkpointConfig{}
@@ -445,15 +386,7 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	if resume && !setup.configured && setup.checkpoint.coord == nil {
 		return zero, ErrCheckpointRequired
 	}
-	if resume && setup.checkpoint.coord != nil && !setup.configured {
-		// 内存受管运行的内部重入恢复：树现场就在协调器上，续用内存
-		// 进度并重新驱动未终态受管任务；无跨调用持久化。
-		coord := setup.checkpoint.coord
-		if err := coord.resumeManaged(ctx, coord.root); err != nil {
-			return zero, err
-		}
-		progress = coord.root
-	} else if resume {
+	if resume {
 		loaded, err := g.loadCheckpointProgress(ctx, &setup)
 		// 加载 span 已暂存：bindCallbacks 之后的重放把它挂到新 run 下；
 		// 此前的提前返回（恢复拒绝、已完成结果等）以独立根 span 兜底。
@@ -474,14 +407,10 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		setup.checkpoint.coord = &runCoordinator{
 			writer: setup.checkpoint.writer, record: setup.checkpoint.record,
 			timeout: setup.checkpoint.Timeout, root: &loaded,
-			runCtx: ctx, builders: setup.config.managedBuilders,
-			slots: managedSlots(g.maxConcurrency),
+			slots: newSlotPool(g.maxConcurrency),
 			store: setup.checkpoint.Store, durability: setup.config.effectiveDurability(),
 		}
 		setup.checkpoint.frame = setup.checkpoint.coord.root
-		if err := setup.checkpoint.coord.attachAgents(setup.checkpoint.record.load().SubAgents, true); err != nil {
-			return zero, err
-		}
 		if err := applyResumeInputTree(&loaded, setup.inputs); err != nil {
 			return zero, err
 		}
@@ -495,22 +424,13 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		}
 		// 仍有未答问题且整棵树没有任何可推进的工作时，直接返回当前挂起
 		// 结果与原来的问题 ID，不空跑节点，也不产生新的检查点版本。
-		// 「根 frame 可推进」与「受管任务可推进」是两个独立条件：根 End
-		// 的收敛等待必须等全部任务终态才解除，只回答部分审批时根仍阻塞，
-		// 但已获答案的任务应当先恢复执行——树中仍有可重驱受管任务时不能
-		// 提前返回。
 		if pending := pendingInterruptsTree(&loaded); len(pending) > 0 &&
-			!setup.checkpoint.coord.frameRunnable(&loaded) && !managedRestartable(&loaded) {
+			!setup.checkpoint.coord.frameRunnable(&loaded) {
 			emitInterruptEvent(ctx, g.Name(), loaded.Point, loaded.Reason, loaded.ResumeNode, loaded.Step, pending)
 			return zero, &InterruptedError{Point: loaded.Point, Reason: loaded.Reason, Checkpoint: setup.checkpoint.record.load().Clone(), interrupts: pending}
 		}
-		// 受管任务在恢复现场重建后立即重新驱动：构建函数与版本必须
-		// 已完成绑定，缺失或不符即拒绝恢复，不换实现悄悄续跑。
-		if err := setup.checkpoint.coord.resumeManaged(ctx, &loaded); err != nil {
-			return zero, err
-		}
 		progress = &loaded
-	} else if setup.configured && adopted == nil && ms == nil {
+	} else if setup.configured && adopted == nil {
 		record, bound := state.FromContext(ctx)
 		if !bound || record.ConversationID != setup.checkpoint.Key {
 			var err error
@@ -540,32 +460,14 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		setup.checkpoint.coord = &runCoordinator{
 			writer: setup.checkpoint.writer, record: setup.checkpoint.record,
 			timeout: setup.checkpoint.Timeout, root: &executionProgress{},
-			runCtx: ctx, builders: setup.config.managedBuilders,
-			slots: managedSlots(g.maxConcurrency),
+			slots: newSlotPool(g.maxConcurrency),
 			store: setup.checkpoint.Store, durability: setup.config.effectiveDurability(),
-		}
-		setup.checkpoint.frame = setup.checkpoint.coord.root
-		// 会话级子 Agent 集合随会话记录进入新一轮：执行树清空，集合保留。
-		if err := setup.checkpoint.coord.attachAgents(record.SubAgents, false); err != nil {
-			return zero, err
-		}
-	} else if adopted == nil && ms == nil && parentInputRun == nil && len(setup.config.managedBuilders) > 0 {
-		// 声明了受管构建器的无检查点运行建立内存协调器：登记、驱动与
-		// 收敛照常工作，树变更只提交内存现场不落盘；审批类可恢复挂起
-		// 按 ErrCheckpointRequired 拒绝。未登记嵌套运行与未配置构建器
-		// 的运行不建协调器，保持原有行为。
-		setup.checkpoint.coord = &runCoordinator{
-			writer: setup.checkpoint.writer, record: setup.checkpoint.record,
-			timeout: setup.checkpoint.Timeout,
-			root:    &executionProgress{}, runCtx: ctx, builders: setup.config.managedBuilders,
-			slots: managedSlots(g.maxConcurrency), storeless: true,
-			durability: setup.config.effectiveDurability(),
 		}
 		setup.checkpoint.frame = setup.checkpoint.coord.root
 	}
 	// 运行身份供工具幂等键等外部关联使用：启用检查点时取持久化 RunID，
 	// 否则生成随机 ID；嵌套运行共享根身份，并必须无条件叠加各自的任务
-	// 路径——否则不同子调用/受管任务会共用同一外部幂等键。
+	// 路径——否则不同子调用会共用同一外部幂等键。
 	scope := runScopeFromContext(ctx)
 	if scope == "" {
 		if rec := setup.checkpoint.record.load(); rec.RunID != "" {
@@ -576,8 +478,6 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	}
 	if adopted != nil {
 		scope = scope + "/" + childKey(adopted.TaskID, adopted.Call, adopted.Seq)
-	} else if ms != nil {
-		scope = scope + "/" + ms.managed.ID
 	} else if parentInputRun != nil {
 		// 未登记的嵌套运行（无检查点协调）：叠加本次调用身份加随机
 		// 区分符，避免兄弟调用进入同一子图时共享同一外部幂等空间。
@@ -591,13 +491,12 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 	ctx = withRunScope(ctx, scope)
 
 	// 子调用记录键前缀：命名空间子运行即自己的记录键；根运行为「记录
-	// 键/RunID」——新一轮运行换 RunID 使旧代子记录全部失效。受管运行
-	// 沿用父级前缀（其 callSite 再追加 managed owner 段），未登记的
+	// 键/RunID」——新一轮运行换 RunID 使旧代子记录全部失效。未登记的
 	// 嵌套运行无协调器、不登记子调用。
 	switch {
 	case adopted != nil:
 		ctx = context.WithValue(ctx, childPrefixKey{}, adopted.Key)
-	case ms == nil && setup.checkpoint.record != nil:
+	case setup.checkpoint.record != nil:
 		if rec := setup.checkpoint.record.load(); rec.ConversationID != "" {
 			ctx = context.WithValue(ctx, childPrefixKey{}, rec.ConversationID+"/"+rec.RunID)
 		}
@@ -645,58 +544,8 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		})
 	}
 	current := streamCarrier{value: erasedValue{typ: g.inputType, value: any(input)}}
-	if adopted == nil && ms == nil && setup.checkpoint.coord != nil {
-		// 根运行退出前收敛受管协程：取消其上下文并等待退出，已提交
-		// 进度保留供恢复；协程不得逃逸出本运行的生命周期。
-		defer setup.checkpoint.coord.stopManaged()
-	}
 	result, runErr := g.executeRuntime(ctx, current, runtimeState, setup, progress, mode)
 	if adopted == nil {
-		if ms != nil {
-			return result, runErr
-		}
-		// 受管任务仍在推进且没有待答问题时，不向调用方暴露挂起：等待
-		// 驱动协程落位后从最新检查点内部重入恢复，唤醒等待它们结束的
-		// 任务。有待答问题的挂起立即返回——不能把挂起结果扣在运行里。
-		// 框架错误（持久化失败、恢复不兼容）优先于一切挂起结果上报。
-		for {
-			var interrupted *InterruptedError
-			if !errors.As(runErr, &interrupted) || setup.checkpoint.coord == nil {
-				break
-			}
-			coord := setup.checkpoint.coord
-			if len(interrupted.PendingInterrupts()) > 0 {
-				if ferr := coord.managedFrameworkError(); ferr != nil {
-					return zero, ferr
-				}
-				break
-			}
-			if werr := coord.awaitManagedIdle(ctx); werr != nil {
-				return zero, werr
-			}
-			if ferr := coord.managedFrameworkError(); ferr != nil {
-				return zero, ferr
-			}
-			if !coord.managedPendingWork() {
-				// 挂起返回时受管任务可能尚未落位挂起（pending 为空）——
-				// 协程已收敛后按最新树重算待答问题再交还调用方。
-				if len(interrupted.PendingInterrupts()) == 0 {
-					if fresh := coord.pendingOf(coord.root); len(fresh) > 0 {
-						runErr = &InterruptedError{
-							Point: interrupted.Point, Reason: interrupted.Reason,
-							Checkpoint: interrupted.Checkpoint, interrupts: fresh,
-						}
-					}
-				}
-				break
-			}
-			// 内部重入恢复按根运行处理：剥掉本次运行写在 ctx 上的嵌套
-			// 运行标记，避免入口把它当作未登记子调用而丢弃检查点配置。
-			resumeCtx := context.WithValue(ctx, inputRunKey{}, (*inputRun)(nil))
-			resumeSetup := setup
-			resumeSetup.inputs = nil
-			result, runErr = g.run(resumeCtx, input, resumeSetup, true, mode)
-		}
 		return result, runErr
 	}
 	return g.finishChildRun(ctx, site.coord, adopted, result, runErr)
@@ -855,7 +704,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		}
 		var interaction *inputSession
 		var signal *suspendSignal
-		var managedWait *managedWaitSignal
 		for _, cause := range append(append([]error{}, causes...), context.Cause(suspendCtx)) {
 			var input *inputInterrupt
 			if errors.As(cause, &input) {
@@ -866,23 +714,15 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 				}
 				continue
 			}
-			var mw *managedWaitSignal
-			if errors.As(cause, &mw) {
-				managedWait = mw
-				continue
-			}
 			var nested *suspendSignal
 			if errors.As(cause, &nested) {
 				signal = nested
 			}
 		}
 		// 等待记录：本层问题取日志尾部未答；子调用挂起取信号中的阻塞子
-		// 引用（各层已换成本层关联）；受管等待记录目标任务集合；组挂起
-		// 收集当前仍挂起的任务集合。
+		// 引用（各层已换成本层关联）；组挂起收集当前仍挂起的任务集合。
 		var waiting *waitRecord
 		switch {
-		case managedWait != nil:
-			waiting = &waitRecord{Kind: waitManaged, Tasks: append([]string(nil), managedWait.ids...), Tree: managedWait.tree}
 		case interaction != nil:
 			waiting = questionWait(interaction)
 		case signal != nil && signal.blocked != nil:
@@ -890,26 +730,15 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		case signal != nil && setup.checkpoint.coord != nil:
 			waiting = groupWaitRecord(setup.checkpoint.coord, setup.checkpoint.frame)
 		}
-		// 末端等待挂起：进入 End 的边输出冻结进检查点，恢复时不再重放
-		// 末节点——末端收敛只等待受管任务落位，不改变已提交的输出。
-		var endOutput json.RawMessage
-		if resumeNode == End {
-			encoded, encErr := encodeTaskInput(current.value.value, current.value.typ)
-			if encErr != nil {
-				return zero, encErr
-			}
-			endOutput = encoded
-		}
 		// 外部暂停若打断同一交互节点，也必须保留已接受的输入和入口快照。
-		// 只克隆所需字段：受管协程并发更新树内 managed 记录，整棵树
-		// Clone 会与它们的数据竞争；Interrupts/Pending/State 由本运行
-		// 自己的 goroutine 维护，字段级克隆是安全的。
+		// 只克隆所需字段：Interrupts/Pending/State 由本运行自己的
+		// goroutine 维护，字段级克隆是安全的。
 		if interaction == nil && progress != nil && len(progress.Interrupts) > 0 && progress.ResumeNode == resumeNode && progress.Step == step && point != InterruptPointAfterCommit {
 			interaction = &inputSession{node: resumeNode, step: step, entry: progress.State.Clone(), visits: cloneVisits(progress.Visits), records: cloneJournal(progress.Interrupts), pending: clonePendingCalls(progress.Pending)}
 			waiting = questionWaitFromRecords(progress.Interrupts)
 		}
 		releaseLease()
-		return zero, g.persistInterruption(suspendCtx, setup.checkpoint, request, point, resumeNode, step, visits, cursor, runtimeState, interaction, waiting, endOutput)
+		return zero, g.persistInterruption(suspendCtx, setup.checkpoint, request, point, resumeNode, step, visits, cursor, runtimeState, interaction, waiting)
 	}
 	if len(cursor) >= DefaultMaxDepth {
 		return fail(ctx, &ExecutionError{Code: "graph.max_depth", NodeID: g.Name(), Step: len(cursor), Err: fmt.Errorf("maximum graph depth of %d exceeded", DefaultMaxDepth)})
@@ -937,35 +766,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 	if progress != nil {
 		restored := progress.State.Clone()
 		boundary = &restored
-	}
-	// 受管收敛只在根运行进行：受管任务内部的子图运行到达 End 时不等待
-	// 协调器上的其他任务——其中就包括正在执行本运行的协程自身，等待会
-	// 自我死锁；其名下未结束后代由根运行的收敛统一处理。
-	inManaged := managedSiteFromContext(ctx) != nil
-	if pendingNode == End {
-		// 末端等待挂起恢复：冻结输出直接复原为当前载体，收敛受管任务
-		// 后产出或继续等待——不重放任何节点。
-		decoded, decErr := decodeTaskInput(progress.Output, g.outputType)
-		if decErr != nil {
-			return fail(ctx, &ExecutionError{Code: "graph.resume.output", NodeID: End, Step: startStep, Err: decErr})
-		}
-		current = streamCarrier{value: erasedValue{typ: g.outputType, value: decoded}}
-		if coord := setup.checkpoint.coord; coord != nil && !inManaged {
-			ids, managedPending, derr := coord.drainManaged(ctx)
-			if derr != nil {
-				return fail(ctx, derr)
-			}
-			if len(managedPending) > 0 || len(ids) > 0 {
-				return suspend(ctx, control.InterruptRequest{Reason: suspendReasonNested}, InterruptPointAfterCommit, End, startStep,
-					&managedWaitSignal{ids: ids, pending: managedPending, tree: true})
-			}
-			// 受管全部收敛后才允许写最终完成：状态、冻结输出与编码
-			// 后的执行树随同一版本落盘。
-			if err := coord.completeRun(ctx, progress.Output); err != nil {
-				return fail(ctx, err)
-			}
-		}
-		return g.runtimeOutput(ctx, current.value, End, startStep)
 	}
 	if pendingNode != "" {
 		node, ok := nodes[pendingNode]
@@ -1003,43 +803,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 					return fail(ctx, &ExecutionError{Code: "route.select", NodeID: currentNode, Step: step, Err: routeErr})
 				}
 				if next == End {
-					// 根图结束时收敛受管任务：仍有未收尾任务时先把末节点
-					// 提交的现场（State、会话、冻结输出、End 续点）按正常
-					// 边界落盘为未完成进度，再等待受管落位；仍有挂起任务
-					// 时按统一挂起结果返回。
-					if coord := setup.checkpoint.coord; coord != nil && !inManaged {
-						var encoded json.RawMessage
-						var encErr error
-						if coord.managedUnfinished() && setup.configured {
-							encoded, encErr = encodeTaskInput(current.value.value, g.outputType)
-							if encErr == nil {
-								finalize := func(f *executionProgress) { f.Output = encoded }
-								_, encErr = g.persistProgress(ctx, setup.checkpoint, runtimeState, End, step, visits, cursor, current.value.value, false, finalize, false)
-							}
-							if encErr != nil {
-								return fail(ctx, encErr)
-							}
-						}
-						ids, managedPending, derr := coord.drainManaged(ctx)
-						if derr != nil {
-							return fail(ctx, derr)
-						}
-						if len(managedPending) > 0 || len(ids) > 0 {
-							return suspend(ctx, control.InterruptRequest{Reason: suspendReasonNested}, InterruptPointAfterCommit, End, step,
-								&managedWaitSignal{ids: ids, pending: managedPending, tree: true})
-						}
-						// 收敛完成：补写最终完成记录（本条路径不经
-						// persistProgress 的 completed 写入）。
-						if encoded == nil {
-							encoded, encErr = encodeTaskInput(current.value.value, g.outputType)
-						}
-						if encErr == nil {
-							encErr = coord.completeRun(ctx, encoded)
-						}
-						if encErr != nil {
-							return fail(ctx, encErr)
-						}
-					}
 					return g.runtimeOutput(ctx, current.value, currentNode, step)
 				}
 			}
@@ -1187,15 +950,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 			if len(schedule.Tasks) > 0 && schedule.Tasks[0].Node == next {
 				taskID = schedule.Tasks[0].ID
 			}
-			managedOwner := ""
-			if ms := managedSiteFromContext(nodeCtx); ms != nil {
-				managedOwner = ms.managed.ID
-			}
-			recordKey := childPrefixFromContext(nodeCtx)
-			if managedOwner != "" {
-				recordKey += "/" + managedOwner
-			}
-			nodeCtx = withCallSite(nodeCtx, &callSite{coord: setup.checkpoint.coord, frame: setup.checkpoint.frame, taskID: taskID, step: step, owner: managedOwner, recordKey: recordKey})
+			nodeCtx = withCallSite(nodeCtx, &callSite{coord: setup.checkpoint.coord, frame: setup.checkpoint.frame, taskID: taskID, step: step, recordKey: childPrefixFromContext(nodeCtx)})
 		}
 		nodeStart := lifecycleEvent{Type: eventNodeStart, NodeID: next, Step: step}
 		nodeCtx = bindEventContext(nodeCtx, nodeStart)
@@ -1203,7 +958,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 
 		{
 			// 顺序节点同样按实际工作领取共享额度——根上限同时约束父图
-			// 节点、批任务与受管协程。节点内跑嵌套图时由 run 让出令牌。
+			// 节点、批任务与命名空间子运行。节点内跑嵌套图时由 run 让出令牌。
 			lease, lerr := acquireSlotLease(ctx, sharedSlots(ctx, setup.checkpoint.coord, g.maxConcurrency))
 			if lerr != nil {
 				return fail(nodeCtx, lerr)
@@ -1364,18 +1119,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 		if routeErr != nil {
 			return fail(nodeCtx, &ExecutionError{Code: "route.select", NodeID: next, Step: step, Err: routeErr})
 		}
-		// 到达 End 但仍有未收尾受管任务：不写完成状态，改走末端等待挂起——
-		// 但末节点已提交的 State、会话与进度必须先按正常边界落盘，挂起
-		// 恢复与收敛后完成共用这份现场，不重新执行末节点。
-		managedTail := false
-		if routed == End && !inManaged {
-			if coord := setup.checkpoint.coord; coord != nil && coord.managedUnfinished() {
-				managedTail = true
-			}
-		}
 		if setup.configured {
 			var result any
-			var tailOutput json.RawMessage
 			resumeNode := routed
 			if routed == End {
 				if current.value.value != nil {
@@ -1384,18 +1129,7 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 					}
 				}
 				result = current.value.value
-				if managedTail {
-					// 续点直接落在 End：冻结输出进进度，恢复时由收敛
-					// 路径产出，不重放末节点。
-					resumeNode = End
-					encoded, encErr := encodeTaskInput(current.value.value, g.outputType)
-					if encErr != nil {
-						return fail(nodeCtx, encErr)
-					}
-					tailOutput = encoded
-				} else {
-					resumeNode = next
-				}
+				resumeNode = next
 			}
 			// 本任务已越过提交边界：其临时子调用记录与固定并行分支的任务
 			// 记录随进度一起回收——与本次进度写同属一份快照。
@@ -1404,9 +1138,8 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 					releaseChildrenLocked(f, schedule.Tasks[0].ID)
 					releaseTasksByPrefixLocked(f, schedule.Tasks[0].ID+"/")
 				}
-				f.Output = tailOutput
 			}
-			snapshot, err := g.persistProgress(commitCtx, setup.checkpoint, runtimeState, resumeNode, step+taskCount, visits, cursor, result, routed == End && !managedTail, finalize, false)
+			snapshot, err := g.persistProgress(commitCtx, setup.checkpoint, runtimeState, resumeNode, step+taskCount, visits, cursor, result, routed == End, finalize, false)
 			if err != nil {
 				return fail(nodeCtx, err)
 			}
@@ -1428,27 +1161,6 @@ func (g *Graph[I, O]) executeRuntime(ctx context.Context, current streamCarrier,
 					return suspend(nodeCtx, request, InterruptPointDuringNode, next, step, err)
 				}
 				return fail(nodeCtx, &ExecutionError{Code: "node.collect", NodeID: next, Step: step, Err: err})
-			}
-			if managedTail {
-				// 末端收敛挂起必须先等驱动协程落位再采集等待集合——非阻塞
-				// 快照会漏掉晚一步挂起的任务，把不完整的待答清单写进挂起
-				// 结果。框架错误优先于挂起向上传播。
-				ids, managedPending, derr := setup.checkpoint.coord.drainManaged(ctx)
-				if derr != nil {
-					return fail(nodeCtx, derr)
-				}
-				if len(managedPending) > 0 || len(ids) > 0 {
-					return suspend(nodeCtx, control.InterruptRequest{Reason: suspendReasonNested}, InterruptPointAfterCommit, End, step+1,
-						&managedWaitSignal{ids: ids, pending: managedPending, tree: true})
-				}
-				// 等待期间已全部收敛：补写最终完成记录后直接产出。
-				encoded, encErr := encodeTaskInput(current.value.value, g.outputType)
-				if encErr == nil {
-					encErr = setup.checkpoint.coord.completeRun(ctx, encoded)
-				}
-				if encErr != nil {
-					return fail(nodeCtx, encErr)
-				}
 			}
 			return g.runtimeOutput(ctx, current.value, next, step+1)
 		}
@@ -1515,16 +1227,11 @@ func (g *Graph[I, O]) persistInterruption(
 	runtimeState any,
 	interaction *inputSession,
 	waiting *waitRecord,
-	endOutput json.RawMessage,
 ) error {
 	if !checkpoint.enabled() {
-		// 内存受管运行（storeless 协调器）只放行受管等待型挂起：等待
-		// 位置落在内存树上，同一次运行内重放即可推进；审批等可恢复
-		// 中断需要持久化，按 ErrCheckpointRequired 拒绝。
-		if checkpoint.coord == nil || !checkpoint.coord.storeless ||
-			waiting == nil || waiting.Kind != waitManaged {
-			return ErrCheckpointRequired
-		}
+		// 无落盘能力的运行不能挂起：审批等可恢复中断需要持久化，
+		// 按 ErrCheckpointRequired 拒绝。
+		return ErrCheckpointRequired
 	}
 	if _, resumableErr := g.recoveryMetadata(); resumableErr != nil {
 		return resumableErr
@@ -1564,7 +1271,6 @@ func (g *Graph[I, O]) persistInterruption(
 		progress.Pending = clonePendingCalls(interaction.pending)
 	}
 	progress.Waiting = waiting
-	progress.Output = endOutput
 	if coord := checkpoint.coord; coord != nil && checkpoint.frame != coord.root {
 		// 嵌套 frame 挂起：就地更新树内存槽位，不落盘——根调度器收敛后
 		// 统一保存整棵树，再由根运行返回 InterruptedError。

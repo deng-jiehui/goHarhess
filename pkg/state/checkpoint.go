@@ -48,18 +48,13 @@ type Checkpoint struct {
 	MessagesFrom  int            `json:"messages_from,omitempty"`
 	MessagesEpoch int            `json:"messages_epoch,omitempty"`
 	Values        map[string]any `json:"values,omitempty"`
-	// SubAgents 是会话级的子 Agent 集合（由执行引擎编码）：与 Execution
-	// 不同，它属于会话而不属于某一次运行——新一轮运行清空 Execution 时
-	// 原样保留，只在运行内随子 Agent 的创建、任务结算和关闭更新。
-	SubAgents json.RawMessage `json:"sub_agents,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 func (c Checkpoint) Clone() Checkpoint {
 	c.Execution = append(json.RawMessage(nil), c.Execution...)
 	c.Result = append(json.RawMessage(nil), c.Result...)
-	c.SubAgents = append(json.RawMessage(nil), c.SubAgents...)
 	c.Messages = cloneMessages(c.Messages)
 	c.Values = cloneMap(c.Values)
 	return c
@@ -93,9 +88,6 @@ func (c Checkpoint) Validate() (err error) {
 	}
 	if len(c.Result) > 0 && !json.Valid(c.Result) {
 		return errors.New("invalid result JSON")
-	}
-	if len(c.SubAgents) > 0 && !json.Valid(c.SubAgents) {
-		return errors.New("invalid sub agents JSON")
 	}
 	switch c.Status {
 	case "", StatusRunning, StatusInterrupted, StatusCompleted, StatusAbandoned:
@@ -273,7 +265,6 @@ func (c Checkpoint) PersistClone() (Checkpoint, error) {
 	prepared := c
 	prepared.Execution = append(json.RawMessage(nil), prepared.Execution...)
 	prepared.Result = append(json.RawMessage(nil), prepared.Result...)
-	prepared.SubAgents = append(json.RawMessage(nil), prepared.SubAgents...)
 	prepared.Values = cloneMap(prepared.Values)
 	messages, err := cloneMessagesPersist(prepared.Messages)
 	if err != nil {

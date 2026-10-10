@@ -18,8 +18,7 @@ import (
 
 // 执行树的 frame 进度即 executionProgress：分支任务进度经 taskProgress 挂在
 // 所属 frame 上，子调用进度保存在键带父级前缀的独立命名空间记录中，
-// childExecution 只登记身份、记录键与挂起时上报的待答问题。受管任务
-// frame 仍内嵌在本 frame 记录内，随受管机制一并演进。
+// childExecution 只登记身份、记录键与挂起时上报的待答问题。
 
 // taskStatus 是分支任务的进度状态。
 type taskStatus string
@@ -49,9 +48,6 @@ const (
 	waitChild waitKind = "child"
 	// waitGroup 表示阻塞在并行任务组上；Tasks 是挂起时仍在等待的任务集合。
 	waitGroup waitKind = "group"
-	// waitManaged 表示阻塞在本 frame 登记的受管子任务上；Tasks 是等待的
-	// 受管任务 ID 集合，全部到达终态后等待解除。
-	waitManaged waitKind = "managed"
 )
 
 // waitRecord 描述当前阻塞位置及关联对象。交互日志保存历史问题与答案，
@@ -64,8 +60,7 @@ type waitRecord struct {
 	TaskID string   `json:"task_id,omitempty"` // kind=child：子调用所属父任务 ID
 	Seq    int      `json:"seq,omitempty"`     // kind=child：任务内调用序号
 	Call   string   `json:"call,omitempty"`    // kind=child：发起子调用的调用身份
-	Tasks  []string `json:"tasks,omitempty"`   // kind=group：挂起时仍在等待的任务 ID；kind=managed：等待的受管任务 ID
-	Tree   bool     `json:"tree,omitempty"`    // kind=managed：根 End 收敛的全树等待——引用可跨 frame 定位到后代任务
+	Tasks  []string `json:"tasks,omitempty"`   // kind=group：挂起时仍在等待的任务 ID
 }
 
 func (w *waitRecord) Clone() *waitRecord {
@@ -237,9 +232,6 @@ type childExecution struct {
 	// Pending 是子执行挂起时上报的子树未答问题集合（含更深层）：恢复时
 	// 按 ID 标记已答，驱动父级 pending 聚合与重驱判定。
 	Pending []control.InterruptRecord `json:"pending,omitempty"`
-	// frame 是无存储运行（storeless）的内存进度槽位，只活在内存中；
-	// 持久化模式下子进度保存在 Key 指向的独立记录中，不经过此槽位。
-	frame *executionProgress
 }
 
 // childKey 生成子调用在父 frame 内的稳定身份：父任务、工具调用归属与
@@ -368,14 +360,6 @@ func validateExecutionTree(root *executionProgress, depth int) error {
 	}
 	// 子调用进度在自己的命名空间记录中，不参与本记录的树深校验；
 	// 嵌套深度由记录键的路径段数限制。
-	for _, m := range root.Managed {
-		if m == nil || m.Frame == nil || m.Frame.GraphName == "" {
-			continue
-		}
-		if err := validateExecutionTree(m.Frame, depth+1); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -411,23 +395,6 @@ func validateWaitRef(frame *executionProgress, w *waitRecord, journal []control.
 		for _, id := range w.Tasks {
 			if frame.findTask(id) == nil {
 				return fmt.Errorf("%w: %s waiting record references missing task %q", state.ErrInvalidCheckpoint, owner, id)
-			}
-		}
-		return nil
-	case waitManaged:
-		if len(w.Tasks) == 0 {
-			return fmt.Errorf("%w: %s waiting record has empty managed set", state.ErrInvalidCheckpoint, owner)
-		}
-		for _, id := range w.Tasks {
-			var m *managedTask
-			if w.Tree {
-				// 根收敛等待覆盖整棵树：后代任务登记在各自 frame 中。
-				m = findManagedInTree(frame, id)
-			} else {
-				m = frame.findManaged(id)
-			}
-			if m == nil {
-				return fmt.Errorf("%w: %s waiting record references missing managed task %q", state.ErrInvalidCheckpoint, owner, id)
 			}
 		}
 		return nil
@@ -492,19 +459,10 @@ type callSite struct {
 	taskID  string
 	step    int
 	callSeq map[string]int
-	// owner 是本任务所属受管运行的任务 ID；根运行的任务为空。受管任务
-	// ID 携带完整 owner 路径，保证跨层级全局唯一。
-	owner string
 	// recordKey 是本 frame 发起的子调用其独立检查点记录的键前缀：
-	// 根 frame 为「记录键/RunID」，受管 frame 追加 managed owner 路径，
-	// 命名空间子 frame 即子记录自身的键；登记时拼上 childKey 得子键。
+	// 根 frame 为「记录键/RunID」，命名空间子 frame 即子记录自身的键；
+	// 登记时拼上 childKey 得子键。
 	recordKey string
-	// managedSeq 是受管任务创建调用的序号空间：与子调用序号分开，
-	// 两类调用的重放顺序互不影响。
-	managedSeq map[string]int
-	// managedMsgSeq 是受管消息发送的序号空间：重放同一位点不再重复
-	// 追加收件箱。
-	managedMsgSeq map[string]int
 }
 
 // nextSeq 分配指定调用身份下的下一个子调用序号。
@@ -514,26 +472,6 @@ func (s *callSite) nextSeq(callKey string) int {
 	}
 	seq := s.callSeq[callKey]
 	s.callSeq[callKey]++
-	return seq
-}
-
-// nextManagedSeq 分配指定调用身份下的下一个受管创建序号。
-func (s *callSite) nextManagedSeq(callKey string) int {
-	if s.managedSeq == nil {
-		s.managedSeq = make(map[string]int)
-	}
-	seq := s.managedSeq[callKey]
-	s.managedSeq[callKey]++
-	return seq
-}
-
-// nextManagedMsgSeq 分配指定调用身份下的下一个受管消息序号。
-func (s *callSite) nextManagedMsgSeq(callKey string) int {
-	if s.managedMsgSeq == nil {
-		s.managedMsgSeq = make(map[string]int)
-	}
-	seq := s.managedMsgSeq[callKey]
-	s.managedMsgSeq[callKey]++
 	return seq
 }
 
@@ -600,41 +538,14 @@ type runCoordinator struct {
 	record  *recordView
 	timeout time.Duration
 	root    *executionProgress
-	// runCtx 是根运行的执行上下文：受管任务协程的生命周期随它取消，
-	// 不会逃逸出本运行。
-	runCtx context.Context
-	// handles 是各受管任务的运行期驱动句柄（不落盘）；builders 是恢复
-	// 受管任务所需的构建函数注册表；slots 为受管协程并发额度，容量取
-	// 根运行的并发上限；fatalErrs 保存本运行内各任务的原始框架错误
-	// （完整错误链），跨次恢复由任务记录的 Fatal/Error 字段兜底重建。
-	handles   map[*managedTask]*managedHandle
-	builders  map[string]managedBuilderEntry
-	slots     chan struct{}
-	fatalErrs map[*managedTask]error
+	// slots 是并发额度池，容量取根运行的并发上限；命名空间子运行与
+	// 批任务共享同一额度池。
+	slots chan struct{}
 	// store 与 durability 供命名空间子运行派生同配置的独立 writer/record；
-	// owner 是父级协调器（命名空间子运行非空、根运行为空）：会话级
-	// 子 Agent 集合只保存在根记录上，经 owner 链归集到根协调器。
+	// owner 是父级协调器（命名空间子运行非空、根运行为空）。
 	store      state.Store
 	durability Durability
 	owner      *runCoordinator
-	// storeless 标记无检查点的内存受管运行：树变更照常并入内存现场，
-	// 只是没有落盘队列；审批类可恢复挂起在该模式下按
-	// ErrCheckpointRequired 拒绝。
-	storeless bool
-	// agents 是会话级子 Agent 集合（树锁保护）：运行入口从会话记录载入，
-	// 每次写入随执行树一同落盘；agentsData 缓存其编码，集合变更时失效。
-	agents     []*sessionAgent
-	agentsData json.RawMessage
-}
-
-// agentScope 返回会话级子 Agent 集合的属主协调器：集合只保存在根记录上，
-// 命名空间子运行对子 Agent 的操作经 owner 链归集到根协调器——创建、
-// 派生与可见性判定都由根的单写者边界统一处理。
-func (c *runCoordinator) agentScope() *runCoordinator {
-	for c.owner != nil {
-		c = c.owner
-	}
-	return c
 }
 
 // encodeLocked 在树锁内把根 frame 编码为 Execution 载荷；根 frame 标记
@@ -644,8 +555,8 @@ func (c *runCoordinator) encodeLocked() ([]byte, error) {
 	if root == nil {
 		root = &executionProgress{}
 	}
-	// 快照后再打版本标记：受管协程会并发编码/变更树内记录，原地修改
-	// 根 frame 的 Format 会与主调度的字段读取产生数据竞争。
+	// 快照后再打版本标记：树内记录可能被并发编码，原地修改根 frame
+	// 的 Format 会与主调度的字段读取产生数据竞争。
 	snapshot := root.Clone()
 	snapshot.Format = executionFormatTree
 	return snapshot.JSON()
@@ -655,26 +566,11 @@ func (c *runCoordinator) encodeLocked() ([]byte, error) {
 // 持锁期间——写入队列的顺序与树变更的顺序严格一致，后到写入不会把旧
 // 内容覆盖在兄弟结果上。调用方持有树锁；等待票据须在树锁外进行。
 func (c *runCoordinator) publishLocked(ctx context.Context, edit func(record *state.Checkpoint, data []byte)) (writeTicket, error) {
-	if c.storeless {
-		// 内存模式没有落盘队列：树变更已就地提交，返回即时完成票据。
-		return resolvedTicket(), nil
-	}
 	data, err := c.encodeLocked()
 	if err != nil {
 		return writeTicket{}, err
 	}
-	// 会话集合与执行树在同一持锁内取快照、同一次写入落盘：任务结算与
-	// 子 Agent 状态不会出现一方已保存另一方未保存的中间态。
-	agents, err := c.encodeAgentsLocked()
-	if err != nil {
-		return writeTicket{}, err
-	}
-	return c.writer.enqueue(ctx, func(r *state.Checkpoint) {
-		edit(r, data)
-		if agents != nil {
-			r.SubAgents = agents
-		}
-	}), nil
+	return c.writer.enqueue(ctx, func(r *state.Checkpoint) { edit(r, data) }), nil
 }
 
 // commitFrame 在树锁内把新进度合并进本 frame 槽位（保留运行期登记的子调用
@@ -686,7 +582,6 @@ func (c *runCoordinator) commitFrame(ctx context.Context, frame *executionProgre
 	defer c.mu.Unlock()
 	next.Children = frame.Children
 	next.Tasks = frame.Tasks
-	next.Managed = frame.Managed
 	*frame = next
 	if finalize != nil {
 		finalize(frame)
@@ -712,7 +607,6 @@ func (c *runCoordinator) updateFrame(frame *executionProgress, next executionPro
 	defer c.mu.Unlock()
 	next.Children = frame.Children
 	next.Tasks = frame.Tasks
-	next.Managed = frame.Managed
 	*frame = next
 }
 
@@ -957,8 +851,6 @@ func resolveWait(frame *executionProgress, w *waitRecord, journal []control.Inte
 		return childWaitResolved(frame, w.TaskID, w.Call, w.Seq)
 	case waitGroup:
 		return groupWaitResolved(frame)
-	case waitManaged:
-		return managedWaitResolved(frame, w.Tasks, w.Tree)
 	}
 	return true, nil
 }
@@ -1168,10 +1060,6 @@ func waitForCause(cause error, session *inputSession) *waitRecord {
 	if errors.As(cause, &input) {
 		return questionWait(session)
 	}
-	var managedWait *managedWaitSignal
-	if errors.As(cause, &managedWait) {
-		return &waitRecord{Kind: waitManaged, Tasks: append([]string(nil), managedWait.ids...), Tree: managedWait.tree}
-	}
 	var signal *suspendSignal
 	if errors.As(cause, &signal) && signal.blocked != nil {
 		return signal.blocked.Clone()
@@ -1220,9 +1108,6 @@ func (g *Graph[I, O]) completeTask(ctx context.Context, coord *runCoordinator, f
 	}
 	ticket, err := coord.mutateTree(ctx, func() {
 		upsertTaskLocked(frame, completed)
-		// 收件箱消费进度与任务提交同边界：本任务确认过的消息批次随
-		// 完成记录一起提升为已消费，挂起重放仍会重新投递。
-		coord.promoteInboxLocked(frame, record.TaskID)
 	}, func(r *state.Checkpoint, data []byte) { r.Execution = data })
 	if err != nil {
 		return err
@@ -1230,8 +1115,8 @@ func (g *Graph[I, O]) completeTask(ctx context.Context, coord *runCoordinator, f
 	return ticket.wait()
 }
 
-// 树级遍历：pending 汇集本 frame 的未回答问题、各子调用挂起时上报的
-// 待答副本（含更深层，由子执行在自己的记录里维护）与内嵌受管子树；
+// 树级遍历：pending 汇集本 frame 的未回答问题与各子调用挂起时上报的
+// 待答副本（含更深层，由子执行在自己的记录里维护）；
 // applyResumeInputTree 先整体验证再写入回答，保证不会只写一半。
 func pendingInterruptsTree(root *executionProgress) []control.InterruptRecord {
 	var pending []control.InterruptRecord
@@ -1253,11 +1138,6 @@ func pendingInterruptsTree(root *executionProgress) []control.InterruptRecord {
 				if !record.Answered {
 					pending = append(pending, record.Clone())
 				}
-			}
-		}
-		for _, m := range frame.Managed {
-			if m != nil {
-				walk(m.Frame)
 			}
 		}
 	}
@@ -1297,11 +1177,6 @@ func applyResumeInputTree(root *executionProgress, inputs []resumeInput) error {
 		// 答案数据在子运行重载自己的命名空间记录时按同一 ID 写入日志。
 		for _, child := range frame.Children {
 			applyAnswerSet(child.Pending, inputs)
-		}
-		for _, m := range frame.Managed {
-			if m != nil {
-				walk(m.Frame)
-			}
 		}
 	}
 	walk(root)

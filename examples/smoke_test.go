@@ -18,7 +18,6 @@ var wantOutput = map[string][]string{
 	"branches":    {"news: ", "papers: ", "download: "},
 	"dispatch":    {"done:alpha"},
 	"interaction": {"Hello, Ada"},
-	"subagent":    {"sub-agent results:", "completed", "cancelled"},
 	"routing":     {"routing done"},
 	"groupchat":   {"analyst:", "critic:"},
 	"react":       {"sunny, 24C"},

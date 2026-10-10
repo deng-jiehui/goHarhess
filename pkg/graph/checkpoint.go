@@ -65,19 +65,12 @@ type executionProgress struct {
 	Metadata      map[string]any            `json:"metadata,omitempty"`
 	Tasks         []*taskProgress           `json:"tasks,omitempty"`
 	Children      []*childExecution         `json:"children,omitempty"`
-	// Managed 保存本 frame 内创建的受管子任务：身份、最终配置、状态、
-	// 结果、收件箱与子执行进度。受管任务的生命周期不随创建任务结束，
-	// 由根运行统一驱动、收敛与恢复。
-	Managed []*managedTask `json:"managed,omitempty"`
 	// Waiting 是挂起时的当前阻塞位置：本层问题、子调用或并行任务组。
 	// 恢复判定以它为准，已回答的旧问题不会误唤醒后来阻塞的任务。
 	Waiting *waitRecord `json:"waiting,omitempty"`
 	// Pending 登记挂起节点内已完成的工具调用结果（键为调用去重键）；
 	// 恢复重放节点时命中登记的调用直接复用结果，不再执行。
 	Pending map[string]json.RawMessage `json:"pending,omitempty"`
-	// Output 仅用于"末端等待"挂起：根图已路由到 End 但仍有受管任务挂起，
-	// 挂起时把进入 End 的边输出冻结在此，恢复后直接产出，不重放末节点。
-	Output json.RawMessage `json:"output,omitempty"`
 }
 
 func (c executionProgress) Clone() executionProgress {
@@ -92,12 +85,8 @@ func (c executionProgress) Clone() executionProgress {
 	c.Metadata = clonePortableMetadata(c.Metadata)
 	c.Tasks = cloneTaskProgress(c.Tasks)
 	c.Children = cloneChildExecutions(c.Children)
-	c.Managed = cloneManagedTasks(c.Managed)
 	c.Waiting = c.Waiting.Clone()
 	c.Pending = clonePendingCalls(c.Pending)
-	if c.Output != nil {
-		c.Output = append(json.RawMessage(nil), c.Output...)
-	}
 	return c
 }
 
@@ -114,9 +103,6 @@ func (c executionProgress) Validate() error {
 	if err := validateChildExecutions(c.Children); err != nil {
 		return err
 	}
-	if err := validateManagedTasks(c.Managed); err != nil {
-		return err
-	}
 	if strings.TrimSpace(c.GraphName) == "" || strings.TrimSpace(c.GraphRevision) == "" {
 		return fmt.Errorf("%w: graph name and revision are required", state.ErrInvalidCheckpoint)
 	}
@@ -124,10 +110,7 @@ func (c executionProgress) Validate() error {
 	case strings.TrimSpace(c.ResumeNode) == "" || c.ResumeNode == Start:
 		return fmt.Errorf("%w: invalid resume node %q", state.ErrInvalidCheckpoint, c.ResumeNode)
 	case c.ResumeNode == End:
-		// 末端等待挂起只在提交边界之后成立，且必须携带已冻结的输出。
-		if c.Point != InterruptPointAfterCommit || len(c.Output) == 0 {
-			return fmt.Errorf("%w: invalid resume node %q", state.ErrInvalidCheckpoint, c.ResumeNode)
-		}
+		return fmt.Errorf("%w: invalid resume node %q", state.ErrInvalidCheckpoint, c.ResumeNode)
 	}
 	if c.Step < 0 {
 		return fmt.Errorf("%w: step cannot be negative", state.ErrInvalidCheckpoint)
@@ -208,8 +191,8 @@ func (*InterruptedError) Unwrap() error { return ErrInterrupted }
 
 // checkpointConfig 集中承载检查点持久化参数与共享记录指针。coord 非 nil
 // 表示本运行参与执行树持久化：frame 指向树中本运行负责的 frame 槽位
-// （根运行与命名空间子运行为各自 coord.root，受管运行为根树中的
-// managedTask.Frame），进度提交先原地更新该 frame 再编码落盘。
+// （根运行与命名空间子运行为各自 coord.root），进度提交先原地更新该
+// frame 再编码落盘。
 // recordView 以保护性互斥持有当前检查点记录：后台写入成功后整体替换，
 // 读取方在锁内取得稳定视图。记录各切片/映射字段按不可变约定共享，
 // 调用方不得原地修改取回的字段。
@@ -248,11 +231,10 @@ type checkpointConfig struct {
 }
 
 // enabled 判断本次运行是否具备落盘能力：协调模式看协调器与记录槽位，
-// 独立模式看存储与会话 ID。内存受管运行（storeless 协调器）不具备
-// 落盘能力——挂起恢复语义受限，审批类中断会被拒绝。
+// 独立模式看存储与会话 ID。
 func (c checkpointConfig) enabled() bool {
 	if c.coord != nil {
-		return !c.coord.storeless && c.writer != nil && c.record != nil
+		return c.writer != nil && c.record != nil
 	}
 	return !isNilCheckpointStore(c.Store) && strings.TrimSpace(c.Key) != ""
 }
@@ -264,9 +246,6 @@ type graphRunConfig struct {
 	hasCheckpoint bool
 	durability    Durability
 	inputs        []resumeInput
-	// managedBuilders 是受管任务构建函数注册表；只在根运行生效，
-	// 嵌套运行共享根协调器的同一份注册。
-	managedBuilders map[string]managedBuilderEntry
 }
 
 // graphRunConfigType 是 Graph 运行配置的归属类型；未导出，外部组件无法声明接收。

@@ -29,8 +29,8 @@ func (g *CompiledGraph[I, O]) Description() string {
 }
 
 // Recoverable 报告图是否具备开启持久化时恢复所需的契约；不具备时返回原因。
-// 受管子任务的构建方在登记前据此拒绝无法恢复的自建图，而不是等任务挂起后
-// 才发现无法重建。
+// 调用方在持久化接入前据此拒绝无法恢复的图，而不是等运行挂起后才发现
+// 无法重建。
 func (g *CompiledGraph[I, O]) Recoverable() error {
 	if g == nil || g.runtime == nil {
 		return errors.New("compiled graph is nil")

@@ -1,7 +1,6 @@
 package state_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -86,35 +85,5 @@ func TestCheckpointClonePreservesConcreteExtraTypes(t *testing.T) {
 	}
 	if checkpoint.Messages[0].JoinedText("") != "hi" {
 		t.Fatal("clone mutation leaked into original content")
-	}
-}
-
-func TestCheckpointSubAgentsIsolatedValidatedAndCarried(t *testing.T) {
-	store := state.NewMemoryStore()
-	raw := json.RawMessage(`{"format":1,"agents":[]}`)
-	saved, err := store.Save(context.Background(), state.Checkpoint{ConversationID: "sub", SubAgents: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw[2] = 'X'
-	loaded, found, err := store.Load(context.Background(), "sub")
-	if err != nil || !found || string(loaded.SubAgents) != `{"format":1,"agents":[]}` {
-		t.Fatalf("stored sub agents share caller memory: %s %v", loaded.SubAgents, err)
-	}
-	loaded.SubAgents[2] = 'Y'
-	again, _, _ := store.Load(context.Background(), "sub")
-	if string(again.SubAgents) != `{"format":1,"agents":[]}` {
-		t.Fatalf("loaded sub agents share store memory: %s", again.SubAgents)
-	}
-	data, err := saved.JSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := state.DecodeCheckpoint(data)
-	if err != nil || string(decoded.SubAgents) != `{"format":1,"agents":[]}` {
-		t.Fatalf("portable round trip: %s %v", decoded.SubAgents, err)
-	}
-	if _, err := store.Save(context.Background(), state.Checkpoint{ConversationID: "bad", SubAgents: json.RawMessage(`{`)}); !errors.Is(err, state.ErrInvalidCheckpoint) {
-		t.Fatalf("invalid sub agents JSON accepted: %v", err)
 	}
 }
