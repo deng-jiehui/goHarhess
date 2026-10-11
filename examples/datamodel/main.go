@@ -13,8 +13,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/goharness/goharness/pkg/datamodel"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // Ticket 是普通业务输入：json 标签定字段名与可选性，jsonschema 标签定
@@ -45,7 +45,7 @@ func main() {
 
 	// 失败统一按 ErrInvalidData 分类，成功路径返回 T 零值。
 	for _, bad := range []string{
-		`{"id":1}`,                // 缺必填 title
+		`{"id":1}`,                   // 缺必填 title
 		`{"id":1,"title":"t","x":1}`, // 未知字段
 		`{"id":1,"title":"t"} {}`,    // 尾部第二个 JSON 值
 	} {

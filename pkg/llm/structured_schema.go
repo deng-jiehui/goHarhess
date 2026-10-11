@@ -35,6 +35,16 @@ func init() {
 	}
 }
 
+// strictOutputSchema 是数据模型的 Schema 编辑回调：先核对顶层类型必须是
+// 结构体，再调用 normalizeStrict 应用 strict 规则。本文件只保留严格格式
+// 政策；通用类型检查由数据模型承担。
+func strictOutputSchema(t reflect.Type, s *jsonschema.Schema) error {
+	if t.Kind() != reflect.Struct {
+		return fmt.Errorf("structured output type %s must be a struct", t)
+	}
+	return normalizeStrict(t, s, t.Name())
+}
+
 // normalizeStrict 沿 Go 类型与 Schema 并行下钻，把 strict 规则应用到每个
 // 嵌套对象：所有导出字段进入 required，额外字段已由推导禁止。根类型与
 // 容器元素同样在途经处检查自定义编解码与可表达性。

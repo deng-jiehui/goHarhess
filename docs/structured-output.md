@@ -54,9 +54,35 @@ T 必须是结构体（顶层指针、标量、切片、map 在构造期拒绝�
 - `time.Time`、`slog.Level`、`big.Int` 等标准库类型按已知 Schema 保留。
 
 `Format()` 每次返回独立副本（`Strict=true`），组件构造完成后只读，可并发
-复用到多个请求。Schema 推导、冻结编译、单值解析与严格解码由内部共享
-内核 `internal/jsonvalidation` 承担，与 `pkg/datamodel`、工具参数走同一
-实现；消息选择、refusal 与截断处理等 strict 政策仍归本组件。
+复用到多个请求。组件持有一份严格格式的 `datamodel.Model[T]` 副本：
+默认入口把 strict 规范化作为数据模型的构造回调只编译一次；消息选择、
+refusal 与截断处理等 strict 政策仍归本组件。
+
+### 从数据模型派生：`NewStructuredOutputFromModel`
+
+已配置 `WithSchema`/`WithValidator` 的 `datamodel.Model[T]` 可以派生
+严格副本接入输出组件：
+
+```go
+model, err := datamodel.New[Decision](
+    datamodel.WithSchema[Decision](func(s *jsonschema.Schema) error {
+        s.Properties["score"].Maximum = jsonschema.Ptr(100.0)
+        return nil
+    }),
+    datamodel.WithValidator(func(v Decision) error {
+        if v.Approved && v.Score < 60 {
+            return errors.New("low score cannot approve")
+        }
+        return nil
+    }),
+)
+output, err := llm.NewStructuredOutputFromModel(model)
+```
+
+派生副本把模型的 Schema 约束带进 `Format()`，Decode 时执行同一
+Schema、严格解码与业务检查；原模型不受影响，仍可用于普通业务 JSON。
+业务检查只在本地执行，不会自动写进发往模型的 Schema。模型中存在
+strict 无法约束的字段（`any`、动态 map）时，派生在构造期报错。
 
 ## 能力声明
 

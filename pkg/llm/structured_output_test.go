@@ -14,6 +14,7 @@ import (
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 type decision struct {
@@ -567,10 +568,17 @@ func TestStructuredOutputRejectsCodecBeyondFields(t *testing.T) {
 }
 
 func TestStructuredOutputFromModel(t *testing.T) {
+	errVerdict := errors.New("conflicting verdict")
 	model, err := datamodel.New[decision](
+		datamodel.WithSchema[decision](func(s *jsonschema.Schema) error {
+			// 给 reason 配一个长度上限，验证约束进入严格副本的 Format。
+			max := 10
+			s.Properties["reason"].MaxLength = &max
+			return nil
+		}),
 		datamodel.WithValidator(func(v decision) error {
 			if v.Approved && strings.Contains(v.Reason, "deny") {
-				return errors.New("conflicting verdict")
+				return errVerdict
 			}
 			return nil
 		}),
@@ -598,13 +606,26 @@ func TestStructuredOutputFromModel(t *testing.T) {
 	if !required["approved"] || !required["reason"] || strictSchema["additionalProperties"] != false {
 		t.Fatalf("strict schema = %s", format.Schema)
 	}
+	reasonProps, _ := strictSchema["properties"].(map[string]any)["reason"].(map[string]any)
+	if reasonProps["maxLength"] != float64(10) {
+		t.Fatalf("model constraint must reach strict format: %s", format.Schema)
+	}
 	// Decode 走严格副本并保留业务检查。
 	value, err := output.Decode([]schema.Message{assistantOf(`{"approved":false,"reason":"ok"}`)})
 	if err != nil || value.Approved || value.Reason != "ok" {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
-	if _, err := output.Decode([]schema.Message{assistantOf(`{"approved":true,"reason":"deny"}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
-		t.Fatalf("business check must run: %v", err)
+	// 超过模型配置的上限，严格副本拒绝；原模型按同样规则也拒绝，
+	// 说明约束来自同一来源。
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"approved":false,"reason":"far too long"}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("over-limit output must be rejected: %v", err)
+	}
+	// 业务检查错误穿过输出组件：errors.Is 同时命中三层。
+	_, err = output.Decode([]schema.Message{assistantOf(`{"approved":true,"reason":"deny"}`)})
+	if !errors.Is(err, llm.ErrInvalidStructuredOutput) ||
+		!errors.Is(err, datamodel.ErrInvalidData) ||
+		!errors.Is(err, errVerdict) {
+		t.Fatalf("error chain must expose all three classes: %v", err)
 	}
 	// 原模型不受影响：业务校验仍作用于它自身。
 	if _, err := model.DecodeJSON([]byte(`{"approved":true,"reason":"deny"}`)); err == nil {

@@ -84,11 +84,8 @@ func NewStructuredOutputFromModel[T any](model *datamodel.Model[T], options ...S
 // 无来源时直接构造，strict 规范化都以同一份 Schema 编辑执行，只编译一次。
 func strictOutputModel[T any](source ...*datamodel.Model[T]) (*datamodel.Model[T], error) {
 	t := reflect.TypeFor[T]()
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("structured output type %s must be a struct", t)
-	}
 	strictEdit := func(s *jsonschema.Schema) error {
-		return normalizeStrict(t, s, t.Name())
+		return strictOutputSchema(t, s)
 	}
 	if len(source) > 0 && source[0] != nil {
 		return source[0].WithSchema(strictEdit)

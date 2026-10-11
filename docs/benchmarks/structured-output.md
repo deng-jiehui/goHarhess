@@ -77,3 +77,21 @@ go test -p=1 ./pkg/state -run '^$' -bench '^BenchmarkGHFull$/^(CheckpointCodec|M
 ## 结论
 
 102 个场景覆盖校验通过，新增能力成本已单独记录。功能修复后重新双侧采样：首轮超标项全部达标；`CheckpointCodec/decode` 与 `MessageClone/1000/text` 仍有 10%~14% 的 ns/op 差异，剖面证明为同一代码、同一输入、同一 stdlib 热循环上的二进制布局效应，与本次改动无因果路径。按约定门槛如实保留残留记录，性能项维持待验收，供独立复核裁定。若仍要求门槛内，建议在确认安静的环境重新提取基线整轮对跑，而不是叠加局部复测。
+
+## 数据模型接入前后对比（2026-10-11，通用数据模型实施方案）
+
+改造前基线在 `8cde546` 采集，改造后在 `ea19dfe`（+文档改动）采集，条件相同（Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`、`.bench/go-cache`）。原始数据见 `.bench/results/datamodel/`（`llm-before/after`、`tool-before/after`、`model-after`、`rerun-*`）。
+
+首轮中位数对比超阈 5 项，按约定做同条件成对复测（worktree 双测试二进制、逐场景交错、各侧 n≥10）：
+
+| 场景 | 首轮 | 成对复测 | 结论 |
+| --- | --- | --- | --- |
+| `StructuredOutput/construct` | +77.2% | **+50.4%** | 真实回归：构造多一次 Schema 重解析（冻结隔离）与公共类型检查；一次性成本 |
+| `StructuredOutput/decode/fields=3` | +15.3% | **+13.8%** | 真实回归：3.4µs 微场景上约 +460ns 固定开销；fields=9+children=16 同轮仅 +1.7% |
+| `ToolBatch/calls=1/turns=100/history=on` | +16.5% | −2.8% | 漂移 |
+| `ToolBatch/calls=32/turns=100/history=on` | +22.6% | −0.6% | 漂移 |
+| `ToolBatch/calls=8/turns=10/history=off` | +10.2% | +0.1% | 漂移 |
+
+新增 `BenchmarkModelConstruct`（~112µs，一次构造）与 `BenchmarkModelDecode/{small,nested}`（~2.9µs/~31µs）。
+
+按约定门槛如实保留：`construct` 与 `decode/fields=3` 两项 ns/op 超阈未达标，性能项维持待验收；工具侧运行期无回归（B/op、allocs/op 全部持平）。

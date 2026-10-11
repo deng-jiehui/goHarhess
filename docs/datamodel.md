@@ -70,6 +70,17 @@ model, err := datamodel.New[Ticket](
 - `model.WithSchema(edit)`：在一份 Schema 副本上编辑后重新编译，
   返回新 `Model[T]`，原模型不受影响。
 
+## `any` 字段与业务检查的边界
+
+- `any` 字段按依赖的开放 Schema 处理：校验不做约束，解码按 JSON 值
+  原样进入 `any`（数字保留为 `json.Number`）。它与泛型约束无关——
+  `Model[T]` 的 T 就是解码目标类型本身。业务需要约束 `any` 内容时，
+  用 `WithSchema` 在 Schema 中显式表达，或改用具体类型。
+- 业务检查函数只在本地执行，不会自动变成 Schema 约束或发给模型的
+  规则。「结束时间不能早于开始时间」这类判断不会因为注册了 Go 函数
+  就出现在 `JSONSchema()` 中；发送侧能表达的约束仍需 `WithSchema`
+  显式配置。
+
 ## 与其他层的关系
 
 - **结构化输出**（`llm.StructuredOutput[T]`）：在更严的 strict 政策下
