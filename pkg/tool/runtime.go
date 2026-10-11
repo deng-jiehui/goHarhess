@@ -422,6 +422,9 @@ func (r *Runtime) invoke(
 	defer recoverPanic("user extension zone", &result, &err)
 	result, err = r.invokeMiddleware(ctx, control, state, semaphore, binding.value, spec, input, options, 0)
 	if err != nil {
+		// 统一归一 context 哨兵：终态回调、放弃退出事件与调用方拿到同一
+		// 起因——框架超时是 DeadlineExceeded，调用方取消是 Canceled。
+		err = contextSentinelCause(control, ctx, err)
 		return result, err
 	}
 	// 结果转 ContentBlocks 属同一次调用的收尾：转换失败按调用失败处理，

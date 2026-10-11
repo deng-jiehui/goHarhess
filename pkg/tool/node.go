@@ -445,6 +445,8 @@ func modelFacingToolError(call ToolCall, err error) string {
 		return fmt.Sprintf("tool %q does not exist", call.Name)
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Sprintf("tool %q timed out", call.Name)
+	case errors.Is(err, context.Canceled):
+		return fmt.Sprintf("tool %q canceled", call.Name)
 	case errors.Is(err, ErrToolUnavailable):
 		return fmt.Sprintf("tool %q is temporarily unavailable", call.Name)
 	case hasVisible:

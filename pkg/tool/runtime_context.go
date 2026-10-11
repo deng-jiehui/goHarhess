@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -80,6 +81,33 @@ func bindContext(control context.Context, values context.Context, state executio
 		cancel(nil)
 	}
 	return bound, cleanup
+}
+
+// contextSentinelCause 把返回路径上的 context 哨兵错误归一到真实起因：
+// bindContext 生成的 cancelCtx 其 Err() 恒为 context.Canceled——框架超时
+// 触发时工具与中间层看到的也是 Canceled，deadline/cancel 的真实区别只
+// 保留在 Cause 里。control 已死时用 control 的起因（框架超时→
+// DeadlineExceeded、调用方取消→Canceled）；仅 ctx 已死时用它的起因；
+// 都活着说明哨兵来自调用方自己的子 context，保留原错误。
+func contextSentinelCause(control, ctx context.Context, err error) error {
+	if err == nil ||
+		(!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		return err
+	}
+	switch {
+	case control.Err() != nil:
+		if cause := context.Cause(control); cause != nil {
+			return cause
+		}
+		return control.Err()
+	case ctx.Err() != nil:
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return ctx.Err()
+	default:
+		return err
+	}
 }
 
 // withHeldGroup 记录本次调用持有的组：写时复制 held map，兄弟调用互不

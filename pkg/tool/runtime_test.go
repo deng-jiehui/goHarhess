@@ -197,6 +197,51 @@ func TestConfiguredTimeoutControlsToolExecution(t *testing.T) {
 	}
 }
 
+// 工具直接回传 ctx.Err() 时，框架超时不允许被 bound ctx 的 cancelCtx
+// 包装误分类成 Canceled。循环执行覆盖 control.Done 与 completed 的
+// select 竞争：修复前约半数迭代会拿到 context canceled。
+func TestTimeoutClassificationSurvivesToolContextError(t *testing.T) {
+	config := defaultRuntimeConfig()
+	config.Timeout = 5 * time.Millisecond
+	runtime, err := NewRuntime(nil, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := NewFunctionTool(Spec{Name: "echo-ctx-err"}, func(ctx context.Context, input CallInput) (Result, error) {
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+	binding := registerTool(t, runtime, value)
+	for i := 0; i < 30; i++ {
+		if _, err := runtime.NewScope(1, 5*time.Millisecond).Execute(context.Background(), binding, CallInput{}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("iteration %d: Execute error = %v, want deadline exceeded", i, err)
+		}
+	}
+}
+
+// 同一循环下主动取消必须稳定分类为 Canceled，不被超时路径改写。
+func TestCancelClassificationStableAcrossIterations(t *testing.T) {
+	runtime := mustRuntime(t, nil)
+	value := NewFunctionTool(Spec{Name: "echo-ctx-err"}, func(ctx context.Context, input CallInput) (Result, error) {
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+	binding := registerTool(t, runtime, value)
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := runtime.NewScope(1).Execute(ctx, binding, CallInput{})
+			done <- err
+		}()
+		time.Sleep(2 * time.Millisecond)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d: Execute error = %v, want context canceled", i, err)
+		}
+	}
+}
+
 func TestEffectiveTimeoutEnforcesSystemCap(t *testing.T) {
 	tests := []struct {
 		name       string
