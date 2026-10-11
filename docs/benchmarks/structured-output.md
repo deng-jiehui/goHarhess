@@ -80,18 +80,19 @@ go test -p=1 ./pkg/state -run '^$' -bench '^BenchmarkGHFull$/^(CheckpointCodec|M
 
 ## 数据模型接入前后对比（2026-10-11，通用数据模型实施方案）
 
-改造前基线在 `8cde546` 采集，改造后在 `ea19dfe`（+文档改动）采集，`[]byte` 修复后在 `4f7ca39` 按相同条件重新采样，条件相同（Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`、`.bench/go-cache`）。原始数据见 `.bench/results/datamodel/`（`llm-before/after`、`tool-before/after`、`model-after`、`rerun-*`）。
+改造前基线在 `8cde546` 采集，改造后在 `ea19dfe`（+文档改动）采集，`[]byte` 与严格副本约束修复后在 `bc73017` 按相同条件重新采样，条件相同（Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`、`.bench/go-cache`）。原始数据见 `.bench/results/datamodel/`（`llm-before/after`、`tool-before/after`、`model-after`、`rerun-*`）。
 
-`4f7ca39` 中位数对比（go test 采样）与成对复测（worktree 双测试二进制、逐场景交错、各侧 n=20）：
+`bc73017` 成对复测（worktree 双测试二进制、逐场景交错、各侧 n=20）为最新证据：
 
-| 场景 | go test 采样 | 成对复测 | 结论 |
-| --- | --- | --- | --- |
-| `StructuredOutput/construct` | +56.7%（B/op +56.9%） | **+60.7%** | 真实回归：构造多一次 Schema 重解析（冻结隔离）、严格副本与公共类型检查；一次性成本 |
-| `StructuredOutput/decode/fields=3` | +3.2% | **+29.8%** | 真实回归：3.3~4.4µs 微场景上约 +1µs 固定校验开销；fields=9+children=16 同轮仅 +3.1% |
-| `ToolBatch/*`（9 个场景） | −10.4% ~ +7.5% | — | 漂移范围内，B/op、allocs/op 全部持平 |
+| 场景 | 成对复测 | 结论 |
+| --- | --- | --- |
+| `StructuredOutput/construct` | **+42.8%**（B/op +53.9%） | 真实回归：构造多一次 Schema 重解析（冻结隔离）、严格副本与公共类型检查；一次性成本 |
+| `StructuredOutput/decode/fields=3` | **+6.4%** | 微场景固定校验开销；四轮读数 +6.4%~+29.8% 波动，方向为正、量级随机器状态 |
+| `StructuredOutput/decode/fields=9_children=16` | +0.9% | 持平 |
+| `ToolBatch/*`（9 个场景 go test 采样） | −34.7% ~ −19.2% | 全部回落到基线以内，B/op、allocs/op 全部持平 |
 
-`decode/fields=3` 的复测读数在三轮间漂移较大（+13.8% → +29.8%），方向稳定为正、量级随机器状态波动；`construct` 三轮均稳定在 +50%~+78% 区间。
+construct 四轮成对读数 +42.8%~+60.7% 均为正，属真实回归；decode/fields=3 读数漂移大，按超阈方向如实保留。
 
 新增 `BenchmarkModelConstruct`（~112µs，一次构造）与 `BenchmarkModelDecode/{small,nested}`（~2.9µs/~31µs）。
 
-按约定门槛如实保留：`construct` 与 `decode/fields=3` 两项 ns/op 超阈未达标，性能项维持待验收；工具侧运行期无回归（B/op、allocs/op 全部持平）。
+按约定门槛如实保留：`construct` 与 `decode/fields=3` 的 ns/op 差异维持待验收（construct 各轮均确认真实回归，decode/fields=3 最新复测 +6.4% 已在门槛内但历史读数曾超阈）；工具侧运行期无回归（B/op、allocs/op 全部持平）。`after-commit.txt` 为 `bc73017`，与当前提交一致。
