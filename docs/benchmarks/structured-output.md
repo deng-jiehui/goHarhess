@@ -80,17 +80,17 @@ go test -p=1 ./pkg/state -run '^$' -bench '^BenchmarkGHFull$/^(CheckpointCodec|M
 
 ## 数据模型接入前后对比（2026-10-11，通用数据模型实施方案）
 
-改造前基线在 `8cde546` 采集，改造后在 `ea19dfe`（+文档改动）采集，条件相同（Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`、`.bench/go-cache`）。原始数据见 `.bench/results/datamodel/`（`llm-before/after`、`tool-before/after`、`model-after`、`rerun-*`）。
+改造前基线在 `8cde546` 采集，改造后在 `ea19dfe`（+文档改动）采集，`[]byte` 修复后在 `4f7ca39` 按相同条件重新采样，条件相同（Go 1.24.4、`-benchtime=1s -count=10 -cpu=1`、`.bench/go-cache`）。原始数据见 `.bench/results/datamodel/`（`llm-before/after`、`tool-before/after`、`model-after`、`rerun-*`）。
 
-首轮中位数对比超阈 5 项，按约定做同条件成对复测（worktree 双测试二进制、逐场景交错、各侧 n≥10）：
+`4f7ca39` 中位数对比（go test 采样）与成对复测（worktree 双测试二进制、逐场景交错、各侧 n=20）：
 
-| 场景 | 首轮 | 成对复测 | 结论 |
+| 场景 | go test 采样 | 成对复测 | 结论 |
 | --- | --- | --- | --- |
-| `StructuredOutput/construct` | +77.2% | **+50.4%** | 真实回归：构造多一次 Schema 重解析（冻结隔离）与公共类型检查；一次性成本 |
-| `StructuredOutput/decode/fields=3` | +15.3% | **+13.8%** | 真实回归：3.4µs 微场景上约 +460ns 固定开销；fields=9+children=16 同轮仅 +1.7% |
-| `ToolBatch/calls=1/turns=100/history=on` | +16.5% | −2.8% | 漂移 |
-| `ToolBatch/calls=32/turns=100/history=on` | +22.6% | −0.6% | 漂移 |
-| `ToolBatch/calls=8/turns=10/history=off` | +10.2% | +0.1% | 漂移 |
+| `StructuredOutput/construct` | +56.7%（B/op +56.9%） | **+60.7%** | 真实回归：构造多一次 Schema 重解析（冻结隔离）、严格副本与公共类型检查；一次性成本 |
+| `StructuredOutput/decode/fields=3` | +3.2% | **+29.8%** | 真实回归：3.3~4.4µs 微场景上约 +1µs 固定校验开销；fields=9+children=16 同轮仅 +3.1% |
+| `ToolBatch/*`（9 个场景） | −10.4% ~ +7.5% | — | 漂移范围内，B/op、allocs/op 全部持平 |
+
+`decode/fields=3` 的复测读数在三轮间漂移较大（+13.8% → +29.8%），方向稳定为正、量级随机器状态波动；`construct` 三轮均稳定在 +50%~+78% 区间。
 
 新增 `BenchmarkModelConstruct`（~112µs，一次构造）与 `BenchmarkModelDecode/{small,nested}`（~2.9µs/~31µs）。
 
