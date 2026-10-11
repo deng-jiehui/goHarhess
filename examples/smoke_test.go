@@ -22,6 +22,7 @@ var wantOutput = map[string][]string{
 	"groupchat":         {"analyst:", "critic:"},
 	"react":             {"sunny, 24C"},
 	"structured-output": {"one-shot: approved=false", "pipeline: approved=false", "fixture verified"},
+	"datamodel":         {"decoded: id=9007199254740993", "rejected:", "original model still accepts id=0"},
 }
 
 // TestExamples 逐个 go run 各示例，要求 2 分钟内退出码为 0 且输出包含预期片段。

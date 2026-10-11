@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goharness/goharness/pkg/datamodel"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
@@ -562,5 +563,69 @@ func TestStructuredOutputRejectsCodecBeyondFields(t *testing.T) {
 	}
 	if _, err := llm.NewStructuredOutput[pointerItem](); err == nil {
 		t.Fatal("pointer field custom codec accepted")
+	}
+}
+
+func TestStructuredOutputFromModel(t *testing.T) {
+	model, err := datamodel.New[decision](
+		datamodel.WithValidator(func(v decision) error {
+			if v.Approved && strings.Contains(v.Reason, "deny") {
+				return errors.New("conflicting verdict")
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := llm.NewStructuredOutputFromModel(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Format 使用严格副本：reason 为 required 且禁止额外字段。
+	format := output.Format()
+	var strictSchema map[string]any
+	if err := json.Unmarshal(format.Schema, &strictSchema); err != nil {
+		t.Fatal(err)
+	}
+	if !format.Strict {
+		t.Fatal("format must be strict")
+	}
+	required := map[string]bool{}
+	for _, item := range strictSchema["required"].([]any) {
+		required[item.(string)] = true
+	}
+	if !required["approved"] || !required["reason"] || strictSchema["additionalProperties"] != false {
+		t.Fatalf("strict schema = %s", format.Schema)
+	}
+	// Decode 走严格副本并保留业务检查。
+	value, err := output.Decode([]schema.Message{assistantOf(`{"approved":false,"reason":"ok"}`)})
+	if err != nil || value.Approved || value.Reason != "ok" {
+		t.Fatalf("value=%+v err=%v", value, err)
+	}
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"approved":true,"reason":"deny"}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("business check must run: %v", err)
+	}
+	// 原模型不受影响：业务校验仍作用于它自身。
+	if _, err := model.DecodeJSON([]byte(`{"approved":true,"reason":"deny"}`)); err == nil {
+		t.Fatal("source model validator must still apply to itself")
+	}
+	if _, err := llm.NewStructuredOutputFromModel[decision](nil); err == nil {
+		t.Fatal("nil model must be rejected")
+	}
+}
+
+func TestStructuredOutputFromModelRejectsUnstrictableSource(t *testing.T) {
+	type withAny struct {
+		Name string `json:"name"`
+		Data any    `json:"data"`
+	}
+	// 普通模型允许 any 字段；派生严格副本时按 strict 政策拒绝。
+	model, err := datamodel.New[withAny]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := llm.NewStructuredOutputFromModel(model); err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected strict rejection, got %v", err)
 	}
 }

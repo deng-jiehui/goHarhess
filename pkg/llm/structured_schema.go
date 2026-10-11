@@ -3,7 +3,6 @@ package llm
 import (
 	"encoding"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -11,17 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
 var (
-	jsonMarshalerType    = reflect.TypeFor[json.Marshaler]()
-	jsonUnmarshalerType  = reflect.TypeFor[json.Unmarshaler]()
-	textMarshalerType    = reflect.TypeFor[encoding.TextMarshaler]()
-	textUnmarshalerType  = reflect.TypeFor[encoding.TextUnmarshaler]()
-	stdlibSchemaTypes    = map[reflect.Type]bool{}
-	errStructuredNilType = errors.New("structured output type is nil")
+	jsonMarshalerType   = reflect.TypeFor[json.Marshaler]()
+	jsonUnmarshalerType = reflect.TypeFor[json.Unmarshaler]()
+	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
+	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+	stdlibSchemaTypes   = map[reflect.Type]bool{}
 )
 
 func init() {
@@ -36,32 +33,6 @@ func init() {
 	} {
 		stdlibSchemaTypes[t] = true
 	}
-}
-
-// compileStructuredSchema 为目标类型推导严格模式的 JSON Schema 并在构造期
-// 冻结编译校验器。T 必须是结构体；规范化为：对象禁止额外字段、所有导出字段
-// required、omitempty/omitzero 只允许指针字段（保持 required 但允许 null）、
-// 推导与 JSON 解码行为不一致的自定义编解码类型被拒绝。冻结产物同时用于
-// ResponseFormat（发给模型）与本地校验，保证两侧规则一致。
-func compileStructuredSchema(t reflect.Type) (*jsonvalidation.Compiled, error) {
-	if t == nil {
-		return nil, errStructuredNilType
-	}
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("structured output type %s must be a struct", t)
-	}
-	schemaObj, err := jsonvalidation.Infer(t)
-	if err != nil {
-		return nil, err
-	}
-	if err := normalizeStrict(t, schemaObj, t.Name()); err != nil {
-		return nil, err
-	}
-	compiled, err := jsonvalidation.Compile(schemaObj)
-	if err != nil {
-		return nil, fmt.Errorf("compile schema for %s: %w", t, err)
-	}
-	return compiled, nil
 }
 
 // normalizeStrict 沿 Go 类型与 Schema 并行下钻，把 strict 规则应用到每个

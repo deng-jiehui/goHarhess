@@ -9,9 +9,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/goharness/goharness/internal/jsonvalidation"
+	"github.com/goharness/goharness/pkg/datamodel"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // ErrInvalidStructuredOutput 标记结构化输出校验解码失败；错误链保留底层
@@ -49,12 +50,53 @@ var outputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // 组件只读，可并发复用。组件不持有模型引用，不发起模型调用。
 type StructuredOutput[T any] struct {
 	format ResponseFormat
-	schema *jsonvalidation.Compiled
+	// strictModel 是严格格式的数据模型副本：Format 与 Decode 共用同一份
+	// Schema，并保留来源模型的业务检查。
+	strictModel *datamodel.Model[T]
 }
 
-// NewStructuredOutput 构造校验解码组件：T 必须是结构体，推导出的严格模式
-// Schema 同时用于 Format（发送给模型）与本地校验。
+// NewStructuredOutput 构造校验解码组件：T 必须是结构体；严格规范化作为
+// 数据模型的构造回调，推导出的严格模式 Schema 同时用于 Format（发送给
+// 模型）与本地校验。
 func NewStructuredOutput[T any](options ...StructuredOutputOption) (*StructuredOutput[T], error) {
+	strictModel, err := strictOutputModel[T]()
+	if err != nil {
+		return nil, err
+	}
+	return newStructuredOutput(strictModel, options)
+}
+
+// NewStructuredOutputFromModel 从已配置好的数据模型生成严格格式副本：
+// 副本用于 Format 与 Decode，并保留模型的业务检查；原数据模型不受影响，
+// 仍可用于普通业务 JSON。
+func NewStructuredOutputFromModel[T any](model *datamodel.Model[T], options ...StructuredOutputOption) (*StructuredOutput[T], error) {
+	if model == nil {
+		return nil, errors.New("structured output source model is nil")
+	}
+	strictModel, err := strictOutputModel(model)
+	if err != nil {
+		return nil, err
+	}
+	return newStructuredOutput(strictModel, options)
+}
+
+// strictOutputModel 生成 T 的严格格式数据模型：从已有模型派生副本，或在
+// 无来源时直接构造，strict 规范化都以同一份 Schema 编辑执行，只编译一次。
+func strictOutputModel[T any](source ...*datamodel.Model[T]) (*datamodel.Model[T], error) {
+	t := reflect.TypeFor[T]()
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("structured output type %s must be a struct", t)
+	}
+	strictEdit := func(s *jsonschema.Schema) error {
+		return normalizeStrict(t, s, t.Name())
+	}
+	if len(source) > 0 && source[0] != nil {
+		return source[0].WithSchema(strictEdit)
+	}
+	return datamodel.New[T](datamodel.WithSchema[T](strictEdit))
+}
+
+func newStructuredOutput[T any](strictModel *datamodel.Model[T], options []StructuredOutputOption) (*StructuredOutput[T], error) {
 	var cfg structuredOutputConfig
 	for _, option := range options {
 		if option != nil {
@@ -68,18 +110,14 @@ func NewStructuredOutput[T any](options ...StructuredOutputOption) (*StructuredO
 			return nil, fmt.Errorf("structured output name %q must match %s", cfg.name, outputNamePattern)
 		}
 	}
-	compiled, err := compileStructuredSchema(reflect.TypeFor[T]())
-	if err != nil {
-		return nil, err
-	}
 	return &StructuredOutput[T]{
 		format: ResponseFormat{
 			Name:        name,
 			Description: cfg.description,
-			Schema:      compiled.JSONSchema(),
+			Schema:      strictModel.JSONSchema(),
 			Strict:      true,
 		},
-		schema: compiled,
+		strictModel: strictModel,
 	}, nil
 }
 
@@ -108,17 +146,9 @@ func (o *StructuredOutput[T]) Decode(messages []schema.Message) (T, error) {
 	if text == "" {
 		return zero, fmt.Errorf("%w: last assistant message has no text", ErrInvalidStructuredOutput)
 	}
-	raw := []byte(text)
-	instance, err := jsonvalidation.ParseJSON(raw)
+	value, err := o.strictModel.DecodeJSON([]byte(text))
 	if err != nil {
 		return zero, fmt.Errorf("%w: %w", ErrInvalidStructuredOutput, err)
-	}
-	if err := o.schema.Validate(instance); err != nil {
-		return zero, fmt.Errorf("%w: schema validation: %w", ErrInvalidStructuredOutput, err)
-	}
-	value, err := jsonvalidation.DecodeTyped[T](raw, true)
-	if err != nil {
-		return zero, fmt.Errorf("%w: decode into %T: %w", ErrInvalidStructuredOutput, value, err)
 	}
 	return value, nil
 }

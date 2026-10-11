@@ -49,10 +49,14 @@ T 必须是结构体（顶层指针、标量、切片、map 在构造期拒绝�
 - `json:",string"` 标签与 `json.Number` 字段在构造期拒绝：线路形态与推导
   类型不一致（前者按字符串包裹数字，后者相反）。带显式 JSON 名的匿名
   内嵌字段同样拒绝。
+- 接口字段（含 `any`、`[]any`）在构造期拒绝：推导为不限制约束的
+  Schema，strict 要求每个字段可约束。
 - `time.Time`、`slog.Level`、`big.Int` 等标准库类型按已知 Schema 保留。
 
 `Format()` 每次返回独立副本（`Strict=true`），组件构造完成后只读，可并发
-复用到多个请求。
+复用到多个请求。Schema 推导、冻结编译、单值解析与严格解码由内部共享
+内核 `internal/jsonvalidation` 承担，与 `pkg/datamodel`、工具参数走同一
+实现；消息选择、refusal 与截断处理等 strict 政策仍归本组件。
 
 ## 能力声明
 
@@ -80,10 +84,13 @@ model, err := llm.New(llm.Config{
 同时存在时返回 `llm.ErrResponseFormatConflict`（在发 HTTP 请求之前）。
 
 手写 `ResponseFormat` 在发请求前统一校验：`Name` 必须匹配
-`[A-Za-z0-9_-]{1,64}`，`Schema` 必须是合法 JSON 且根类型为 `object`；
-`Strict=true` 时递归要求每个对象节点 `additionalProperties=false` 且
-`required` 覆盖全部属性。组件生成的格式与手写格式走同一条校验路径，
-不合法的格式在发请求之前报错。
+`[A-Za-z0-9_-]{1,64}`，`Schema` 必须是合法 JSON 且根类型包含 `object`
+（`type:["object","null"]` 这类可空联合同样接受）；`Strict=true` 时递归
+要求每个对象节点 `additionalProperties=false` 且 `required` 覆盖全部
+属性——`anyOf`/`oneOf`/`allOf` 分支、`items`/`prefixItems`/
+`patternProperties`/`additionalProperties` 子 Schema 与 `$defs`/
+`definitions` 都在递归范围内，组合分支无法绕行 strict 规则。组件生成的
+格式与手写格式走同一条校验路径，不合法的格式在发请求之前报错。
 
 ## 用法一：单次回答 / Basic Agent
 
@@ -185,6 +192,7 @@ Invoke 与 Stream 使用相同规则。
 
 ## 相关文档
 
+- [通用数据模型](datamodel.md)
 - [模型](llm-providers.md)
 - [Agent](agent.md)
 - [检查点与中断](checkpoints-interrupts.md)

@@ -18,6 +18,7 @@
 | 公共流消费 | `examples/stream` |
 | 观测调用树 | `examples/observe` |
 | 结构化输出（单次 + Agent 后整理节点） | `examples/structured-output` |
+| 通用数据模型（JSON 校验 + 严格解码） | `examples/datamodel` |
 | 子 Agent（extensions 模块） | `extensions/examples/subagent` |
 
 ## 用底层节点显式构建 Agent 图
