@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
-	"github.com/google/jsonschema-go/jsonschema"
 )
 
 const (
@@ -78,7 +78,7 @@ type Binding struct {
 	value Tool
 	spec  Spec
 	// validator 是注册期预编译的参数 schema；nil 表示声明缺失校验规则。
-	validator *jsonschema.Resolved
+	validator *jsonvalidation.Compiled
 }
 
 // Spec returns a deep copy of the validated registration snapshot.

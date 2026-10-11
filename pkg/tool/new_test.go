@@ -60,6 +60,12 @@ func TestNewDecodesRawArgs(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected malformed args error for unknown field")
 	}
+	// 尾部第二个 JSON 值同样按畸形参数拒绝。
+	if _, err := search.Invoke(context.Background(), tool.CallInput{
+		RawArgs: `{"query":"q"} {"limit":1}`,
+	}); err == nil {
+		t.Fatal("expected malformed args error for trailing JSON value")
+	}
 }
 
 // 无 RawArgs 时回退到 Args map；空参数走零值。

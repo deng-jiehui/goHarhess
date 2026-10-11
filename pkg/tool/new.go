@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
-	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/goharness/goharness/pkg/schema"
 )
 
@@ -46,10 +47,10 @@ func New[A any, R any](name, description string, fn func(context.Context, A) (R,
 		}
 	}
 	var schemaErr error
-	if generated, err := jsonschema.For[A](nil); err != nil {
+	if generated, err := jsonvalidation.Infer(reflect.TypeFor[A]()); err != nil {
 		schemaErr = fmt.Errorf("tool %q args schema: %w", name, err)
 	} else {
-		data, err := json.Marshal(generated)
+		data, err := generated.MarshalJSON()
 		if err != nil {
 			schemaErr = fmt.Errorf("tool %q args schema: %w", name, err)
 		} else if err := json.Unmarshal(data, &spec.Parameters); err != nil {
@@ -63,16 +64,18 @@ func New[A any, R any](name, description string, fn func(context.Context, A) (R,
 		var args A
 		raw := strings.TrimSpace(input.RawArgs)
 		if raw == "" && len(input.Args) > 0 {
-			if data, err := json.Marshal(input.Args); err == nil {
-				raw = string(data)
+			data, err := json.Marshal(input.Args)
+			if err != nil {
+				return Result{}, fmt.Errorf("%w: serialize args: %v", ErrMalformedArgs, err)
 			}
+			raw = string(data)
 		}
 		if raw != "" && raw != "null" {
-			decoder := json.NewDecoder(strings.NewReader(raw))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&args); err != nil {
+			decoded, err := jsonvalidation.DecodeTyped[A]([]byte(raw), false)
+			if err != nil {
 				return Result{}, fmt.Errorf("%w: %v", ErrMalformedArgs, err)
 			}
+			args = decoded
 		}
 		output, err := fn(ctx, args)
 		if err != nil {
