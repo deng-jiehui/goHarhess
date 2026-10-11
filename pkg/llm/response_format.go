@@ -63,8 +63,9 @@ func validateResponseFormat(format *ResponseFormat) error {
 	if err := json.Unmarshal(format.Schema, &root); err != nil {
 		return fmt.Errorf("response format schema is not valid JSON: %w", err)
 	}
-	if t, _ := root["type"].(string); t != "object" {
-		return fmt.Errorf("response format schema root type must be %q, got %q", "object", t)
+	_, hasProperties := root["properties"].(map[string]any)
+	if !schemaNodeMayBeObject(root, hasProperties) {
+		return fmt.Errorf("response format schema root type must include %q, got %v", "object", root["type"])
 	}
 	if format.Strict {
 		if err := validateStrictSchemaNode(root, "schema"); err != nil {
@@ -76,9 +77,13 @@ func validateResponseFormat(format *ResponseFormat) error {
 
 // validateStrictSchemaNode 递归核对 strict 约束：每个对象节点必须关闭额外
 // 字段并把全部属性列入 required，与原生 strict 格式的服务端要求一致。
+// 对象判定覆盖 type 标量与联合（type:["object","null"]）以及仅声明
+// properties 的节点；anyOf/oneOf/allOf 分支、items/additionalProperties/
+// patternProperties 子 Schema（含数组形式）与 $defs/definitions 同样递归，
+// 组合节点无法绕行 strict 规则。
 func validateStrictSchemaNode(node map[string]any, path string) error {
 	properties, _ := node["properties"].(map[string]any)
-	if t, _ := node["type"].(string); t == "object" || properties != nil {
+	if schemaNodeMayBeObject(node, properties != nil) {
 		if additional, ok := node["additionalProperties"]; !ok || additional != false {
 			return fmt.Errorf("strict response format %s must set additionalProperties=false", path)
 		}
@@ -103,11 +108,14 @@ func validateStrictSchemaNode(node map[string]any, path string) error {
 			}
 		}
 	}
-	for _, key := range []string{"items", "additionalProperties"} {
-		if child, ok := node[key].(map[string]any); ok {
-			if err := validateStrictSchemaNode(child, path+"."+key); err != nil {
-				return err
-			}
+	for _, key := range []string{"items", "additionalProperties", "patternProperties"} {
+		if err := validateStrictSchemaChildren(node[key], path+"."+key); err != nil {
+			return err
+		}
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+		if err := validateStrictSchemaChildren(node[key], path+"."+key); err != nil {
+			return err
 		}
 	}
 	for _, key := range []string{"$defs", "definitions"} {
@@ -122,4 +130,65 @@ func validateStrictSchemaNode(node map[string]any, path string) error {
 		}
 	}
 	return nil
+}
+
+// schemaNodeMayBeObject 判断节点是否可能匹配对象实例：type 标量为 object、
+// type 联合包含 object，或节点直接声明了 properties。
+func schemaNodeMayBeObject(node map[string]any, hasProperties bool) bool {
+	if hasProperties {
+		return true
+	}
+	switch declared := node["type"].(type) {
+	case string:
+		return declared == "object"
+	case []any:
+		for _, item := range declared {
+			if item == "object" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateStrictSchemaChildren 递归处理 Schema 子项：单个子 Schema、
+// 子 Schema 数组或按名字组织的子 Schema 表。
+func validateStrictSchemaChildren(value any, path string) error {
+	switch children := value.(type) {
+	case map[string]any:
+		if isSchemaMap(children) {
+			return validateStrictSchemaNode(children, path)
+		}
+		for name, child := range children {
+			if object, ok := child.(map[string]any); ok {
+				if err := validateStrictSchemaNode(object, path+"."+name); err != nil {
+					return err
+				}
+			}
+		}
+	case []any:
+		for index, child := range children {
+			if object, ok := child.(map[string]any); ok {
+				if err := validateStrictSchemaNode(object, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// isSchemaMap 区分"子 Schema"与"按名字组织的 Schema 表"：含 Schema 关键字的
+// 对象按单个子 Schema 处理，否则按名字表递归。
+func isSchemaMap(node map[string]any) bool {
+	for _, key := range []string{
+		"type", "properties", "items", "additionalProperties", "required",
+		"anyOf", "oneOf", "allOf", "$defs", "definitions", "enum", "const",
+		"patternProperties", "prefixItems", "$ref", "format", "minimum", "maximum",
+	} {
+		if _, ok := node[key]; ok {
+			return true
+		}
+	}
+	return false
 }

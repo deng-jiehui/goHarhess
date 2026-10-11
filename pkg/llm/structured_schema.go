@@ -11,15 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/google/jsonschema-go/jsonschema"
 )
-
-// compiledSchema 是构造期产物：规范化后的 Schema 字节与编译好的校验器。
-// 一份 Schema 同时用于 ResponseFormat（发给模型）与本地校验，保证两侧一致。
-type compiledSchema struct {
-	raw      json.RawMessage
-	resolved *jsonschema.Resolved
-}
 
 var (
 	jsonMarshalerType    = reflect.TypeFor[json.Marshaler]()
@@ -45,32 +39,29 @@ func init() {
 }
 
 // compileStructuredSchema 为目标类型推导严格模式的 JSON Schema 并在构造期
-// 编译校验器。T 必须是结构体；规范化为：对象禁止额外字段、所有导出字段
+// 冻结编译校验器。T 必须是结构体；规范化为：对象禁止额外字段、所有导出字段
 // required、omitempty/omitzero 只允许指针字段（保持 required 但允许 null）、
-// 推导与 JSON 解码行为不一致的自定义编解码类型被拒绝。
-func compileStructuredSchema(t reflect.Type) (*compiledSchema, error) {
+// 推导与 JSON 解码行为不一致的自定义编解码类型被拒绝。冻结产物同时用于
+// ResponseFormat（发给模型）与本地校验，保证两侧规则一致。
+func compileStructuredSchema(t reflect.Type) (*jsonvalidation.Compiled, error) {
 	if t == nil {
 		return nil, errStructuredNilType
 	}
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("structured output type %s must be a struct", t)
 	}
-	schemaObj, err := jsonschema.ForType(t, nil)
+	schemaObj, err := jsonvalidation.Infer(t)
 	if err != nil {
-		return nil, fmt.Errorf("derive schema for %s: %w", t, err)
+		return nil, err
 	}
 	if err := normalizeStrict(t, schemaObj, t.Name()); err != nil {
 		return nil, err
 	}
-	raw, err := schemaObj.MarshalJSON()
+	compiled, err := jsonvalidation.Compile(schemaObj)
 	if err != nil {
-		return nil, fmt.Errorf("marshal schema for %s: %w", t, err)
+		return nil, fmt.Errorf("compile schema for %s: %w", t, err)
 	}
-	resolved, err := schemaObj.Resolve(nil)
-	if err != nil {
-		return nil, fmt.Errorf("resolve schema for %s: %w", t, err)
-	}
-	return &compiledSchema{raw: raw, resolved: resolved}, nil
+	return compiled, nil
 }
 
 // normalizeStrict 沿 Go 类型与 Schema 并行下钻，把 strict 规则应用到每个
@@ -144,16 +135,17 @@ func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 	return nil
 }
 
-// rejectCustomCodec 拒绝推导结果与 encoding/json 实际编解码不一致的类型：
-// 自定义 Marshaler/Unmarshaler/TextMarshaler/TextUnmarshaler 会改变线路
-// 形态，推导出的 Schema 无法准确描述。
+// rejectCustomCodec 拒绝推导结果与 strict 编解码不一致的类型：自定义
+// Marshaler/Unmarshaler/TextMarshaler/TextUnmarshaler 会改变线路形态；
+// 接口类型推导为不限制约束的 Schema，strict 输出要求每个字段可约束，
+// 同样在构造期拒绝。
 func rejectCustomCodec(path string, t reflect.Type) error {
 	if stdlibSchemaTypes[t] {
 		return nil
 	}
 	if t.Kind() == reflect.Interface {
-		// any 等接口类型推导为不限制约束的 Schema，与解码行为一致。
-		return nil
+		return fmt.Errorf("field %s: interface type %s cannot be constrained by "+
+			"a strict schema; use a concrete field type", path, t)
 	}
 	if t == reflect.TypeFor[json.Number]() {
 		// encoding/json 把 Number 按原始数字收发，而推导按 string 种类处理，

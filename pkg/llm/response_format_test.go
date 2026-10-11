@@ -247,3 +247,50 @@ func TestOpenAICompatibleRefusalPreservedInMessageExtra(t *testing.T) {
 		t.Fatalf("refusal extra = %#v", response.Messages[0].Extra)
 	}
 }
+
+func TestStrictFormatRejectsCompositeBypass(t *testing.T) {
+	requests := 0
+	server := newFormatFixture(t, func(map[string]any) { requests++ })
+	model := formatModel(t, server, &llm.Capabilities{Streaming: true, ToolCalls: true, JSONSchema: true})
+
+	cases := map[string]string{
+		"anyOf non-strict object": `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,"anyOf":[{"type":"object","properties":{"b":{"type":"string"}},"required":["b"]}]}`,
+		"nullable object union":   `{"type":["object","null"],"properties":{"a":{"type":"string"}},"required":["a"]}`,
+		"oneOf missing required":  `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,"oneOf":[{"type":"object","properties":{"b":{"type":"string"}},"additionalProperties":false}]}`,
+		"defs non-strict object":  `{"type":"object","properties":{"a":{"$ref":"#/$defs/x"}},"required":["a"],"additionalProperties":false,"$defs":{"x":{"type":"object","properties":{"y":{"type":"string"}}}}}`,
+		"tuple items non-strict":  `{"type":"object","properties":{"a":{"type":"array","prefixItems":[{"type":"object","properties":{"y":{"type":"string"}}}]}},"required":["a"],"additionalProperties":false}`,
+	}
+	for name, raw := range cases {
+		requests = 0
+		format := &llm.ResponseFormat{Name: "f", Schema: json.RawMessage(raw), Strict: true}
+		_, err := model.Invoke(context.Background(), llm.Request{}, llm.WithResponseFormat(format))
+		if err == nil {
+			t.Fatalf("%s: non-strict composite schema accepted", name)
+		}
+		if requests != 0 {
+			t.Fatalf("%s: invalid format reached the wire", name)
+		}
+	}
+}
+
+func TestStrictFormatAcceptsValidUnions(t *testing.T) {
+	requests := 0
+	server := newFormatFixture(t, func(map[string]any) { requests++ })
+	model := formatModel(t, server, &llm.Capabilities{Streaming: true, ToolCalls: true, JSONSchema: true})
+
+	cases := map[string]string{
+		"nullable strict object": `{"type":["object","null"],"properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}`,
+		"anyOf strict objects":   `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,"anyOf":[{"type":"object","properties":{"b":{"type":"string"}},"required":["b"],"additionalProperties":false}]}`,
+		"anyOf mixed types":      `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,"anyOf":[{"type":"string"},{"type":"object","properties":{"b":{"type":"string"}},"required":["b"],"additionalProperties":false}]}`,
+	}
+	for name, raw := range cases {
+		requests = 0
+		format := &llm.ResponseFormat{Name: "f", Schema: json.RawMessage(raw), Strict: true}
+		if _, err := model.Invoke(context.Background(), llm.Request{}, llm.WithResponseFormat(format)); err != nil {
+			t.Fatalf("%s: valid strict composite rejected: %v", name, err)
+		}
+		if requests != 1 {
+			t.Fatalf("%s: expected one request, got %d", name, requests)
+		}
+	}
+}

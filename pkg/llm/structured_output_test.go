@@ -221,6 +221,22 @@ func TestStructuredOutputRejectsCustomCodec(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputRejectsAnyField(t *testing.T) {
+	// any 推导为不限制约束的 Schema，strict 无法约束该字段，构造期拒绝。
+	type withAny struct {
+		Data any `json:"data"`
+	}
+	if _, err := llm.NewStructuredOutput[withAny](); err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("err = %v", err)
+	}
+	type withNestedAny struct {
+		Items []any `json:"items"`
+	}
+	if _, err := llm.NewStructuredOutput[withNestedAny](); err == nil {
+		t.Fatal("[]any field accepted")
+	}
+}
+
 func TestStructuredOutputNestedStrict(t *testing.T) {
 	output, err := llm.NewStructuredOutput[nestedAnswer]()
 	if err != nil {

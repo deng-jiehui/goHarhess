@@ -1,9 +1,7 @@
 package llm
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +9,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
-	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // ErrInvalidStructuredOutput 标记结构化输出校验解码失败；错误链保留底层
@@ -50,8 +48,8 @@ var outputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // 解码为 T。构造期完成类型检查、Schema 规范化与校验器编译；构造完成后
 // 组件只读，可并发复用。组件不持有模型引用，不发起模型调用。
 type StructuredOutput[T any] struct {
-	format   ResponseFormat
-	resolved *jsonschema.Resolved
+	format ResponseFormat
+	schema *jsonvalidation.Compiled
 }
 
 // NewStructuredOutput 构造校验解码组件：T 必须是结构体，推导出的严格模式
@@ -78,10 +76,10 @@ func NewStructuredOutput[T any](options ...StructuredOutputOption) (*StructuredO
 		format: ResponseFormat{
 			Name:        name,
 			Description: cfg.description,
-			Schema:      compiled.raw,
+			Schema:      compiled.JSONSchema(),
 			Strict:      true,
 		},
-		resolved: compiled.resolved,
+		schema: compiled,
 	}, nil
 }
 
@@ -111,18 +109,15 @@ func (o *StructuredOutput[T]) Decode(messages []schema.Message) (T, error) {
 		return zero, fmt.Errorf("%w: last assistant message has no text", ErrInvalidStructuredOutput)
 	}
 	raw := []byte(text)
-	instance, err := decodeSingleJSON(raw)
+	instance, err := jsonvalidation.ParseJSON(raw)
 	if err != nil {
-		return zero, err
+		return zero, fmt.Errorf("%w: %w", ErrInvalidStructuredOutput, err)
 	}
-	if err := o.resolved.Validate(instance); err != nil {
+	if err := o.schema.Validate(instance); err != nil {
 		return zero, fmt.Errorf("%w: schema validation: %w", ErrInvalidStructuredOutput, err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	decoder.DisallowUnknownFields()
-	var value T
-	if err := decoder.Decode(&value); err != nil {
+	value, err := jsonvalidation.DecodeTyped[T](raw, true)
+	if err != nil {
 		return zero, fmt.Errorf("%w: decode into %T: %w", ErrInvalidStructuredOutput, value, err)
 	}
 	return value, nil
@@ -153,50 +148,6 @@ func finalAssistantMessage(messages []schema.Message) (schema.Message, error) {
 		return message, nil
 	}
 	return schema.Message{}, fmt.Errorf("%w: no assistant message", ErrInvalidStructuredOutput)
-}
-
-// decodeSingleJSON 用 UseNumber 解析唯一 JSON 值；只允许前后空白，尾部出现
-// 第二个 JSON 值或额外文本都拒绝。返回值中的 json.Number 已规范化为 int64
-// 或 float64，使 Schema 校验器能识别数值类型；类型化解码另从原始字节进行。
-func decodeSingleJSON(raw []byte) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var instance any
-	if err := decoder.Decode(&instance); err != nil {
-		return nil, fmt.Errorf("%w: malformed JSON: %w", ErrInvalidStructuredOutput, err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("%w: trailing JSON value after the first", ErrInvalidStructuredOutput)
-		}
-		return nil, fmt.Errorf("%w: trailing data after JSON value: %w", ErrInvalidStructuredOutput, err)
-	}
-	return normalizeJSONNumbers(instance), nil
-}
-
-// normalizeJSONNumbers 把 UseNumber 解码结果中的 json.Number 转为校验器可
-// 识别的数值种类：能进入 int64 的转 int64，否则转 float64。
-func normalizeJSONNumbers(instance any) any {
-	switch value := instance.(type) {
-	case json.Number:
-		if n, err := value.Int64(); err == nil {
-			return n
-		}
-		if n, err := value.Float64(); err == nil {
-			return n
-		}
-		return value.String()
-	case []any:
-		for index, item := range value {
-			value[index] = normalizeJSONNumbers(item)
-		}
-	case map[string]any:
-		for key, item := range value {
-			value[key] = normalizeJSONNumbers(item)
-		}
-	}
-	return instance
 }
 
 // OptionTypes 声明组件不接受任何模型配置类型：图广播按声明类型匹配，
