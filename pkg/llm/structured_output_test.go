@@ -636,6 +636,25 @@ func TestStructuredOutputFromModel(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputByteSliceField(t *testing.T) {
+	// []byte 在 Go JSON 中是 base64 字符串；strict 副本同样接受该形态。
+	type blob struct {
+		ID  int    `json:"id"`
+		Raw []byte `json:"raw"`
+	}
+	output, err := llm.NewStructuredOutput[blob]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := output.Decode([]schema.Message{assistantOf(`{"id":1,"raw":"aGVsbG8="}`)})
+	if err != nil || string(value.Raw) != "hello" {
+		t.Fatalf("value=%+v err=%v", value, err)
+	}
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"id":1,"raw":[1,2]}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("array form must be rejected: %v", err)
+	}
+}
+
 func TestStructuredOutputFromModelRejectsUnstrictableSource(t *testing.T) {
 	type withAny struct {
 		Name string `json:"name"`

@@ -7,9 +7,10 @@ JSON Schema 并在构造期冻结编译，对外部 JSON 输入提供校验、�
 
 ```go
 type Ticket struct {
-    ID    int64  `json:"id" jsonschema:"ticket identifier"`
-    Title string `json:"title"`
-    Tags  []string `json:"tags,omitempty"`
+    ID       int64    `json:"id" jsonschema:"ticket identifier"`
+    Title    string   `json:"title"`
+    Priority string   `json:"priority,omitempty"`
+    Tags     []string `json:"tags,omitempty"`
 }
 
 model, err := datamodel.New[Ticket]()
@@ -28,7 +29,9 @@ ticket, err := model.DecodeJSON([]byte(`{"id":1,"title":"t"}`))
    `big.Int/Rat/Float`）与库推导一致，允许使用。
 2. **Schema 推导**：字段名按 `json` 标签；无 `omitempty`/`omitzero` 的
    字段进入 `required`；结构体 `additionalProperties:false`；`jsonschema`
-   标签提供描述；指针/切片字段产生 nullable/数组表达。
+   标签提供描述；指针/切片字段产生 nullable/数组表达。`[]byte` 按
+   `encoding/json` 的 base64 字符串形态约束（`["null","string"]`），
+   不接受整数数组；`[N]byte` 数组仍按整数数组。
 3. **冻结编译**：Schema 序列化后重新解析并编译校验器——发送方、本地
    校验与之后编辑用的都是同一份字节。
 
@@ -50,7 +53,7 @@ ticket, err := model.DecodeJSON([]byte(`{"id":1,"title":"t"}`))
 
 ```go
 model, err := datamodel.New[Ticket](
-    datamodel.WithSchema(func(s *jsonschema.Schema) error {
+    datamodel.WithSchema[Ticket](func(s *jsonschema.Schema) error {
         s.Properties["id"].Minimum = jsonschema.Ptr(1.0)
         return nil
     }),

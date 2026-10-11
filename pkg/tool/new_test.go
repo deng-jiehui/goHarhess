@@ -68,6 +68,31 @@ func TestNewDecodesRawArgs(t *testing.T) {
 	}
 }
 
+// []byte 参数按 Go 的 base64 字符串形态声明与解码。
+func TestNewByteSliceArgs(t *testing.T) {
+	var got struct {
+		Raw []byte `json:"raw"`
+	}
+	upload := tool.New("upload", "上传",
+		func(_ context.Context, a struct {
+			Raw []byte `json:"raw"`
+		}) (string, error) {
+			got = a
+			return "ok", nil
+		})
+	spec, _ := upload.Spec(), struct{}{}
+	props, _ := spec.Parameters["properties"].(map[string]any)
+	rawSchema, _ := props["raw"].(map[string]any)
+	if types, _ := rawSchema["type"].([]any); len(types) != 2 || types[1] != "string" {
+		t.Fatalf("raw schema = %v", rawSchema)
+	}
+	if _, err := upload.Invoke(context.Background(), tool.CallInput{
+		RawArgs: `{"raw":"aGVsbG8="}`,
+	}); err != nil || string(got.Raw) != "hello" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
 // 无 RawArgs 时回退到 Args map；空参数走零值。
 func TestNewArgsFallback(t *testing.T) {
 	var got searchArgs

@@ -64,12 +64,18 @@ refusal 与截断处理等 strict 政策仍归本组件。
 严格副本接入输出组件：
 
 ```go
-model, err := datamodel.New[Decision](
-    datamodel.WithSchema[Decision](func(s *jsonschema.Schema) error {
+type ScoredDecision struct {
+    Approved bool   `json:"approved"`
+    Score    int    `json:"score"`
+    Reason   string `json:"reason"`
+}
+
+model, err := datamodel.New[ScoredDecision](
+    datamodel.WithSchema[ScoredDecision](func(s *jsonschema.Schema) error {
         s.Properties["score"].Maximum = jsonschema.Ptr(100.0)
         return nil
     }),
-    datamodel.WithValidator(func(v Decision) error {
+    datamodel.WithValidator(func(v ScoredDecision) error {
         if v.Approved && v.Score < 60 {
             return errors.New("low score cannot approve")
         }

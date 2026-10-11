@@ -143,6 +143,32 @@ func TestPointerAndNullHandling(t *testing.T) {
 	}
 }
 
+func TestByteSliceRoundTrip(t *testing.T) {
+	// Go 把非 nil 的 []byte 编码为 base64 字符串，nil 编码为 null；
+	// Schema 必须描述字符串形态而不是整数数组。
+	model := newProfileModel(t)
+	var doc map[string]any
+	if err := json.Unmarshal(model.JSONSchema(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	props, _ := doc["properties"].(map[string]any)
+	avatar, _ := props["avatar"].(map[string]any)
+	if types, _ := avatar["type"].([]any); len(types) != 2 || types[1] != "string" {
+		t.Fatalf("avatar schema = %v", avatar)
+	}
+	value, err := model.DecodeJSON([]byte(`{"name":"a","age":1,"avatar":"aGVsbG8="}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(value.Avatar) != "hello" {
+		t.Fatalf("avatar = %q", value.Avatar)
+	}
+	// 整数数组形态（旧推导）按新 Schema 拒绝。
+	if _, err := model.DecodeJSON([]byte(`{"name":"a","age":1,"avatar":[104,105]}`)); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("array form must be rejected: %v", err)
+	}
+}
+
 func TestMapAndSliceFields(t *testing.T) {
 	type withMap struct {
 		Labels map[string]int `json:"labels"`

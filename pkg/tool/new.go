@@ -50,6 +50,8 @@ func New[A any, R any](name, description string, fn func(context.Context, A) (R,
 	if generated, err := jsonvalidation.Infer(reflect.TypeFor[A]()); err != nil {
 		schemaErr = fmt.Errorf("tool %q args schema: %w", name, err)
 	} else {
+		// 修正 []byte 参数：Go 按 base64 字符串编码，不是整数数组。
+		jsonvalidation.NormalizeBinary(reflect.TypeFor[A](), generated)
 		data, err := generated.MarshalJSON()
 		if err != nil {
 			schemaErr = fmt.Errorf("tool %q args schema: %w", name, err)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goharness/goharness/internal/jsonvalidation"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
@@ -42,6 +43,8 @@ func strictOutputSchema(t reflect.Type, s *jsonschema.Schema) error {
 	if t.Kind() != reflect.Struct {
 		return fmt.Errorf("structured output type %s must be a struct", t)
 	}
+	// 修正 []byte 字段：strict 同样按 Go 的 base64 字符串形态约束。
+	jsonvalidation.NormalizeBinary(t, s)
 	return normalizeStrict(t, s, t.Name())
 }
 
@@ -57,6 +60,10 @@ func normalizeStrict(t reflect.Type, s *jsonschema.Schema, path string) error {
 	}
 	if err := rejectCustomCodec(path, t); err != nil {
 		return err
+	}
+	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+		// []byte 已由 NormalizeBinary 替换为 null/string，没有子节点可下钻。
+		return nil
 	}
 	switch t.Kind() {
 	case reflect.Struct:

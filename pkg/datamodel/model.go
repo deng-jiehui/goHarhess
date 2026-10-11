@@ -38,6 +38,8 @@ func New[T any](options ...Option[T]) (*Model[T], error) {
 	if err != nil {
 		return nil, err
 	}
+	// 修正 []byte 的推导产物：Go 按 base64 字符串编码，不是整数数组。
+	jsonvalidation.NormalizeBinary(t, schema)
 	for _, edit := range cfg.schemaEdits {
 		if edit == nil {
 			continue

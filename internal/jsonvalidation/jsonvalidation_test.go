@@ -141,6 +141,73 @@ func TestCompileNilRejected(t *testing.T) {
 	}
 }
 
+func TestNormalizeBinaryFixesByteSlices(t *testing.T) {
+	type shape struct {
+		Raw   []byte            `json:"raw"`
+		Ptr   *[]byte           `json:"ptr,omitempty"`
+		Multi [][]byte          `json:"multi,omitempty"`
+		Map   map[string][]byte `json:"m,omitempty"`
+		Name  string            `json:"name"`
+	}
+	s, err := Infer(reflect.TypeFor[shape]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	NormalizeBinary(reflect.TypeFor[shape](), s)
+	raw := s.Properties["raw"]
+	if len(raw.Types) != 2 || raw.Types[0] != "null" || raw.Types[1] != "string" {
+		t.Fatalf("[]byte must normalize to null|string, got %+v", raw)
+	}
+	if s.Properties["name"].Type != "string" {
+		t.Fatal("unrelated fields must be unchanged")
+	}
+	multi := s.Properties["multi"]
+	if multi.Items == nil || len(multi.Items.Types) != 2 || multi.Items.Types[1] != "string" {
+		t.Fatalf("[][]byte items must normalize, got %+v", multi.Items)
+	}
+	mv := s.Properties["m"].AdditionalProperties
+	if mv == nil || len(mv.Types) != 2 || mv.Types[1] != "string" {
+		t.Fatalf("map[string][]byte values must normalize, got %+v", mv)
+	}
+}
+
+func TestByteSliceValidateAndDecodeRoundTrip(t *testing.T) {
+	type shape struct {
+		Raw []byte `json:"raw"`
+	}
+	s, err := Infer(reflect.TypeFor[shape]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	NormalizeBinary(reflect.TypeFor[shape](), s)
+	compiled, err := Compile(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Go 正常输出：非 nil []byte 是 base64 字符串，nil 是 null。
+	for _, input := range []string{
+		`{"raw":"aGVsbG8="}`,
+		`{"raw":null}`,
+	} {
+		instance, err := ParseJSON([]byte(input))
+		if err != nil {
+			t.Fatalf("%s: %v", input, err)
+		}
+		if err := compiled.Validate(instance); err != nil {
+			t.Fatalf("%s must validate: %v", input, err)
+		}
+	}
+	if instance, _ := ParseJSON([]byte(`{"raw":[104,105]}`)); instance != nil {
+		if err := compiled.Validate(instance); err == nil {
+			t.Fatal("integer-array form must be rejected after normalization")
+		}
+	}
+	decoded, err := DecodeTyped[shape]([]byte(`{"raw":"aGVsbG8="}`), true)
+	if err != nil || string(decoded.Raw) != "hello" {
+		t.Fatalf("decoded=%+v err=%v", decoded, err)
+	}
+}
+
 func TestInferAndCompileRoundTrip(t *testing.T) {
 	type shape struct {
 		Name string `json:"name"`

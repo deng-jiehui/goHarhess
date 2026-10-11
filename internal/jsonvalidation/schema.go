@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -35,6 +36,67 @@ func Infer(t reflect.Type) (*jsonschema.Schema, error) {
 		return nil, fmt.Errorf("infer schema for %s: %w", t, err)
 	}
 	return schema, nil
+}
+
+// NormalizeBinary 修正字节切片字段的推导结果：依赖库把 []byte 推导为
+// null/integer 数组，而 encoding/json 把非 nil 字节切片编码为 base64
+// 字符串（nil 仍编为 null）。沿 Go 类型与 Schema 并行下钻，把 []byte 节点
+// 替换为 null/string 联合，保留描述。[N]byte 数组按整数数组编码，
+// 不在修正范围。结构体字段名沿用 json 标签规则。
+func NormalizeBinary(t reflect.Type, s *jsonschema.Schema) {
+	if t == nil || s == nil {
+		return
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if isByteSlice(t) {
+		description := s.Description
+		*s = jsonschema.Schema{Types: []string{"null", "string"}, Description: description}
+		return
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		for _, field := range reflect.VisibleFields(t) {
+			if field.Anonymous {
+				// 内嵌字段自身不成属性；具名内嵌由数据模型另行拒绝。
+				continue
+			}
+			name, omit := jsonFieldName(field)
+			if omit {
+				continue
+			}
+			if prop := s.Properties[name]; prop != nil {
+				NormalizeBinary(field.Type, prop)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		NormalizeBinary(t.Elem(), s.Items)
+	case reflect.Map:
+		if t.Key().Kind() == reflect.String && s.AdditionalProperties != nil {
+			NormalizeBinary(t.Elem(), s.AdditionalProperties)
+		}
+	}
+}
+
+func isByteSlice(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8
+}
+
+// jsonFieldName 返回字段的 JSON 名与是否省略（与推导器的字段名规则一致）。
+func jsonFieldName(f reflect.StructField) (string, bool) {
+	if !f.IsExported() {
+		return "", true
+	}
+	name := f.Name
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		if head, _, found := strings.Cut(tag, ","); head == "-" && !found {
+			return "", true
+		} else if head != "" {
+			name = head
+		}
+	}
+	return name, false
 }
 
 // Compile 先序列化再经 CompileJSON 重新解析为独立 Schema：调用方之后修改
