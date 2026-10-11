@@ -655,6 +655,47 @@ func TestStructuredOutputByteSliceField(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputFromModelPreservesBinaryConstraint(t *testing.T) {
+	// 派生严格副本不得重复归一化 []byte 节点：来源模型已修正为
+	// null/string，重复替换会抹掉 WithSchema 配置的字符串约束。
+	type blob struct {
+		Data []byte `json:"data"`
+	}
+	model, err := datamodel.New[blob](
+		datamodel.WithSchema[blob](func(s *jsonschema.Schema) error {
+			max := 4
+			s.Properties["data"].MaxLength = &max
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := llm.NewStructuredOutputFromModel(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var strictSchema map[string]any
+	if err := json.Unmarshal(output.Format().Schema, &strictSchema); err != nil {
+		t.Fatal(err)
+	}
+	dataProps, _ := strictSchema["properties"].(map[string]any)["data"].(map[string]any)
+	if dataProps["maxLength"] != float64(4) {
+		t.Fatalf("binary constraint must reach strict format: %s", output.Format().Schema)
+	}
+	// 两侧都拒绝超长输入："aGVsbG8=" 有 8 个字符，超过 maxLength=4。
+	if err := model.ValidateJSON([]byte(`{"data":"aGVsbG8="}`)); !errors.Is(err, datamodel.ErrInvalidData) {
+		t.Fatalf("source model must reject over-limit input: %v", err)
+	}
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"data":"aGVsbG8="}`)}); !errors.Is(err, llm.ErrInvalidStructuredOutput) {
+		t.Fatalf("strict copy must reject over-limit input: %v", err)
+	}
+	// 合规输入两侧都通过。
+	if _, err := output.Decode([]schema.Message{assistantOf(`{"data":"aGk="}`)}); err != nil {
+		t.Fatalf("valid input must decode: %v", err)
+	}
+}
+
 func TestStructuredOutputFromModelRejectsUnstrictableSource(t *testing.T) {
 	type withAny struct {
 		Name string `json:"name"`
