@@ -13,6 +13,7 @@ import (
 	redisstore "github.com/goharness/goharness/extensions/state/redis"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/runnable"
+	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/state"
 )
 
@@ -195,6 +196,34 @@ func BenchmarkGHRedis(b *testing.B) {
 				}
 			})
 		}
+	}
+
+	// 固定长度日志的重复保存：日志不变，逐条比对全部哈希后只写记录。
+	// 量的是会话历史下每次保存的客户端编码与脚本前缀比对成本。
+	for _, history := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("RedisStore/save_log_compare/history=%d", history), func(b *testing.B) {
+			conversation := fmt.Sprintf("compare-%d", history)
+			if err := fixture.store.Delete(ctx, conversation); err != nil {
+				b.Fatalf("reset compare target: %v", err)
+			}
+			seed := benchRedisCheckpoint(4 << 10)
+			seed.ConversationID = conversation
+			for i := 0; i < history; i++ {
+				seed.Messages = append(seed.Messages, schema.UserMessage(fmt.Sprintf("history message %04d", i)))
+			}
+			latest, err := fixture.store.Save(ctx, seed)
+			if err != nil {
+				b.Fatalf("seed compare history: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				latest, err = fixture.store.Save(ctx, latest)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 
 	// 同样 16 节点图的 sync / async 完整执行。固定会话名 +
