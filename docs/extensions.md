@@ -46,6 +46,22 @@ cachedStore, err := retrievalcache.NewCachedVectorStore(vectorStore,
 扩展包含内存和 Redis 缓存存储。核心包不会导入这些依赖，
 应用也可以替换为自定义的 `CacheStore` 或 `VectorCacheStore` 实现。
 
+## 并发压测工具
+
+`extensions/examples/loadtest` 用可配置延迟的假模型对 Agent 做并发压测：
+会话数、并发数、同会话争用比例、工具数量、历史长度、`none|memory|redis`
+存储与 `async|sync` durability 都可配置；输出端到端与模型/存储各阶段的
+P50/P90/P99 分位、错误计数、协程数与内存增量，支持 `-cpuprofile`、
+`-memprofile` 与 `-pprofaddr`。`seed` 模式只播种会话历史，用于测量存储
+侧内存留存；`-probe` 在测量窗口内探测 Redis PING 延迟。
+
+```powershell
+cd extensions
+go run ./examples/loadtest -store redis -redisaddr 127.0.0.1:6379 -sessions 64 -concurrency 8 -requests 256 -history 200 -tools 2 -durability sync -probe -json result.json
+```
+
+阶段六基线测量见 [benchmarks/pre-stage6](benchmarks/pre-stage6.md)。
+
 ## Redis Checkpoint 存储
 
 Redis Checkpoint 持久化同样是可选适配器：
