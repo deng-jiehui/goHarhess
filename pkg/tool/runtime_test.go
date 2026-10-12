@@ -242,6 +242,40 @@ func TestCancelClassificationStableAcrossIterations(t *testing.T) {
 	}
 }
 
+// 取消携带自定义原因时保留 Canceled 类别并把原因附进错误链；
+// 调用方期限先于工具期限触发时仍归类为 DeadlineExceeded。
+func TestContextCauseKeepsStandardClassification(t *testing.T) {
+	runtime := mustRuntime(t, nil)
+	value := NewFunctionTool(Spec{Name: "slow"}, func(ctx context.Context, input CallInput) (Result, error) {
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+	binding := registerTool(t, runtime, value)
+
+	// 调用方带原因的取消。
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := runtime.NewScope(1, 5*time.Second).Execute(ctx, binding, CallInput{})
+		done <- err
+	}()
+	time.Sleep(5 * time.Millisecond)
+	reason := errors.New("user pressed stop")
+	cancel(reason)
+	if err := <-done; !errors.Is(err, context.Canceled) ||
+		!strings.Contains(err.Error(), "user pressed stop") {
+		t.Fatalf("custom cancel: err=%v, want Canceled class + reason", err)
+	}
+
+	// 调用方期限（带原因）先于工具期限：仍归类为 DeadlineExceeded。
+	ctx2, cancel2 := context.WithTimeoutCause(context.Background(), 10*time.Millisecond, errors.New("call budget exhausted"))
+	defer cancel2()
+	if _, err := runtime.NewScope(1, 5*time.Second).Execute(ctx2, binding, CallInput{}); !errors.Is(err, context.DeadlineExceeded) ||
+		!strings.Contains(err.Error(), "call budget exhausted") {
+		t.Fatalf("custom deadline: err=%v, want DeadlineExceeded class + reason", err)
+	}
+}
+
 func TestEffectiveTimeoutEnforcesSystemCap(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -233,7 +233,7 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 	control, cancel := context.WithTimeout(ctx, effectiveTimeout(timeout))
 	defer cancel()
 	if err := acquire(control, s.runtime.workers); err != nil {
-		return Result{}, err
+		return Result{}, classifiedCause(control)
 	}
 
 	// 放弃告警引用的是执行前制备的输入快照：工具与中间件可能在后台继续
@@ -277,9 +277,9 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 		count := s.runtime.markAbandoned(binding.spec.Name)
 		track.mu.Unlock()
 		if hasObserver {
-			s.runtime.alertAbandoned(ctx, binding.spec, alertInput, count, control.Err(), invocation)
+			s.runtime.alertAbandoned(ctx, binding.spec, alertInput, count, classifiedCause(control), invocation)
 		}
-		return Result{}, control.Err()
+		return Result{}, classifiedCause(control)
 	case completed := <-completed:
 		return completed.result, completed.err
 	}
