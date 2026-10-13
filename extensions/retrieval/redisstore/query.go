@@ -163,6 +163,23 @@ func keywordQuery(s *Store, req retrieval.TextSearchRequest) (query string, err 
 	return strings.Join(parts, " "), nil
 }
 
+// listQuery 构造纯过滤列举查询：`@ns:{..} (过滤)`，不带向量与关键词，
+// 供入库清理等维护路径分页扫描。
+func listQuery(s *Store, namespace string, filters retrieval.Metadata) (string, error) {
+	ns, err := nsFilter(namespace)
+	if err != nil {
+		return "", err
+	}
+	clauses, err := filtersClause(s, filters)
+	if err != nil {
+		return "", err
+	}
+	if clauses == "" {
+		return ns, nil
+	}
+	return ns + " " + clauses, nil
+}
+
 // nsFilterKey 是关键词查询里携带命名空间的保留键——TextSearchRequest
 // 没有独立 Namespace 字段，由 Scoped 调用方以该键注入。
 const nsFilterKey = "_ns"

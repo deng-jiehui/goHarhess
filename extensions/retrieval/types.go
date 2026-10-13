@@ -49,6 +49,9 @@ const (
 	VectorQueryOperation  VectorOperation = "query"
 	VectorUpsertOperation VectorOperation = "upsert"
 	VectorDeleteOperation VectorOperation = "delete"
+	// VectorListOperation 按命名空间与元数据过滤列举记录（不需向量），
+	// 供入库清理旧版本分块等维护路径使用。返回命中至少含 ID 与 Metadata。
+	VectorListOperation VectorOperation = "list"
 )
 
 // VectorRequest is the single operation envelope implemented by vector
@@ -59,6 +62,8 @@ type VectorRequest struct {
 	Records   []VectorRecord
 	Namespace string
 	IDs       []string
+	// Filter 是 list 操作的元数据精确匹配过滤；_ns 等保留键由存储拒绝。
+	Filter Metadata
 }
 
 type VectorResponse struct {

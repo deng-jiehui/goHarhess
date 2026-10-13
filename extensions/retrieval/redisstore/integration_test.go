@@ -175,6 +175,88 @@ func TestRedisStackKeywordAndDelete(t *testing.T) {
 	}
 }
 
+// list 操作：命名空间+元数据过滤的纯分页列举，用于入库清理旧版本。
+func TestRedisStackList(t *testing.T) {
+	c := stackClient(t)
+	ctx := context.Background()
+	idx := "it_ls_" + time.Now().Format("150405.000000")
+	s, err := redisstore.New(redisstore.Config{
+		Client: c, Index: idx, Prefix: "it:" + idx + ":", Dim: 4,
+		Distance: redisstore.Cosine,
+		Metadata: []redisstore.MetadataField{
+			{Name: "_rag_document_id", Type: redisstore.FieldTag},
+			{Name: "_rag_version", Type: redisstore.FieldTag},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Do(ctx, "FT.DROPINDEX", idx).Err()
+	if err := s.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vs := s.VectorStore()
+	_, err = vs.Invoke(ctx, retrieval.VectorRequest{
+		Operation: retrieval.VectorUpsertOperation,
+		Records: []retrieval.VectorRecord{
+			{ID: "d1", Namespace: "ta", Text: "a", Vector: vec(1), Metadata: retrieval.Metadata{"_rag_document_id": "doc", "_rag_version": "v1"}},
+			{ID: "d2", Namespace: "ta", Text: "b", Vector: vec(1), Metadata: retrieval.Metadata{"_rag_document_id": "doc", "_rag_version": "v1"}},
+			{ID: "d3", Namespace: "ta", Text: "c", Vector: vec(1), Metadata: retrieval.Metadata{"_rag_document_id": "doc", "_rag_version": "v2"}},
+			{ID: "x1", Namespace: "tb", Text: "d", Vector: vec(1), Metadata: retrieval.Metadata{"_rag_document_id": "doc", "_rag_version": "v1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	resp, err := vs.Invoke(ctx, retrieval.VectorRequest{
+		Operation: retrieval.VectorListOperation,
+		Namespace: "ta",
+		Filter:    retrieval.Metadata{"_rag_document_id": "doc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Hits) != 3 {
+		t.Fatalf("list hits = %d, want 3 (tb excluded)", len(resp.Hits))
+	}
+	// 按版本过滤出旧块并删除——入库清理的两步后半。
+	var stale []string
+	for _, h := range resp.Hits {
+		if h.Metadata["_rag_version"] != "v2" {
+			stale = append(stale, h.ID)
+		}
+	}
+	if len(stale) != 2 {
+		t.Fatalf("stale = %v", stale)
+	}
+	if _, err := vs.Invoke(ctx, retrieval.VectorRequest{
+		Operation: retrieval.VectorDeleteOperation, Namespace: "ta", IDs: stale,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	resp, err = vs.Invoke(ctx, retrieval.VectorRequest{
+		Operation: retrieval.VectorListOperation,
+		Namespace: "ta",
+		Filter:    retrieval.Metadata{"_rag_document_id": "doc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Hits) != 1 || resp.Hits[0].ID != "d3" {
+		t.Fatalf("after cleanup hits = %+v", resp.Hits)
+	}
+	// 空命名空间拒绝。
+	_, err = vs.Invoke(ctx, retrieval.VectorRequest{
+		Operation: retrieval.VectorListOperation, Filter: retrieval.Metadata{"_rag_document_id": "doc"},
+	})
+	if err == nil {
+		t.Fatal("empty namespace must fail")
+	}
+}
+
 func TestRedisStackEnsureIndexMismatch(t *testing.T) {
 	c := stackClient(t)
 	ctx := context.Background()

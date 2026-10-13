@@ -293,6 +293,9 @@ func (s *Store) invokeVector(ctx context.Context, req retrieval.VectorRequest, _
 		return retrieval.VectorResponse{Hits: hits}, err
 	case retrieval.VectorDeleteOperation:
 		return retrieval.VectorResponse{}, s.delete(ctx, req.Namespace, req.IDs)
+	case retrieval.VectorListOperation:
+		hits, err := s.list(ctx, req.Namespace, req.Filter)
+		return retrieval.VectorResponse{Hits: hits}, err
 	default:
 		return retrieval.VectorResponse{}, fmt.Errorf("redisstore: unknown operation %q", req.Operation)
 	}
@@ -319,7 +322,7 @@ func (s *Store) vectorQuery(ctx context.Context, q *retrieval.VectorQuery) ([]re
 	res, err := s.client.FTSearchWithArgs(ctx, s.index, query, &redis.FTSearchOptions{
 		Params:         map[string]interface{}{"vec": encodeVector(q.Vector)},
 		Limit:          k,
-		Return:         []redis.FTSearchReturn{{FieldName: "text"}, {FieldName: "meta"}},
+		Return:         s.returnFields(),
 		DialectVersion: 2,
 	}).Result()
 	if err != nil {
@@ -349,7 +352,7 @@ func (s *Store) invokeKeyword(ctx context.Context, req retrieval.TextSearchReque
 	res, err := s.client.FTSearchWithArgs(ctx, s.index, query, &redis.FTSearchOptions{
 		WithScores:     true,
 		Limit:          k,
-		Return:         []redis.FTSearchReturn{{FieldName: "text"}, {FieldName: "meta"}},
+		Return:         s.returnFields(),
 		DialectVersion: 2,
 	}).Result()
 	if err != nil {
@@ -448,6 +451,44 @@ func (s *Store) delete(ctx context.Context, namespace string, ids []string) erro
 			return err
 		}
 	}
+}
+
+// list 按命名空间+声明的元数据过滤分页扫描记录；返回 ID 与元数据，
+// 不需要向量。维护路径专用，不进入召回链路。
+func (s *Store) list(ctx context.Context, namespace string, filters retrieval.Metadata) ([]retrieval.SearchHit, error) {
+	query, err := listQuery(s, namespace, filters)
+	if err != nil {
+		return nil, err
+	}
+	var hits []retrieval.SearchHit
+	const page = 500
+	for offset := 0; ; offset += page {
+		res, err := s.client.FTSearchWithArgs(ctx, s.index, query, &redis.FTSearchOptions{
+			LimitOffset:    offset,
+			Limit:          page,
+			Return:         s.returnFields(),
+			DialectVersion: 2,
+		}).Result()
+		if err != nil {
+			return nil, fmt.Errorf("redisstore: list scan: %w", err)
+		}
+		for _, doc := range res.Docs {
+			hits = append(hits, s.docToHit(doc))
+		}
+		if len(res.Docs) < page {
+			return hits, nil
+		}
+	}
+}
+
+// returnFields 是统一的 RETURN 清单：text/meta 之外带上全部声明字段，
+// 声明字段是独立 hash 字段，不 RETURN 就不会回填进命中元数据。
+func (s *Store) returnFields() []redis.FTSearchReturn {
+	out := []redis.FTSearchReturn{{FieldName: "text"}, {FieldName: "meta"}}
+	for name := range s.metadata {
+		out = append(out, redis.FTSearchReturn{FieldName: name})
+	}
+	return out
 }
 
 // declaredFieldNames 返回可过滤字段名（调试用）。

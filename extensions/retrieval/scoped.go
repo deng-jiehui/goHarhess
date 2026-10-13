@@ -44,7 +44,7 @@ func (s *scopedVector) Invoke(ctx context.Context, req VectorRequest, options ..
 			}
 			req.Records[i].Namespace = tid
 		}
-	case VectorDeleteOperation:
+	case VectorDeleteOperation, VectorListOperation:
 		if req.Namespace != "" && req.Namespace != tid {
 			return VectorResponse{}, tenant.ErrTenantMismatch
 		}
