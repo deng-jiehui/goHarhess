@@ -176,12 +176,14 @@ func (c *CachedVectorStore) Stats() VectorCacheStats {
 type vectorCacheContextKey int
 
 const (
-	vectorCacheTenantKey vectorCacheContextKey = iota
-	vectorCacheBypassKey
+	vectorCacheBypassKey vectorCacheContextKey = iota
 )
 
+// WithVectorCacheTenant 标记本次检索调用所属的缓存租户域，缓存键按它
+// 派生。键载体与 retrieval.Scoped 共用同一个（retrieval.WithNamespace），
+// 保证缓存与存储的租户来源一致。
 func WithVectorCacheTenant(ctx context.Context, tenant string) context.Context {
-	return context.WithValue(ctx, vectorCacheTenantKey, strings.TrimSpace(tenant))
+	return coreretrieval.WithNamespace(ctx, strings.TrimSpace(tenant))
 }
 
 func WithVectorCacheBypass(ctx context.Context) context.Context {
@@ -305,7 +307,7 @@ func (c *CachedVectorStore) invalidate(ctx context.Context, operation string, na
 }
 
 func (c *CachedVectorStore) cacheKey(ctx context.Context, query coreretrieval.VectorQuery, version uint64) (string, error) {
-	tenant, _ := ctx.Value(vectorCacheTenantKey).(string)
+	tenant, _ := coreretrieval.NamespaceFromContext(ctx)
 	if tenant == "" {
 		tenant = "default"
 	}
