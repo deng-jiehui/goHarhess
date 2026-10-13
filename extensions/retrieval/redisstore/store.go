@@ -1,6 +1,9 @@
 // Package redisstore 用带 Search 模块的 Redis（Redis Stack / Redis 8）
 // 同时实现向量存储与关键词检索，与会话数据共用一套 Redis。
 // 租户隔离是强制的：每个查询都带 @ns 前置过滤，空命名空间直接报错。
+//
+// 客户端必须是 RESP2（redis.Options{Protocol: 2}）：go-redis 的
+// FT.* 命令在 RESP3 下有解析缺陷，FT.SEARCH 会静默返回空结果。
 package redisstore
 
 import (
