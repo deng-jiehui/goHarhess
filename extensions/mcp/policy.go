@@ -6,9 +6,9 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"time"
 	"unicode"
 
+	"github.com/goharness/goharness/extensions/internal/netguard"
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -70,7 +70,7 @@ func (p Policy) validate(config Config) (Policy, error) {
 			if err != nil {
 				return out, err
 			}
-			if !hostAllowed(host, out.AllowedHosts) {
+			if !netguard.HostAllowed(host, out.AllowedHosts) {
 				return out, fmt.Errorf("mcp policy: endpoint host %q is not in AllowedHosts", host)
 			}
 		}
@@ -112,25 +112,6 @@ func endpointHost(endpoint string) (string, error) {
 		return "", fmt.Errorf("mcp policy: cannot determine endpoint host %q", endpoint)
 	}
 	return host, nil
-}
-
-func hostAllowed(host string, allowed []string) bool {
-	for _, entry := range allowed {
-		entry = strings.ToLower(strings.TrimSpace(entry))
-		if entry == "" {
-			continue
-		}
-		if strings.HasPrefix(entry, "*.") {
-			if host == entry[2:] || strings.HasSuffix(host, entry[1:]) {
-				return true
-			}
-			continue
-		}
-		if host == entry {
-			return true
-		}
-	}
-	return false
 }
 
 func contains(list []string, value string) bool {
@@ -194,45 +175,12 @@ func (p Policy) sanitizeDescription(description string) string {
 	return clean[:max]
 }
 
-// secureDialContext 返回拨号前检查解析地址的 DialContext：全部解析结果
-// 中任一是回环/私网/链路本地/未指定地址即拒绝；通过后拨已检查的 IP，
-// 避免 DNS 重绑定在检查与连接之间换地址。
+// secureDialContext/secureTransport 委托共享的 netguard 拨号检查，
+// 与 extensions/media 的媒体解析器保持同一套私网拦截规则。
 func secureDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-		if err != nil {
-			return nil, fmt.Errorf("mcp policy: resolve %s: %w", host, err)
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("mcp policy: no address for %s", host)
-		}
-		for _, ip := range ips {
-			if blockedIP(ip) {
-				return nil, fmt.Errorf("mcp policy: endpoint %s resolves to blocked address %s", host, ip)
-			}
-		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
-	}
+	return netguard.SecureDialContext("mcp policy")
 }
 
-func blockedIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
-}
-
-// secureTransport 为 BlockPrivateNetworks 构造独立 transport：基于默认
-// transport 克隆后替换 DialContext，不与共享 httpclient.Pool 混用。
 func secureTransport() *http.Transport {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
-	}
-	transport := base.Clone()
-	transport.DialContext = secureDialContext()
-	return transport
+	return netguard.SecureTransport("mcp policy")
 }

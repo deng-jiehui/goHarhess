@@ -156,3 +156,36 @@ ctx = otel.With(ctx, tracer) // 或 observe.With(ctx, otel.Observer(tracer))
 ```
 
 接入与事件模型见[观测](observability.md)。
+
+## 媒体解析
+
+`extensions/media` 在模型调用边界解析消息里的媒体块：`MediaContent.URI`
+指向本地或远端来源时按策略取回内容换成内联 data（JSON base64），解析
+结果只进本次请求的消息副本——调用方消息、检查点里保存的始终是 URI
+引用，不存媒体字节。
+
+```go
+resolver, err := media.NewResolver(media.ResolverConfig{
+    AllowedSchemes:       []string{"https", "file"},
+    AllowedHosts:         []string{"cdn.example.com", "*.example.com"},
+    FileRoots:            []string{"/var/app/uploads"},
+    MaxBytes:             4 << 20,
+    AllowedMIME:          []string{"image/png", "image/jpeg"},
+    BlockPrivateNetworks: true,
+    Pool:                 httpclient.DefaultPool, // 私网拦截时忽略，换独立 transport
+})
+visionModel := resolver.WrapModel(model)
+```
+
+策略默认全不放行：协议要列入 `AllowedSchemes`，http(s) 主机要列入
+`AllowedHosts`（精确或 `*.` 后缀，按主机名匹配不含端口），`file://`
+路径必须落在 `FileRoots` 内（`..` 穿越会被拒绝）。内容按 `MaxBytes`
+限量读取，声明 MIME 必须在 `AllowedMIME` 内且与内容嗅探一致。
+`BlockPrivateNetworks` 在拨号层拦截回环、私网、链路本地与未指定地址，
+与 MCP 信任策略共用 `internal/netguard` 的同一套检查。模型生成或用户
+提供的 URL 只有命中白名单才会被抓取。
+
+`media.NewStoreGuard(store, maxInlineBytes)` 是检查点守卫装饰器：内联
+媒体数据超过阈值（按编码长度计）的保存直接返回 `ErrMediaTooLarge`，
+防止内联字节撑大存储；`state.RollbackBasisReader` 等可选接口照常
+透传。
