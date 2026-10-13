@@ -81,7 +81,7 @@ agent：agent.New(model, opts...) 在同一引擎上装配 ReAct 图
 input := []schema.Message{
     schema.NewMessage(schema.RoleUser,
         schema.NewTextBlock("Describe this image"),
-        schema.NewImageBlock("file:///tmp/image.png", "image/png"),
+        schema.NewImageBlock("https://example.com/image.png", "image/png"),
     ),
 }
 assistant := schema.NewMessage(schema.RoleAssistant,
@@ -93,6 +93,11 @@ assistant := schema.NewMessage(schema.RoleAssistant,
 顶层访问器（`TextBlocks`、`JoinedText`、`FunctionToolCalls` 等）只返回克隆后的
 同类载荷，不隐式展平或重排；`Opaque` 块保留 Provider 专属 JSON。`isError=true`
 的工具结果是模型可见内容，不是传输错误。
+
+多模态输入：内置 OpenAI 兼容适配器目前只支持**图片输入**——`image` 块的
+`URI` 仅接受 http(s) 地址，`file://` 等本地 URI 需在发送前解析成 `data:`
+URI（或改用 `Data` 内联 base64）；文件、音频、视频块暂不支持，会在编码时
+明确报错。发送图片要求 `Capabilities.Vision` 显式开启（默认关闭）。
 
 ## 恢复
 

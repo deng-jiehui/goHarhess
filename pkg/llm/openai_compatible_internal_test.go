@@ -50,7 +50,7 @@ func TestOpenAICompatibleEncodesBlockMessages(t *testing.T) {
 		schema.NewFunctionToolCallBlock("call-1", "weather", `{"city":"Shanghai"}`),
 		schema.NewFunctionToolCallBlock("call-2", "air", `{"city":"Shanghai"}`),
 	)}
-	encoded, err := encodeOpenAIMessages(messages, true)
+	encoded, err := encodeOpenAIMessages(messages, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestOpenAICompatibleRejectsOpaqueBlock(t *testing.T) {
 		schema.UserMessage("ok"),
 		schema.NewMessage(schema.RoleUser, schema.NewOpaqueBlock("vendor", json.RawMessage(`{"x":1}`))),
 	}
-	_, err := encodeOpenAIMessages(messages, false)
+	_, err := encodeOpenAIMessages(messages, false, false)
 	if err == nil || !strings.Contains(err.Error(), "messages[1].content_blocks[0]") || !strings.Contains(err.Error(), "opaque") {
 		t.Fatalf("error=%v", err)
 	}
@@ -88,14 +88,14 @@ func TestOpenAICompatibleRejectsInterleavedToolCallOrder(t *testing.T) {
 	messages := []schema.Message{schema.NewMessage(schema.RoleAssistant,
 		schema.NewTextBlock("before"), schema.NewFunctionToolCallBlock("c", "f", `{}`), schema.NewTextBlock("after"),
 	)}
-	_, err := encodeOpenAIMessages(messages, true)
+	_, err := encodeOpenAIMessages(messages, true, false)
 	if err == nil || !strings.Contains(err.Error(), "messages[0].content_blocks[2]") {
 		t.Fatalf("err=%v", err)
 	}
 }
 
 func TestOpenAICompatibleRejectsDisabledReasoning(t *testing.T) {
-	_, err := encodeOpenAIMessages([]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewReasoningBlock("plan", ""))}, false)
+	_, err := encodeOpenAIMessages([]schema.Message{schema.NewMessage(schema.RoleAssistant, schema.NewReasoningBlock("plan", ""))}, false, false)
 	if err == nil || !strings.Contains(err.Error(), "reasoning") {
 		t.Fatalf("err=%v", err)
 	}
@@ -204,7 +204,7 @@ func TestOpenAIStreamPassThroughRemovesPrivateAppendMarker(t *testing.T) {
 
 func TestOpenAIToolResultRejectsMultipleNestedBlocks(t *testing.T) {
 	m := schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock("c", "f", false, schema.NewTextBlock("a"), schema.NewTextBlock("b")))
-	_, err := encodeOpenAIMessages([]schema.Message{m}, true)
+	_, err := encodeOpenAIMessages([]schema.Message{m}, true, false)
 	if err == nil || !strings.Contains(err.Error(), "function tool result") {
 		t.Fatalf("err=%v", err)
 	}

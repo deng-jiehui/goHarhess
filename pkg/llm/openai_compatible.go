@@ -281,6 +281,38 @@ var reservedGenerateKeys = map[string]struct{}{
 	"model": {}, "messages": {}, "stream": {}, "tools": {}, "functions": {},
 }
 
+// ErrVisionUnsupported 报告向未声明 Vision 能力的模型发送图片输入。
+var ErrVisionUnsupported = errors.New("model does not support image input")
+
+// encodeOpenAIImagePart 把图片块编成 OpenAI 的 image_url 部分：
+// http(s) URI 原样传出；内联 Data（JSON 字符串承载的 base64）编成
+// data URI；本地 file:// 等 URI 在适配器层不解析（由发送前的解析器
+// 负责），遇到未解析的本地 URI 返回明确错误。
+func encodeOpenAIImagePart(messageIndex, blockIndex int, media *schema.MediaContent) (map[string]any, error) {
+	if media == nil {
+		return nil, fmt.Errorf("messages[%d].content_blocks[%d]: image block has no content", messageIndex, blockIndex)
+	}
+	uri := strings.TrimSpace(media.URI)
+	if uri != "" {
+		if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+			return map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}}, nil
+		}
+		return nil, fmt.Errorf("messages[%d].content_blocks[%d]: image URI %q is not an http(s) URL; resolve local URIs to data URIs before sending", messageIndex, blockIndex, uri)
+	}
+	if len(media.Data) > 0 {
+		var encoded string
+		if err := json.Unmarshal(media.Data, &encoded); err != nil {
+			return nil, fmt.Errorf("messages[%d].content_blocks[%d]: image inline data must be a JSON base64 string", messageIndex, blockIndex)
+		}
+		mimeType := media.MIMEType
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		return map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mimeType + ";base64," + encoded}}, nil
+	}
+	return nil, fmt.Errorf("messages[%d].content_blocks[%d]: image block has neither URI nor inline data", messageIndex, blockIndex)
+}
+
 func checkReservedGenerateKeys(config GenerateConfig) error {
 	for key := range config {
 		if _, reserved := reservedGenerateKeys[key]; reserved {
@@ -309,7 +341,7 @@ func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functi
 		payload["response_format"] = encodeResponseFormat(*opts.ResponseFormat)
 	}
 	payload["model"] = m.model
-	encodedMessages, err := encodeOpenAIMessages(messages, m.includeReasoningContent)
+	encodedMessages, err := encodeOpenAIMessages(messages, m.includeReasoningContent, m.capabilities.Vision)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI-compatible messages: %w", err)
 	}
@@ -702,7 +734,7 @@ func encodeResponseFormat(format ResponseFormat) map[string]any {
 	}
 }
 
-func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]map[string]any, error) {
+func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool, vision bool) ([]map[string]any, error) {
 	encoded := make([]map[string]any, 0, len(messages))
 	for messageIndex, message := range messages {
 		role := string(message.Role)
@@ -713,6 +745,15 @@ func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]m
 			"role": role,
 		}
 		var text, reasoning strings.Builder
+		// parts 非空时 content 走数组形式：文本与图片按块顺序混排；
+		// 纯文本消息保持字符串形式不变。
+		var parts []map[string]any
+		flushText := func() {
+			if text.Len() > 0 {
+				parts = append(parts, map[string]any{"type": "text", "text": text.String()})
+				text.Reset()
+			}
+		}
 		seenCall := false
 		toolCalls := make([]map[string]any, 0)
 		var result *schema.FunctionToolResult
@@ -725,6 +766,19 @@ func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]m
 				if block.Text != nil {
 					text.WriteString(block.Text.Text)
 				}
+			case schema.ContentBlockTypeImage:
+				if !vision {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: %w (Vision capability not declared)", messageIndex, blockIndex, ErrVisionUnsupported)
+				}
+				if seenCall {
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: image after tool call is not representable", messageIndex, blockIndex)
+				}
+				part, err := encodeOpenAIImagePart(messageIndex, blockIndex, block.Image)
+				if err != nil {
+					return nil, err
+				}
+				flushText()
+				parts = append(parts, part)
 			case schema.ContentBlockTypeReasoning:
 				if !includeReasoning {
 					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: reasoning cannot be omitted", messageIndex, blockIndex)
@@ -750,7 +804,12 @@ func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]m
 				return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported block type %q", messageIndex, blockIndex, block.Type)
 			}
 		}
-		item["content"] = text.String()
+		if parts != nil {
+			flushText()
+			item["content"] = parts
+		} else {
+			item["content"] = text.String()
+		}
 		if reasoning.Len() > 0 {
 			item["reasoning_content"] = reasoning.String()
 		}
@@ -768,7 +827,7 @@ func encodeOpenAIMessages(messages []schema.Message, includeReasoning bool) ([]m
 			var nested strings.Builder
 			for blockIndex, block := range result.ContentBlocks {
 				if block.Type != schema.ContentBlockTypeText || block.Text == nil || blockIndex > 0 {
-					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported function tool result block type %q", messageIndex, blockIndex, block.Type)
+					return nil, fmt.Errorf("messages[%d].content_blocks[%d]: unsupported function tool result block type %q: OpenAI-compatible tool messages accept text only; put images in a following user message", messageIndex, blockIndex, block.Type)
 				}
 				nested.WriteString(block.Text.Text)
 			}
