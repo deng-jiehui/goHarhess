@@ -29,7 +29,7 @@ type MetricsConfig struct {
 
 // ObservableSource 描述一个观察型 int64 指标。
 type ObservableSource struct {
-	Name        string            // 指标名，自动加 goharness. 前缀
+	Name        string // 指标名，自动加 goharness. 前缀
 	Description string
 	Unit        string
 	Labels      map[string]string // 固定标签集（如 {"observer": "events"}）
