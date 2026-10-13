@@ -54,6 +54,11 @@ type Graph[I, O any] struct {
 	// definitionVersion 是应用声明的定义版本：系统提示、工具集合、模型等
 	// 不进入整图指纹的要素由它明文记入执行记录，恢复时先比对。
 	definitionVersion string
+	// builtPlan* 与 builtNodeInfos 在编译期一次性固化：节点表、边与
+	// 节点信息自此不可变，每次运行直接引用而不再整份复制。
+	builtPlanNodes map[string]runtimeNode
+	builtPlanEdges []runtimeEdge
+	builtNodeInfos []NodeInfo
 }
 
 type runtimeNode struct {
@@ -669,6 +674,27 @@ func (g *Graph[I, O]) compileGraph(stack map[uintptr]bool) error {
 	}
 	g.built = true
 	return nil
+}
+
+// freezeBuiltPlan 固化编译期执行计划与节点信息：节点表、边自此只读
+// 共享，每次运行直接引用而不再整份复制（旧 2.10 遗留项）。必须在
+// compileRuntimePlans 绑定 stream 能力之后调用，否则快照里缺 stream
+// 函数。未经该入口编译的图保持 builtPlan 为空，退回每次运行复制。
+func (g *Graph[I, O]) freezeBuiltPlan() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.built || g.builtPlanNodes != nil {
+		return
+	}
+	g.builtPlanNodes = make(map[string]runtimeNode, len(g.nodes))
+	for id, node := range g.nodes {
+		g.builtPlanNodes[id] = node
+	}
+	g.builtPlanEdges = append([]runtimeEdge(nil), g.edges...)
+	g.builtNodeInfos = make([]NodeInfo, 0, len(g.nodeOrder))
+	for _, id := range g.nodeOrder {
+		g.builtNodeInfos = append(g.builtNodeInfos, g.nodes[id].info)
+	}
 }
 
 func (g *Graph[I, O]) Snapshot() Snapshot {

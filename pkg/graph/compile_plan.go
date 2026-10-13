@@ -27,6 +27,8 @@ func compileRuntimePlans[I, O any](runtime *Graph[I, O]) (*CompiledGraph[I, O], 
 		node.transform = transform
 		runtime.nodes[id] = node
 	}
+	// stream 能力补齐后固化执行计划，运行期只读共享。
+	runtime.freezeBuiltPlan()
 	compiled := &CompiledGraph[I, O]{runtime: runtime}
 	compiled.invokePlan = runtime.invokeRuntime
 	compiled.streamPlan = runtime.streamRuntime

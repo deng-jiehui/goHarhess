@@ -518,7 +518,7 @@ func (g *Graph[I, O]) run(ctx context.Context, input I, setup runSetup, resume b
 		OutputType:    typeName(g.outputType),
 		ResumeMode:    runMode,
 		CheckpointKey: setup.checkpoint.Key,
-	}, g.Snapshot().Nodes)
+	}, g.nodeInfosForRun())
 
 	var runtimeState any
 	if g.stateFactory != nil {
@@ -1299,9 +1299,28 @@ func (g *Graph[I, O]) persistInterruption(
 	return &InterruptedError{Point: point, Reason: request.Reason, Checkpoint: checkpoint.record.load().Clone(), interrupts: pendingInterrupts(progress)}
 }
 
+// nodeInfosForRun 返回绑定 run 回调所需的节点信息：编译期固化后直接
+// 引用，未编译图回退现场枚举（不经过完整 Snapshot 的边投影开销）。
+func (g *Graph[I, O]) nodeInfosForRun() []NodeInfo {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.builtNodeInfos != nil {
+		return g.builtNodeInfos
+	}
+	nodes := make([]NodeInfo, 0, len(g.nodeOrder))
+	for _, id := range g.nodeOrder {
+		nodes = append(nodes, g.nodes[id].info)
+	}
+	return nodes
+}
+
 func (g *Graph[I, O]) runtimeExecutionPlan() (map[string]runtimeNode, []runtimeEdge, int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	if g.builtPlanNodes != nil {
+		return g.builtPlanNodes, g.builtPlanEdges, g.maxSteps
+	}
+	// 未编译图（防御路径）维持原复制语义。
 	nodes := make(map[string]runtimeNode, len(g.nodes))
 	for id, node := range g.nodes {
 		nodes[id] = node
