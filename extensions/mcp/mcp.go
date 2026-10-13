@@ -18,8 +18,8 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	sdkmcp "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/httpclient"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
@@ -49,6 +49,8 @@ type Config struct {
 	Headers       map[string]string
 	ClientName    string
 	ClientVersion string
+	// Policy 收紧对远端的信任（见 policy.go）；零值即安全默认。
+	Policy Policy
 }
 
 // Client owns the SDK connection and the current dynamic tool snapshot.
@@ -57,6 +59,7 @@ type Client struct {
 	closeOnClose  bool
 	clientName    string
 	clientVersion string
+	policy        Policy
 
 	mu          sync.Mutex
 	refreshMu   sync.Mutex
@@ -66,6 +69,10 @@ type Client struct {
 }
 
 func NewClient(config Config) (*Client, error) {
+	policy, err := config.Policy.validate(config)
+	if err != nil {
+		return nil, err
+	}
 	if config.ClientName == "" {
 		config.ClientName = "goharness-mcp"
 	}
@@ -73,7 +80,7 @@ func NewClient(config Config) (*Client, error) {
 		config.ClientVersion = "1.0.0"
 	}
 	if config.SDKClient != nil {
-		value := &Client{sdk: config.SDKClient, clientName: config.ClientName, clientVersion: config.ClientVersion}
+		value := &Client{sdk: config.SDKClient, clientName: config.ClientName, clientVersion: config.ClientVersion, policy: policy}
 		value.watchToolChanges()
 		return value, nil
 	}
@@ -87,16 +94,18 @@ func NewClient(config Config) (*Client, error) {
 			return nil, errors.New("MCP client requires SDKClient, Endpoint, or Command")
 		}
 	}
-	var (
-		value *sdkclient.Client
-		err   error
-	)
+	var value *sdkclient.Client
+	httpClient := resolveHTTPClient(config)
+	if policy.BlockPrivateNetworks {
+		// 拨号时检查解析地址，使用独立 transport，不经共享连接池。
+		httpClient = &http.Client{Transport: secureTransport(), Timeout: config.HTTPTimeout}
+	}
 	switch config.Transport {
 	case TransportStreamableHTTP:
 		if config.Endpoint == "" {
 			return nil, errors.New("MCP streamable HTTP endpoint is empty")
 		}
-		opts := []transport.StreamableHTTPCOption{transport.WithHTTPBasicClient(resolveHTTPClient(config))}
+		opts := []transport.StreamableHTTPCOption{transport.WithHTTPBasicClient(httpClient)}
 		if len(config.Headers) > 0 {
 			opts = append(opts, transport.WithHTTPHeaders(cloneHeaders(config.Headers)))
 		}
@@ -105,7 +114,7 @@ func NewClient(config Config) (*Client, error) {
 		if config.Endpoint == "" {
 			return nil, errors.New("MCP SSE endpoint is empty")
 		}
-		opts := []transport.ClientOption{transport.WithHTTPClient(resolveHTTPClient(config))}
+		opts := []transport.ClientOption{transport.WithHTTPClient(httpClient)}
 		if len(config.Headers) > 0 {
 			opts = append(opts, transport.WithHeaders(cloneHeaders(config.Headers)))
 		}
@@ -114,7 +123,7 @@ func NewClient(config Config) (*Client, error) {
 		if config.Command == "" {
 			return nil, errors.New("MCP stdio command is empty")
 		}
-		value, err = sdkclient.NewStdioMCPClient(config.Command, append([]string(nil), config.Env...), append([]string(nil), config.Args...)...)
+		value, err = sdkclient.NewStdioMCPClient(config.Command, append([]string(nil), policy.filterEnv(config.Env)...), append([]string(nil), config.Args...)...)
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport %q", config.Transport)
 	}
@@ -126,6 +135,7 @@ func NewClient(config Config) (*Client, error) {
 		closeOnClose:  true,
 		clientName:    config.ClientName,
 		clientVersion: config.ClientVersion,
+		policy:        policy,
 	}
 	result.watchToolChanges()
 	return result, nil
@@ -204,6 +214,9 @@ func (c *Client) RefreshTools(ctx context.Context) ([]tool.Tool, error) {
 	}
 	values := make([]tool.Tool, 0, len(result.Tools))
 	for index, definition := range result.Tools {
+		if !c.policy.expose(definition.Name) {
+			continue
+		}
 		value, err := newMCPTool(c, definition)
 		if err != nil {
 			c.dirty.Store(true)
@@ -342,13 +355,13 @@ func newMCPTool(client *Client, definition sdkmcp.Tool) (*MCPTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("MCP tool %q schema: %w", definition.Name, err)
 	}
-	isReadOnly := definition.Annotations.ReadOnlyHint != nil && *definition.Annotations.ReadOnlyHint
+	isReadOnly := client.policy.readOnly(definition.Name, definition.Annotations)
 	return &MCPTool{
 		client: client,
 		name:   definition.Name,
 		spec: tool.Spec{
-			Name:        definition.Name,
-			Description: definition.Description,
+			Name:        client.policy.NamePrefix + definition.Name,
+			Description: client.policy.sanitizeDescription(definition.Description),
 			Parameters:  parameters,
 			IsReadOnly:  isReadOnly,
 			Concurrency: tool.ConcurrencyPolicy{
