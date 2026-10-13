@@ -1,6 +1,7 @@
 package redisstore
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -28,7 +29,8 @@ const DefaultRedisPrefix = "goharness:checkpoint"
 // 共享边界 k，记录内 messages/messages_from/messages_epoch 三处占位符
 // 由脚本以校验结果替换——记录体字节始终由调用方编码，不做 cjson 往返。
 // ARGV: expected_version, record_json, ttl_ms, new_version, expected_head,
-// new_id, claimed, nhashes, hash_1..hash_n, msg_{c+1}..msg_n, maxhistory
+// new_id, claimed, nhashes, hash_1..hash_n, msg_{c+1}..msg_n, maxhistory,
+// new_run_id, view_head
 // 返回: {1, new_version, shared, epoch}；{0, actual} CAS 冲突；
 // {2, actual_shared} 客户端乐观前缀失配，收缩 claimed 后重试。
 var saveCheckpointScript = redis.NewScript(`
@@ -42,18 +44,26 @@ end
 local claimed = tonumber(ARGV[7])
 local nhashes = tonumber(ARGV[8])
 local mstart = 9 + nhashes
+local maxhistory = tonumber(ARGV[#ARGV - 2])
+local newrun = ARGV[#ARGV - 1]
+local viewhead = ARGV[#ARGV]
 local epoch = tonumber(redis.call('HGET', key, 'epoch') or '0')
 local shared = 0
-local stored = {}
 local loglen = 0
 if epoch > 0 then
  -- LLEN 取真实日志长度：LRANGE 按 nhashes 截断，用 #stored 判断
  -- 会漏掉「调用方截断历史后又改写」场景的分叉。
  loglen = redis.call('LLEN', mkey .. ':' .. epoch)
- stored = redis.call('LRANGE', mkey .. ':' .. epoch, 0, nhashes - 1)
- local n = math.min(#stored, nhashes)
- for i = 1, n do
-  if redis.sha1hex(stored[i]) == ARGV[8 + i] then shared = i else break end
+ if viewhead ~= '' and viewhead == head then
+  -- 客户端视图对应的头部记录在 CAS 保护下未变：自上次保存以来
+  -- 日志没有任何其他写入，直接信任 claimed 前缀，跳过逐条比对。
+  shared = claimed
+ else
+  local stored = redis.call('LRANGE', mkey .. ':' .. epoch, 0, nhashes - 1)
+  local n = math.min(#stored, nhashes)
+  for i = 1, n do
+   if redis.sha1hex(stored[i]) == ARGV[8 + i] then shared = i else break end
+  end
  end
 end
 if shared < claimed then
@@ -62,7 +72,7 @@ end
 -- 增量消息参数按客户端 claimed 边界编码；真实共享边界 shared 之后的
 -- 部分才是要写入日志与记录的新消息。
 local tail = shared - claimed
-local dlen = #ARGV - mstart
+local dlen = #ARGV - mstart - 2
 if epoch == 0 then
  epoch = 1
  redis.call('HSET', key, 'epoch', '1', 'epochs', '[1]')
@@ -91,19 +101,16 @@ local record = string.gsub(ARGV[2], '"@@GH_M@@"', function() return delta end, 1
 record = string.gsub(record, '"@@GH_F@@"', tostring(shared), 1)
 record = string.gsub(record, '"@@GH_E@@"', tostring(epoch), 1)
 -- 运行轮换：新记录 run_id 与当前头部不同时，把头部记录留作本轮
--- 放弃运行的回退依据；它独立于历史裁剪保留。
+-- 放弃运行的回退依据；它独立于历史裁剪保留。head_run 由本脚本维护，
+-- 字符串比较取代对整条记录的两次 cjson.decode。
 local prev = redis.call('HGET', key, 'latest')
-if prev then
- local okp, prec = pcall(cjson.decode, prev)
- local okn, nrec = pcall(cjson.decode, record)
- if okp and okn and prec['run_id'] ~= nrec['run_id'] then
-  redis.call('HSET', key, 'rollback', prev)
- end
+local headrun = redis.call('HGET', key, 'head_run') or ''
+if prev and headrun ~= newrun then
+ redis.call('HSET', key, 'rollback', prev)
 end
-redis.call('HSET', key, 'version', ARGV[4], 'head', ARGV[6], 'latest', record, 'record:' .. ARGV[6], record)
+redis.call('HSET', key, 'version', ARGV[4], 'head', ARGV[6], 'head_run', newrun, 'latest', record, 'record:' .. ARGV[6], record)
 local ids = cjson.decode(redis.call('HGET', key, 'order') or '[]')
 ids[#ids + 1] = ARGV[6]
-local maxhistory = tonumber(ARGV[#ARGV])
 if maxhistory and maxhistory > 0 and #ids > maxhistory then
  local drop = #ids - maxhistory
  for i = 1, drop do redis.call('HDEL', key, 'record:' .. ids[i]) end
@@ -152,12 +159,15 @@ return {1, ARGV[4], shared, epoch}
 `)
 
 // RedisStoreConfig 配置 Redis 检查点存储。MaxHistory 为每会话保留的
-// 历史记录上限，0 表示不裁剪。
+// 历史记录上限，0 表示不裁剪。LogCacheSize 是进程内消息日志视图缓存
+// 的会话数上限（LRU），0 使用默认值 1024；淘汰只让下一次保存多花
+// 网络流量，正确性由保存脚本的原子校验保证。
 type RedisStoreConfig struct {
-	Client     redis.UniversalClient
-	Prefix     string
-	TTL        time.Duration
-	MaxHistory int
+	Client       redis.UniversalClient
+	Prefix       string
+	TTL          time.Duration
+	MaxHistory   int
+	LogCacheSize int
 }
 
 // RedisStore persists checkpoints across processes with an atomic Lua CAS.
@@ -166,16 +176,27 @@ type RedisStore struct {
 	prefix     string
 	ttl        time.Duration
 	maxHistory int
-	// mu 保护 logs 客户端视图缓存；缓存只作乐观前缀猜测，正确性由
-	// 保存脚本的原子校验保证，失配按脚本报告的边界重试。
-	mu   sync.Mutex
-	logs map[string]*logView
+	logCap     int
+	// mu 保护 logs 视图缓存与 LRU 链表；缓存只作乐观前缀猜测，
+	// 正确性由保存脚本的原子校验保证，失配按脚本报告的边界重试。
+	mu        sync.Mutex
+	logs      map[string]*list.Element
+	lru       *list.List
+	evictions uint64
 }
 
-// logView 缓存一次读取或保存得到的消息日志代次与逐条摘要。
+// logView 缓存一次保存得到的消息日志代次、对应头部记录与逐条摘要：
+// head 是视图建立时的头部记录 ID，保存脚本据此判断是否信任前缀。
 type logView struct {
 	epoch  int
+	head   string
 	hashes []string
+}
+
+// logEntry 是 LRU 链表元素，key 供淘汰时回删 logs 索引。
+type logEntry struct {
+	key  string
+	view *logView
 }
 
 var _ corestate.Store = (*RedisStore)(nil)
@@ -190,11 +211,66 @@ func NewRedisStore(config RedisStoreConfig) (*RedisStore, error) {
 	if config.MaxHistory < 0 {
 		return nil, errors.New("checkpoint MaxHistory cannot be negative")
 	}
+	if config.LogCacheSize < 0 {
+		return nil, errors.New("checkpoint LogCacheSize cannot be negative")
+	}
 	prefix := strings.TrimSpace(config.Prefix)
 	if prefix == "" {
 		prefix = DefaultRedisPrefix
 	}
-	return &RedisStore{client: config.Client, prefix: prefix, ttl: config.TTL, maxHistory: config.MaxHistory, logs: make(map[string]*logView)}, nil
+	logCap := config.LogCacheSize
+	if logCap == 0 {
+		logCap = 1024
+	}
+	return &RedisStore{client: config.Client, prefix: prefix, ttl: config.TTL, maxHistory: config.MaxHistory, logCap: logCap, logs: make(map[string]*list.Element), lru: list.New()}, nil
+}
+
+// viewLocked 取回会话的日志视图并标记为最近使用；调用方须持有 s.mu。
+func (s *RedisStore) viewLocked(conversationID string) *logView {
+	entry := s.logs[conversationID]
+	if entry == nil {
+		return nil
+	}
+	s.lru.MoveToFront(entry)
+	return entry.Value.(*logEntry).view
+}
+
+// storeViewLocked 写入或刷新视图并执行 LRU 淘汰；调用方须持有 s.mu。
+func (s *RedisStore) storeViewLocked(conversationID string, view *logView) {
+	if entry := s.logs[conversationID]; entry != nil {
+		entry.Value.(*logEntry).view = view
+		s.lru.MoveToFront(entry)
+	} else {
+		s.logs[conversationID] = s.lru.PushFront(&logEntry{key: conversationID, view: view})
+	}
+	for s.lru.Len() > s.logCap {
+		oldest := s.lru.Back()
+		delete(s.logs, oldest.Value.(*logEntry).key)
+		s.lru.Remove(oldest)
+		s.evictions++
+	}
+}
+
+// dropViewLocked 删除视图；调用方须持有 s.mu。
+func (s *RedisStore) dropViewLocked(conversationID string) {
+	if entry := s.logs[conversationID]; entry != nil {
+		s.lru.Remove(entry)
+		delete(s.logs, conversationID)
+	}
+}
+
+// LogCacheEntries 返回进程内日志视图缓存的当前会话数（供指标使用）。
+func (s *RedisStore) LogCacheEntries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lru.Len()
+}
+
+// LogCacheEvictions 返回日志视图缓存的累计淘汰次数（供指标使用）。
+func (s *RedisStore) LogCacheEvictions() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evictions
 }
 
 func (s *RedisStore) Load(ctx context.Context, conversationID string) (corestate.Checkpoint, bool, error) {
@@ -337,7 +413,9 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 	// 避免跨会话的保存互相串行；失配收缩 claimed 后重试。
 	s.mu.Lock()
 	claimed := 0
-	if view := s.logs[checkpoint.ConversationID]; view != nil && view.epoch > 0 {
+	viewHead := ""
+	if view := s.viewLocked(checkpoint.ConversationID); view != nil && view.epoch > 0 {
+		viewHead = view.head
 		n := len(view.hashes)
 		if len(hashes) < n {
 			n = len(hashes)
@@ -348,13 +426,13 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 	}
 	s.mu.Unlock()
 	for attempt := 0; attempt < 4; attempt++ {
-		shared, epoch, retry, err := s.saveAttempt(ctx, checkpoint, saved, encoded, hashes, claimed)
+		shared, epoch, retry, err := s.saveAttempt(ctx, checkpoint, saved, encoded, hashes, claimed, viewHead)
 		if err != nil {
 			return corestate.Checkpoint{}, err
 		}
 		if !retry {
 			s.mu.Lock()
-			s.logs[checkpoint.ConversationID] = &logView{epoch: epoch, hashes: hashes}
+			s.storeViewLocked(checkpoint.ConversationID, &logView{epoch: epoch, head: saved.ID, hashes: hashes})
 			s.mu.Unlock()
 			return saved, nil
 		}
@@ -368,7 +446,7 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 // saveAttempt 编码增量记录并执行一次保存脚本。retry 为真时脚本未写入
 // 任何记录，shared 是校验出的真实共享前缀长度（可为零），调用方须收缩
 // claimed 重新编码增量后重试；retry 为假时保存已提交，epoch 为新代次。
-func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestate.Checkpoint, encoded, hashes []string, claimed int) (shared int, epoch int, retry bool, err error) {
+func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestate.Checkpoint, encoded, hashes []string, claimed int, viewHead string) (shared int, epoch int, retry bool, err error) {
 	data, err := encodeRecordWithLogRef(saved)
 	if err != nil {
 		return 0, 0, false, err
@@ -390,7 +468,8 @@ func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestat
 	for i := claimed; i < len(encoded); i++ {
 		args = append(args, encoded[i])
 	}
-	args = append(args, strconv.Itoa(s.maxHistory))
+	// viewHead 为空表示客户端没有可信视图，脚本退回逐条 sha1 比对。
+	args = append(args, strconv.Itoa(s.maxHistory), saved.RunID, viewHead)
 	result, err := saveCheckpointScript.Run(
 		ctx,
 		s.client,
@@ -514,7 +593,7 @@ func (s *RedisStore) Delete(ctx context.Context, conversationID string) error {
 	// 日志视图缓存与 Save 共用同一把锁：保存与删除即使作用于不同
 	// 会话，也不能在锁外读写同一个 map。
 	s.mu.Lock()
-	delete(s.logs, conversationID)
+	s.dropViewLocked(conversationID)
 	s.mu.Unlock()
 	var keys []string
 	raw, err := s.client.HGet(ctx, s.key(conversationID), "epochs").Result()
