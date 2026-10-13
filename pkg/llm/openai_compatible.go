@@ -895,6 +895,15 @@ func (e *HTTPStatusError) StatusCode() int { return e.Status }
 // RetryAfter 返回服务端建议的重试等待；未提供或为 0 时重试器按退避计算。
 func (e *HTTPStatusError) RetryAfter() time.Duration { return e.retryAfter }
 
+// NewHTTPStatusError 供复用 llm 重试语义的非 ChatModel 客户端构造状态错误。
+// retryAfter 传 0 表示上游未给建议。
+func NewHTTPStatusError(provider string, status int, statusText, message string, retryAfter time.Duration) *HTTPStatusError {
+	return &HTTPStatusError{Provider: provider, Status: status, StatusText: statusText, Message: message, retryAfter: retryAfter}
+}
+
+// ParseRetryAfter 解析 Retry-After 头（秒数或 HTTP 日期）；无法解析返回 0。
+func ParseRetryAfter(value string) time.Duration { return parseRetryAfter(value) }
+
 // readBoundedResponseBody 最多读取 limit+1 字节；超过 limit 即判定响应过大，
 // 返回明确的 ResponseTooLargeError，截断数据绝不进入响应解码。
 func readBoundedResponseBody(body io.Reader, limit int64) ([]byte, error) {

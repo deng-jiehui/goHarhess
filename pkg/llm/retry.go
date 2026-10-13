@@ -236,6 +236,41 @@ func retryAfterExceeded(err error, maxDelay time.Duration) bool {
 	return ok && hint > maxDelay
 }
 
+// CallWithRetry 按 RetryConfig 重试调用 fn：等量抖动退避，服从错误携带的
+// Retry-After 提示（超过 MaxDelay 即不再重试）。供非 ChatModel 的客户端
+// （嵌入、重排等 HTTP 调用）复用同一套重试语义。retryable 为 nil 时用
+// defaultRetryable。MaxAttempts<=0 按 1 次调用处理（不重试）。
+func CallWithRetry(ctx context.Context, config RetryConfig, retryable func(error) bool, fn func() error) error {
+	if retryable == nil {
+		retryable = config.Retryable
+	}
+	if retryable == nil {
+		retryable = defaultRetryable
+	}
+	attempts := config.MaxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		last = err
+		if attempt+1 >= attempts || !retryable(err) || retryAfterExceeded(err, config.MaxDelay) {
+			break
+		}
+		if err := waitRetry(ctx, retryWait(config, attempt, err)); err != nil {
+			return err
+		}
+	}
+	return last
+}
+
 func waitRetry(ctx context.Context, delay time.Duration) error {
 	if delay <= 0 {
 		return nil
