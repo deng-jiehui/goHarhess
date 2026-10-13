@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	randv2 "math/rand/v2"
 	"net"
 	"reflect"
 	"sync/atomic"
@@ -17,7 +18,11 @@ type RetryConfig struct {
 	MaxAttempts  int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
-	Retryable    func(error) bool
+	// NoJitter 关闭默认开启的等量抖动；测试与需要确定性延迟时设置。
+	NoJitter bool
+	// Rand 注入随机源（返回 [0,1)），测试可复现；nil 用全局随机源。
+	Rand      func() float64
+	Retryable func(error) bool
 }
 
 type RetryingModel struct {
@@ -78,10 +83,10 @@ func (m *RetryingModel) Invoke(ctx context.Context, request Request, options ...
 			return response, nil
 		}
 		last = err
-		if attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
+		if attempt+1 >= m.config.MaxAttempts || !m.retryable(err) || retryAfterExceeded(err, m.config.MaxDelay) {
 			break
 		}
-		if err := waitRetry(ctx, retryDelay(m.config, attempt)); err != nil {
+		if err := waitRetry(ctx, retryWait(m.config, attempt, err)); err != nil {
 			return Response{}, err
 		}
 	}
@@ -138,11 +143,11 @@ func (m *RetryingModel) Stream(ctx context.Context, request Request, options ...
 			} else if err == nil {
 				err = errors.New("model returned a nil stream")
 			}
-			if started.Load() || published.Load() || attempt+1 >= m.config.MaxAttempts || !m.retryable(err) {
+			if started.Load() || published.Load() || attempt+1 >= m.config.MaxAttempts || !m.retryable(err) || retryAfterExceeded(err, m.config.MaxDelay) {
 				_ = writer.CloseWithError(err)
 				return
 			}
-			if err := waitRetry(executionCtx, retryDelay(m.config, attempt)); err != nil {
+			if err := waitRetry(executionCtx, retryWait(m.config, attempt, err)); err != nil {
 				_ = writer.CloseWithError(err)
 				return
 			}
@@ -190,9 +195,45 @@ func retryDelay(config RetryConfig, attempt int) time.Duration {
 		delay *= 2
 	}
 	if delay > config.MaxDelay {
-		return config.MaxDelay
+		delay = config.MaxDelay
+	}
+	if !config.NoJitter && delay > 0 {
+		rand := config.Rand
+		if rand == nil {
+			rand = randv2.Float64
+		}
+		// 等量抖动：d/2 + rand*d/2，保留下限，避免退化成零延迟。
+		half := delay / 2
+		delay = half + time.Duration(rand()*float64(half))
 	}
 	return delay
+}
+
+// retryWait 取抖动后的退避与服务端 Retry-After 建议中的较大者。
+func retryWait(config RetryConfig, attempt int, err error) time.Duration {
+	delay := retryDelay(config, attempt)
+	if hint, ok := retryAfterHint(err); ok && hint > delay {
+		return hint
+	}
+	return delay
+}
+
+// retryAfterHint 提取错误携带的服务端建议等待时间。
+func retryAfterHint(err error) (time.Duration, bool) {
+	var hint interface{ RetryAfter() time.Duration }
+	if errors.As(err, &hint) {
+		if d := hint.RetryAfter(); d > 0 {
+			return d, true
+		}
+	}
+	return 0, false
+}
+
+// retryAfterExceeded 报告服务端建议的等待超过 MaxDelay：此时不再重试，
+// 直接返回错误，避免让运行长时间挂着。
+func retryAfterExceeded(err error, maxDelay time.Duration) bool {
+	hint, ok := retryAfterHint(err)
+	return ok && hint > maxDelay
 }
 
 func waitRetry(ctx context.Context, delay time.Duration) error {

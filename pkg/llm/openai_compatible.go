@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goharness/goharness/pkg/httpclient"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -793,6 +795,8 @@ type HTTPStatusError struct {
 	Status     int
 	StatusText string
 	Message    string
+	// retryAfter 是响应 Retry-After 头解析出的建议等待；0 表示未提供。
+	retryAfter time.Duration
 }
 
 func (e *HTTPStatusError) Error() string {
@@ -807,6 +811,9 @@ func (e *HTTPStatusError) Error() string {
 }
 
 func (e *HTTPStatusError) StatusCode() int { return e.Status }
+
+// RetryAfter 返回服务端建议的重试等待；未提供或为 0 时重试器按退避计算。
+func (e *HTTPStatusError) RetryAfter() time.Duration { return e.retryAfter }
 
 // readBoundedResponseBody 最多读取 limit+1 字节；超过 limit 即判定响应过大，
 // 返回明确的 ResponseTooLargeError，截断数据绝不进入响应解码。
@@ -827,7 +834,28 @@ func providerHTTPError(response *http.Response) error {
 		return fmt.Errorf("OpenAI-compatible API returned %s (read error: %w)", response.Status, err)
 	}
 	body := strings.TrimSpace(string(data))
-	return &HTTPStatusError{Provider: "OpenAI-compatible", Status: response.StatusCode, StatusText: response.Status, Message: body}
+	return &HTTPStatusError{Provider: "OpenAI-compatible", Status: response.StatusCode, StatusText: response.Status, Message: body, retryAfter: parseRetryAfter(response.Header.Get("Retry-After"))}
+}
+
+// parseRetryAfter 解析 Retry-After 头的两种形式：秒数或 HTTP 日期；
+// 无法解析或为负时返回 0。
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseFloat(value, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds * float64(time.Second))
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		if d := time.Until(at); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func cloneHeaders(headers map[string]string) map[string]string {
