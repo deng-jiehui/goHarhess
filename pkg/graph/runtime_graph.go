@@ -691,6 +691,35 @@ func (g *Graph[I, O]) Snapshot() Snapshot {
 			edges = append(edges, EdgeInfo{From: from, To: target, Conditional: true})
 		}
 	}
+	// Fork 的 from→branch 与成员→join 本来就是静态边，不重复投影；
+	// 只补未经 Compile 汇合接线的缺失 branch→join 条件边。
+	// 动态分派没有任何静态出边，把 source→目标与目标→join 投影为
+	// 条件边，快照与运行期看到同一份拓扑。
+	hasEdge := func(from, to string) bool {
+		for _, edge := range edges {
+			if edge.From == from && edge.To == to {
+				return true
+			}
+		}
+		return false
+	}
+	for _, from := range slices.Sorted(maps.Keys(g.forks)) {
+		spec := g.forks[from]
+		for _, branch := range spec.Branches {
+			if spec.Join != "" && !hasEdge(branch, spec.Join) {
+				edges = append(edges, EdgeInfo{From: branch, To: spec.Join, Label: "join", Conditional: true})
+			}
+		}
+	}
+	for _, from := range slices.Sorted(maps.Keys(g.dispatches)) {
+		spec := g.dispatches[from]
+		for _, target := range spec.targets {
+			edges = append(edges, EdgeInfo{From: from, To: target, Label: "dispatch", Conditional: true})
+			if spec.join != "" && !hasEdge(target, spec.join) {
+				edges = append(edges, EdgeInfo{From: target, To: spec.join, Label: "join", Conditional: true})
+			}
+		}
+	}
 	return Snapshot{
 		Name: g.name, Description: g.description, Built: g.built, MaxSteps: g.maxSteps,
 		InputType: typeName(g.inputType), OutputType: typeName(g.outputType), StateType: typeName(g.stateType),
