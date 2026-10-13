@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -236,7 +237,7 @@ func cloneContentBlocks(blocks []ContentBlock, strict bool, path string, fallbac
 	}
 	cloned := make([]ContentBlock, len(blocks))
 	for i, block := range blocks {
-		item, err := cloneContentBlock(block, strict, fmt.Sprintf("%s[%d]", path, i), fallback)
+		item, err := cloneContentBlock(block, strict, path, i, fallback)
 		if err != nil {
 			return nil, err
 		}
@@ -245,14 +246,36 @@ func cloneContentBlocks(blocks []ContentBlock, strict bool, path string, fallbac
 	return cloned, nil
 }
 
-func cloneContentBlock(block ContentBlock, strict bool, path string, fallback CloneFallbackFunc) (ContentBlock, error) {
+// contentBlockNeedsPath 报告该块的克隆是否可能用到定位串：只有携带
+// Extra 的载荷或嵌套块才需要路径；普通文本块全程不构造路径。
+func contentBlockNeedsPath(block ContentBlock) bool {
+	return (block.Text != nil && block.Text.Extra != nil) ||
+		(block.Image != nil && block.Image.Extra != nil) ||
+		(block.File != nil && block.File.Extra != nil) ||
+		(block.Audio != nil && block.Audio.Extra != nil) ||
+		(block.Video != nil && block.Video.Extra != nil) ||
+		(block.Reasoning != nil && block.Reasoning.Extra != nil) ||
+		(block.FunctionToolCall != nil && block.FunctionToolCall.Extra != nil) ||
+		(block.FunctionToolResult != nil &&
+			(block.FunctionToolResult.Extra != nil || len(block.FunctionToolResult.ContentBlocks) > 0))
+}
+
+// cloneContentBlock 按 parent[index] 惰性构造定位串：块不含任何 Extra 与
+// 嵌套块时 path 为空也不影响正确性（路径仅供错误定位与 fallback）。
+func cloneContentBlock(block ContentBlock, strict bool, parent string, index int, fallback CloneFallbackFunc) (ContentBlock, error) {
 	cloned := ContentBlock{Type: block.Type}
+	path := ""
+	if contentBlockNeedsPath(block) {
+		path = parent + "[" + strconv.Itoa(index) + "]"
+	}
 	var err error
 	if block.Text != nil {
 		payload := *block.Text
-		payload.Extra, err = cloneExtra(block.Text.Extra, strict, path+".text.extra", fallback)
-		if err != nil {
-			return ContentBlock{}, err
+		if block.Text.Extra != nil {
+			payload.Extra, err = cloneExtra(block.Text.Extra, strict, path+".text.extra", fallback)
+			if err != nil {
+				return ContentBlock{}, err
+			}
 		}
 		cloned.Text = &payload
 	}
@@ -282,31 +305,39 @@ func cloneContentBlock(block ContentBlock, strict bool, path string, fallback Cl
 	}
 	if block.Reasoning != nil {
 		payload := *block.Reasoning
-		payload.Extra, err = cloneExtra(block.Reasoning.Extra, strict, path+".reasoning.extra", fallback)
-		if err != nil {
-			return ContentBlock{}, err
+		if block.Reasoning.Extra != nil {
+			payload.Extra, err = cloneExtra(block.Reasoning.Extra, strict, path+".reasoning.extra", fallback)
+			if err != nil {
+				return ContentBlock{}, err
+			}
 		}
 		cloned.Reasoning = &payload
 	}
 	if block.FunctionToolCall != nil {
 		payload := *block.FunctionToolCall
-		payload.Extra, err = cloneExtra(block.FunctionToolCall.Extra, strict, path+".function_tool_call.extra", fallback)
-		if err != nil {
-			return ContentBlock{}, err
+		if block.FunctionToolCall.Extra != nil {
+			payload.Extra, err = cloneExtra(block.FunctionToolCall.Extra, strict, path+".function_tool_call.extra", fallback)
+			if err != nil {
+				return ContentBlock{}, err
+			}
 		}
 		cloned.FunctionToolCall = &payload
 	}
 	if block.FunctionToolResult != nil {
 		payload := *block.FunctionToolResult
-		payload.ContentBlocks, err = cloneContentBlocks(
-			block.FunctionToolResult.ContentBlocks, strict, path+".function_tool_result.content_blocks", fallback,
-		)
-		if err != nil {
-			return ContentBlock{}, err
+		if len(block.FunctionToolResult.ContentBlocks) > 0 {
+			payload.ContentBlocks, err = cloneContentBlocks(
+				block.FunctionToolResult.ContentBlocks, strict, path+".function_tool_result.content_blocks", fallback,
+			)
+			if err != nil {
+				return ContentBlock{}, err
+			}
 		}
-		payload.Extra, err = cloneExtra(block.FunctionToolResult.Extra, strict, path+".function_tool_result.extra", fallback)
-		if err != nil {
-			return ContentBlock{}, err
+		if block.FunctionToolResult.Extra != nil {
+			payload.Extra, err = cloneExtra(block.FunctionToolResult.Extra, strict, path+".function_tool_result.extra", fallback)
+			if err != nil {
+				return ContentBlock{}, err
+			}
 		}
 		cloned.FunctionToolResult = &payload
 	}
@@ -321,11 +352,13 @@ func cloneContentBlock(block ContentBlock, strict bool, path string, fallback Cl
 func cloneMediaContent(media *MediaContent, strict bool, path string, fallback CloneFallbackFunc) (*MediaContent, error) {
 	cloned := *media
 	cloned.Data = append(json.RawMessage(nil), media.Data...)
-	extra, err := cloneExtra(media.Extra, strict, path+".extra", fallback)
-	if err != nil {
-		return nil, err
+	if media.Extra != nil {
+		extra, err := cloneExtra(media.Extra, strict, path+".extra", fallback)
+		if err != nil {
+			return nil, err
+		}
+		cloned.Extra = extra
 	}
-	cloned.Extra = extra
 	return &cloned, nil
 }
 
@@ -335,7 +368,7 @@ func cloneExtra(extra map[string]any, strict bool, path string, fallback CloneFa
 	}
 	cloned := make(map[string]any, len(extra))
 	for key, value := range extra {
-		item, err := cloneAnyValue(value, strict, fmt.Sprintf("%s[%q]", path, key), 0, fallback)
+		item, err := cloneAnyValue(value, strict, path+"["+strconv.Quote(key)+"]", 0, fallback)
 		if err != nil {
 			return nil, err
 		}

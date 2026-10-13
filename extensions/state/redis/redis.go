@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goharness/goharness/pkg/schema"
@@ -25,14 +26,16 @@ const DefaultRedisPrefix = "goharness:checkpoint"
 // 主 hash 保存最新指针、不可变记录与日志元数据；消息日志按代次存放在
 // 同哈希槽的独立 LIST key（{id} 标签），保存脚本一次原子完成 CAS、前缀
 // 校验、增量追加、代次分叉与记录登记。
-// 客户端发送全量消息摘要 + 增量消息体；脚本用 sha1hex 逐条比对求出真实
+// 客户端发送增量消息体；消息摘要仅在需要服务端逐条比对时携带（缓存视图
+// 命中且前缀全吻合时省略，nhashes=0）。脚本用 sha1hex 逐条比对求出真实
 // 共享边界 k，记录内 messages/messages_from/messages_epoch 三处占位符
 // 由脚本以校验结果替换——记录体字节始终由调用方编码，不做 cjson 往返。
 // ARGV: expected_version, record_json, ttl_ms, new_version, expected_head,
 // new_id, claimed, nhashes, hash_1..hash_n, msg_{c+1}..msg_n, maxhistory,
 // new_run_id, view_head
 // 返回: {1, new_version, shared, epoch}；{0, actual} CAS 冲突；
-// {2, actual_shared} 客户端乐观前缀失配，收缩 claimed 后重试。
+// {2, actual_shared} 客户端乐观前缀失配，收缩 claimed 后重试；
+// {3} 客户端未带摘要且视图头失配，须带完整 hash_1..hash_n 重发。
 var saveCheckpointScript = redis.NewScript(`
 local key = KEYS[1]
 local mkey = KEYS[2]
@@ -43,7 +46,7 @@ if actual ~= ARGV[1] or head ~= ARGV[5] then
 end
 local claimed = tonumber(ARGV[7])
 local nhashes = tonumber(ARGV[8])
-local mstart = 9 + nhashes
+local mstart = 9 + math.max(nhashes, 0)
 local maxhistory = tonumber(ARGV[#ARGV - 2])
 local newrun = ARGV[#ARGV - 1]
 local viewhead = ARGV[#ARGV]
@@ -54,11 +57,18 @@ if epoch > 0 then
  -- LLEN 取真实日志长度：LRANGE 按 nhashes 截断，用 #stored 判断
  -- 会漏掉「调用方截断历史后又改写」场景的分叉。
  loglen = redis.call('LLEN', mkey .. ':' .. epoch)
- if viewhead ~= '' and viewhead == head then
+ if viewhead ~= '' and viewhead == head and claimed >= loglen then
   -- 客户端视图对应的头部记录在 CAS 保护下未变：自上次保存以来
   -- 日志没有任何其他写入，直接信任 claimed 前缀，跳过逐条比对。
-  shared = claimed
+  -- claimed 必须覆盖整条日志：截断保存会留下日志尾巴（loglen 大
+  -- 于视图长度），尾巴之后的改写不能凭视图信任，须逐条比对。
+  shared = math.min(claimed, loglen)
  else
+  if nhashes < 0 then
+   -- nhashes 为 -1 表示客户端依赖视图信任省略了摘要（区别于消息
+   -- 列表为空的 0）：头部已变化，须带完整摘要重发。
+   return {3}
+  end
   local stored = redis.call('LRANGE', mkey .. ':' .. epoch, 0, nhashes - 1)
   local n = math.min(#stored, nhashes)
   for i = 1, n do
@@ -396,16 +406,12 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 	}
 	saved.UpdatedAt = now
 	// 逐条编码消息并计算 sha1 摘要：保存脚本用同一口径比对前缀。
+	// 大历史下单趟编码是主要客户端成本（实测 ~30ms@1000 条），
+	// 超过阈值后并行分摊到少量 worker；结果顺序与下标保持一致。
 	encoded := make([]string, len(saved.Messages))
 	hashes := make([]string, len(saved.Messages))
-	for i, m := range saved.Messages {
-		raw, err := json.Marshal(m)
-		if err != nil {
-			return corestate.Checkpoint{}, fmt.Errorf("encode Redis checkpoint message %d: %w", i, err)
-		}
-		encoded[i] = string(raw)
-		sum := sha1.Sum(raw)
-		hashes[i] = hex.EncodeToString(sum[:])
+	if err := encodeMessages(saved.Messages, encoded, hashes); err != nil {
+		return corestate.Checkpoint{}, err
 	}
 	// 乐观共享前缀基于上次读写的日志视图；失配时脚本报告真实边界，
 	// 收缩后重试，CAS 保证期间不会有第三方写入改变日志。
@@ -414,6 +420,7 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 	s.mu.Lock()
 	claimed := 0
 	viewHead := ""
+	sendHashes := true
 	if view := s.viewLocked(checkpoint.ConversationID); view != nil && view.epoch > 0 {
 		viewHead = view.head
 		n := len(view.hashes)
@@ -423,35 +430,61 @@ func (s *RedisStore) Save(ctx context.Context, checkpoint corestate.Checkpoint) 
 		for claimed < n && hashes[claimed] == view.hashes[claimed] {
 			claimed++
 		}
+		// 前缀与缓存视图全部吻合（纯追加）时省略整份摘要：脚本在视图头
+		// 未变时直接信任 claimed；调用方改写、截断或冷视图仍带完整 hash
+		// 供服务端逐条比对。省略把常规保存的 ARGV 从 O(历史) 降到 O(增量)。
+		sendHashes = claimed < len(view.hashes)
 	}
 	s.mu.Unlock()
 	for attempt := 0; attempt < 4; attempt++ {
-		shared, epoch, retry, err := s.saveAttempt(ctx, checkpoint, saved, encoded, hashes, claimed, viewHead)
+		outcome, err := s.saveAttempt(ctx, checkpoint, saved, encoded, hashes, claimed, viewHead, sendHashes)
 		if err != nil {
 			return corestate.Checkpoint{}, err
 		}
-		if !retry {
+		switch {
+		case outcome.saved:
 			s.mu.Lock()
-			s.storeViewLocked(checkpoint.ConversationID, &logView{epoch: epoch, head: saved.ID, hashes: hashes})
+			s.storeViewLocked(checkpoint.ConversationID, &logView{epoch: outcome.epoch, head: saved.ID, hashes: hashes})
 			s.mu.Unlock()
 			return saved, nil
+		case outcome.needHashes:
+			// 服务端头部已在视图建立后变化：带完整摘要重发同一 claimed，
+			// 由服务端逐条比对求真值。
+			sendHashes = true
+		default:
+			// 失配的真实前缀可能是零：不能用数值符号表达重试语义，
+			// 必须以脚本的显式响应为准收缩 claimed 后重试。
+			claimed = outcome.shared
 		}
-		// 失配的真实前缀可能是零：不能用数值符号表达重试语义，
-		// 必须以脚本的显式响应为准收缩 claimed 后重试。
-		claimed = shared
 	}
 	return corestate.Checkpoint{}, fmt.Errorf("save Redis checkpoint: message log prefix did not converge")
 }
 
-// saveAttempt 编码增量记录并执行一次保存脚本。retry 为真时脚本未写入
-// 任何记录，shared 是校验出的真实共享前缀长度（可为零），调用方须收缩
-// claimed 重新编码增量后重试；retry 为假时保存已提交，epoch 为新代次。
-func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestate.Checkpoint, encoded, hashes []string, claimed int, viewHead string) (shared int, epoch int, retry bool, err error) {
+// saveOutcome 是一次保存脚本尝试的结果：saved 表示已提交（epoch 为新
+// 代次）；needHashes 表示服务端要求带完整摘要重发；否则是前缀失配，
+// shared 为脚本校验出的真实共享边界（可为零），调用方收缩 claimed 重试。
+type saveOutcome struct {
+	saved      bool
+	epoch      int
+	shared     int
+	needHashes bool
+}
+
+// saveAttempt 编码增量记录并执行一次保存脚本。sendHashes 为假时省略
+// 整份摘要（nhashes=0），由脚本在视图头校验下直接信任 claimed；头部
+// 已变化时脚本要求带摘要重发（needHashes）。
+func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestate.Checkpoint, encoded, hashes []string, claimed int, viewHead string, sendHashes bool) (saveOutcome, error) {
 	data, err := encodeRecordWithLogRef(saved)
 	if err != nil {
-		return 0, 0, false, err
+		return saveOutcome{}, err
 	}
-	args := make([]any, 0, 10+len(hashes)+len(encoded)-claimed)
+	// nhashes 为 -1 表示省略摘要（与消息列表为空的 0 区分）：脚本在
+	// 视图头校验下直接信任 claimed，头部已变化时要求带摘要重发。
+	nhashes := -1
+	if sendHashes {
+		nhashes = len(hashes)
+	}
+	args := make([]any, 0, 11+nhashes+len(encoded)-claimed)
 	args = append(args,
 		strconv.FormatUint(checkpoint.Version, 10),
 		data,
@@ -460,10 +493,12 @@ func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestat
 		checkpoint.ID,
 		saved.ID,
 		strconv.Itoa(claimed),
-		strconv.Itoa(len(hashes)),
+		strconv.Itoa(nhashes),
 	)
-	for _, h := range hashes {
-		args = append(args, h)
+	if sendHashes {
+		for _, h := range hashes {
+			args = append(args, h)
+		}
 	}
 	for i := claimed; i < len(encoded); i++ {
 		args = append(args, encoded[i])
@@ -477,42 +512,45 @@ func (s *RedisStore) saveAttempt(ctx context.Context, checkpoint, saved corestat
 		args...,
 	).Slice()
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("save Redis checkpoint: %w", err)
+		return saveOutcome{}, fmt.Errorf("save Redis checkpoint: %w", err)
 	}
-	if len(result) < 2 {
-		return 0, 0, false, fmt.Errorf("save Redis checkpoint returned %d values", len(result))
+	if len(result) < 1 {
+		return saveOutcome{}, fmt.Errorf("save Redis checkpoint returned %d values", len(result))
 	}
 	ok, err := redisInteger(result[0])
 	if err != nil {
-		return 0, 0, false, err
+		return saveOutcome{}, err
 	}
-	if ok == 2 {
+	switch ok {
+	case 3:
+		return saveOutcome{needHashes: true}, nil
+	case 2:
 		actual, err := redisInteger(result[1])
 		if err != nil {
-			return 0, 0, false, err
+			return saveOutcome{}, err
 		}
-		return int(actual), 0, true, nil
-	}
-	if ok != 1 {
+		return saveOutcome{shared: int(actual)}, nil
+	case 1:
+		sharedN, err := redisInteger(result[2])
+		if err != nil {
+			return saveOutcome{}, err
+		}
+		epochN, err := redisInteger(result[3])
+		if err != nil {
+			return saveOutcome{}, err
+		}
+		return saveOutcome{saved: true, epoch: int(epochN), shared: int(sharedN)}, nil
+	default:
 		actual, err := redisInteger(result[1])
 		if err != nil {
-			return 0, 0, false, err
+			return saveOutcome{}, err
 		}
-		return 0, 0, false, &corestate.ConflictError{
+		return saveOutcome{}, &corestate.ConflictError{
 			ConversationID: checkpoint.ConversationID,
 			Expected:       checkpoint.Version,
 			Actual:         uint64(actual),
 		}
 	}
-	sharedN, err := redisInteger(result[2])
-	if err != nil {
-		return 0, 0, false, err
-	}
-	epochN, err := redisInteger(result[3])
-	if err != nil {
-		return 0, 0, false, err
-	}
-	return int(sharedN), int(epochN), false, nil
 }
 
 // recordWire 把 messages/messages_from/messages_epoch 换成字符串占位符；
@@ -523,6 +561,68 @@ type recordWire struct {
 	Messages      string `json:"messages,omitempty"`
 	MessagesFrom  string `json:"messages_from,omitempty"`
 	MessagesEpoch string `json:"messages_epoch,omitempty"`
+}
+
+// encodeParallelThreshold 是启用并行编码的消息数下限：低于该值时
+// 串行循环的固定开销更小。
+const encodeParallelThreshold = 128
+
+// encodeParallelWorkers 限制并行编码的协程数：编码是 CPU 与内存带宽
+// 受限的短任务，超过 4 个 worker 收益趋平。
+const encodeParallelWorkers = 4
+
+// encodeMessages 逐条 marshal 消息并计算 sha1 摘要，写入 encoded 与
+// hashes 对应下标。消息数达到阈值时分段并行编码，结果与串行完全一致。
+func encodeMessages(messages []schema.Message, encoded, hashes []string) error {
+	encode := func(m schema.Message, i int) error {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("encode Redis checkpoint message %d: %w", i, err)
+		}
+		encoded[i] = string(raw)
+		sum := sha1.Sum(raw)
+		hashes[i] = hex.EncodeToString(sum[:])
+		return nil
+	}
+	if len(messages) < encodeParallelThreshold {
+		for i, m := range messages {
+			if err := encode(m, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var firstErr atomic.Int32
+	var failed atomic.Value
+	var wg sync.WaitGroup
+	workers := encodeParallelWorkers
+	if workers > len(messages) {
+		workers = len(messages)
+	}
+	next := atomic.Int64{}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(messages) || firstErr.Load() != 0 {
+					return
+				}
+				if err := encode(messages[i], i); err != nil {
+					if firstErr.CompareAndSwap(0, 1) {
+						failed.Store(err)
+					}
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr.Load() != 0 {
+		return failed.Load().(error)
+	}
+	return nil
 }
 
 func encodeRecordWithLogRef(c corestate.Checkpoint) (string, error) {

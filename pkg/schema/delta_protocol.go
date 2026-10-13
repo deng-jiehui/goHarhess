@@ -77,7 +77,7 @@ func (a *MessageAccumulator) Apply(d MessageDelta) error {
 		if d.Block == nil || d.BlockIndex != len(m.message.ContentBlocks) {
 			return fmt.Errorf("block start requires next index and payload")
 		}
-		b, err := cloneContentBlock(*d.Block, true, "delta.block", nil)
+		b, err := cloneContentBlock(*d.Block, true, "delta.block", d.BlockIndex, nil)
 		if err != nil {
 			return err
 		}

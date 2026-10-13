@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -89,7 +90,7 @@ func cloneAnyValue(value any, strict bool, path string, depth int, fallback Clon
 		cloned := reflect.MakeMapWithSize(rv.Type(), rv.Len())
 		iterator := rv.MapRange()
 		for iterator.Next() {
-			itemPath := fmt.Sprintf("%s[%v]", path, iterator.Key().Interface())
+			itemPath := cloneItemPath(path, iterator.Key())
 			item, err := cloneAnyValue(iterator.Value().Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
@@ -111,7 +112,7 @@ func cloneAnyValue(value any, strict bool, path string, depth int, fallback Clon
 	case reflect.Slice:
 		cloned := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for index := 0; index < rv.Len(); index++ {
-			itemPath := fmt.Sprintf("%s[%d]", path, index)
+			itemPath := path + "[" + strconv.Itoa(index) + "]"
 			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
@@ -132,7 +133,7 @@ func cloneAnyValue(value any, strict bool, path string, depth int, fallback Clon
 	case reflect.Array:
 		cloned := reflect.New(rv.Type()).Elem()
 		for index := 0; index < rv.Len(); index++ {
-			itemPath := fmt.Sprintf("%s[%d]", path, index)
+			itemPath := path + "[" + strconv.Itoa(index) + "]"
 			item, err := cloneAnyValue(rv.Index(index).Interface(), strict, itemPath, depth+1, fallback)
 			if err != nil {
 				return nil, err
@@ -158,6 +159,15 @@ func cloneAnyValue(value any, strict bool, path string, depth int, fallback Clon
 		}
 	}
 	return value, nil
+}
+
+// cloneItemPath 为 map 元素拼定位串：常见字符串键走 strconv 拼接，
+// 其余类型退化为 fmt 格式化；两者都只在遍历到该项时发生。
+func cloneItemPath(path string, key reflect.Value) string {
+	if key.Kind() == reflect.String {
+		return path + "[" + strconv.Quote(key.String()) + "]"
+	}
+	return fmt.Sprintf("%s[%v]", path, key.Interface())
 }
 
 func callValueClone(value valueCloneable) (cloned any, err error) {

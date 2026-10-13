@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -73,7 +74,7 @@ func (m Message) TextBlocks() []Text {
 		if block.Type != ContentBlockTypeText || block.Text == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
+		cloned, _ := cloneContentBlock(block, false, "content_blocks", i, nil)
 		texts = append(texts, *cloned.Text)
 	}
 	return texts
@@ -94,7 +95,7 @@ func (m Message) ReasoningBlocks() []Reasoning {
 		if block.Type != ContentBlockTypeReasoning || block.Reasoning == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
+		cloned, _ := cloneContentBlock(block, false, "content_blocks", i, nil)
 		reasoning = append(reasoning, *cloned.Reasoning)
 	}
 	return reasoning
@@ -106,7 +107,7 @@ func (m Message) FunctionToolCalls() []FunctionToolCall {
 		if block.Type != ContentBlockTypeFunctionToolCall || block.FunctionToolCall == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
+		cloned, _ := cloneContentBlock(block, false, "content_blocks", i, nil)
 		calls = append(calls, *cloned.FunctionToolCall)
 	}
 	return calls
@@ -118,7 +119,7 @@ func (m Message) FunctionToolResults() []FunctionToolResult {
 		if block.Type != ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 			continue
 		}
-		cloned, _ := cloneContentBlock(block, false, fmt.Sprintf("content_blocks[%d]", i), nil)
+		cloned, _ := cloneContentBlock(block, false, "content_blocks", i, nil)
 		results = append(results, *cloned.FunctionToolResult)
 	}
 	return results
@@ -148,20 +149,28 @@ func cloneMessages(messages []Message, strict bool, fallback CloneFallbackFunc) 
 	copied := make([]Message, len(messages))
 	for i, msg := range messages {
 		copied[i] = msg
-		blocks, err := cloneContentBlocks(msg.ContentBlocks, strict, fmt.Sprintf("messages[%d].content_blocks", i), fallback)
-		if err != nil {
-			return nil, err
+		if msg.ContentBlocks != nil {
+			path := ""
+			if contentBlocksNeedPath(msg.ContentBlocks) {
+				path = "messages[" + strconv.Itoa(i) + "].content_blocks"
+			}
+			blocks, err := cloneContentBlocks(msg.ContentBlocks, strict, path, fallback)
+			if err != nil {
+				return nil, err
+			}
+			copied[i].ContentBlocks = blocks
 		}
-		copied[i].ContentBlocks = blocks
-		meta, err := cloneResponseMeta(msg.ResponseMeta, strict, fmt.Sprintf("messages[%d].response_meta", i), fallback)
-		if err != nil {
-			return nil, err
+		if msg.ResponseMeta != nil {
+			meta, err := cloneResponseMeta(msg.ResponseMeta, strict, "messages["+strconv.Itoa(i)+"].response_meta", fallback)
+			if err != nil {
+				return nil, err
+			}
+			copied[i].ResponseMeta = meta
 		}
-		copied[i].ResponseMeta = meta
 		if msg.Extra != nil {
 			copied[i].Extra = make(map[string]any, len(msg.Extra))
 			for k, v := range msg.Extra {
-				cloned, err := cloneAnyValue(v, strict, fmt.Sprintf("messages[%d].extra[%q]", i, k), 0, fallback)
+				cloned, err := cloneAnyValue(v, strict, "messages["+strconv.Itoa(i)+"].extra["+strconv.Quote(k)+"]", 0, fallback)
 				if err != nil {
 					return nil, err
 				}
@@ -170,6 +179,17 @@ func cloneMessages(messages []Message, strict bool, fallback CloneFallbackFunc) 
 		}
 	}
 	return copied, nil
+}
+
+// contentBlocksNeedPath 报告这批块的克隆是否可能用到定位串（供错误
+// 定位与 fallback）：任一块携带 Extra 或嵌套块时才需要父路径。
+func contentBlocksNeedPath(blocks []ContentBlock) bool {
+	for _, block := range blocks {
+		if contentBlockNeedsPath(block) {
+			return true
+		}
+	}
+	return false
 }
 
 func HasChinese(messages []Message) bool {
