@@ -31,8 +31,8 @@ func (s *conversationSession) bind(ctx context.Context) context.Context {
 	// 会话标识属于运行追踪信息，经 ctx 元数据下发给回调与工具；
 	// 与持久化 State 分离，不参与业务 values。
 	return observe.WithMetadata(ctx, map[string]any{
-		"conversation_id":    checkpoint.ConversationID,
-		"checkpoint_version": checkpoint.Version,
+		observe.AttrConversationID: checkpoint.ConversationID,
+		"checkpoint_version":       checkpoint.Version,
 	})
 }
 

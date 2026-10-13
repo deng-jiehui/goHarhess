@@ -20,6 +20,15 @@ const (
 	KindCheckpoint Kind = "checkpoint"
 )
 
+// 观测元数据与事件属性共用的规范键名：tenant、limits、otel 等组件统一引用，
+// 避免各处自造同义词。conversation_id 沿用 agent 已使用的键，不另造
+// session_id。
+const (
+	AttrTenantID       = "tenant_id"
+	AttrUserID         = "user_id"
+	AttrConversationID = "conversation_id"
+)
+
 // Event 是一次 span 级生命周期事件，不含 token 级流式增量。
 type Event struct {
 	Kind     Kind
