@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/goharness/goharness/internal/agentrecipe"
 	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
+	"github.com/goharness/goharness/pkg/observe"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/state"
@@ -199,6 +201,15 @@ func (b *base) runPrelude(ctx context.Context, messages []schema.Message, kind A
 		return nil, nil, RunOptions{}, nil, err
 	}
 	ctx = bindRunContext(ctx, session)
+	// agent 名与检查点存储类型写入观测元数据：run/node/llm/tool/checkpoint
+	// 事件的 Attrs 均携带，供指标标签、span 属性与日志关联使用；子 Agent
+	// 在自己的 runPrelude 覆盖 agent 键，保持各自归属。显式空值也覆盖
+	// 继承到的父级 agent 名，避免无名内嵌运行误挂父标签。
+	metadata := map[string]any{"agent": b.name}
+	if b.checkpointStore != nil {
+		metadata["checkpoint.store"] = storeLabel(b.checkpointStore)
+	}
+	ctx = observe.WithMetadata(ctx, metadata)
 	prepared = b.prepareMessages(loaded, &opts)
 	runCtx, lifecycle, err = b.beginRun(ctx, prepared, opts)
 	if err != nil {
@@ -369,6 +380,12 @@ func extractModelTargetedSpecs(specs []runnable.OptionSpec) (matched, rebuilt []
 		rebuilt = append(rebuilt, spec)
 	}
 	return matched, rebuilt, firstIndex
+}
+
+// storeLabel 用存储实现类型做低基数标签（如 state.MemoryStore、redis.Store）。
+// 类型集合受应用装配控制，天然有界；装饰器显示装饰层类型（tenant.tenantStore）。
+func storeLabel(store state.Store) string {
+	return strings.TrimPrefix(fmt.Sprintf("%T", store), "*")
 }
 
 // effectiveMaxTokens 返回本次运行的有效 max_tokens：优先取调用方经模型
