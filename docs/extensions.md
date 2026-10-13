@@ -4,6 +4,21 @@
 缓存后端或 Redis 客户端。可选实现位于嵌套的
 `extensions` 模块，应用可以按需选择依赖。
 
+## 租户与多用户
+
+`extensions/tenant` 用同一入口设置租户作用域：`tenant.With` 校验
+`tool.Subject` 的 `TenantID`/`ID`（`[A-Za-z0-9._-]`、1–64 字符）后同时
+完成三件事——`tool.WithSubject`、`observe` 元数据 `tenant_id`/`user_id`、
+ctx 上的作用域记录。`tenant.SessionKey` 生成
+`t/<租户>/u/<用户>/s/<会话>` 会话 key。
+
+`tenant.NewStore(inner)` 装饰任意 `state.Store`：所有方法先取 ctx 作用域，
+要求会话 key 以 `t/<租户>/` 开头（`tenant.StrictUser()` 再要求
+`u/<用户>/` 段，同租户用户间也隔离），越权返回 `ErrTenantMismatch`，
+无作用域返回 `ErrNoScope`；子 Agent 与嵌套运行的后缀 key 前缀不变、
+天然放行。装饰器透传 `state.RollbackBasisReader`，放弃运行的回退不失效。
+应用只应暴露装饰后的 Store；按租户列出会话清单由应用自己维护。
+
 ## 检索组件
 
 RAG 数据组件（分块、索引、混合检索、重排）在
