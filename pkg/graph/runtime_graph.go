@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/state"
@@ -50,6 +51,9 @@ type Graph[I, O any] struct {
 	built                bool
 	revision             string
 	resumableErr         error
+	// definitionVersion 是应用声明的定义版本：系统提示、工具集合、模型等
+	// 不进入整图指纹的要素由它明文记入执行记录，恢复时先比对。
+	definitionVersion string
 }
 
 type runtimeNode struct {
@@ -447,6 +451,45 @@ func (g *Graph[I, O]) SetDescription(value string) {
 	g.mu.Unlock()
 }
 
+// DefinitionVersion 返回应用声明的定义版本；未设置为空串。
+func (g *Graph[I, O]) DefinitionVersion() string {
+	if g == nil {
+		return ""
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.definitionVersion
+}
+
+// SetDefinitionVersion 记录定义版本：不进入整图指纹的要素（系统提示、
+// 工具集合、模型等）变化时由应用递增，恢复时先于指纹比对，不一致即拒绝。
+// 供自建图使用；Agent 侧对应选项是 agent.WithDefinitionVersion。
+func (g *Graph[I, O]) SetDefinitionVersion(version string) error {
+	if g == nil {
+		return validationError("graph.nil", "graph", "graph cannot be nil")
+	}
+	if err := ValidateDefinitionVersion(version); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	g.definitionVersion = version
+	g.mu.Unlock()
+	return nil
+}
+
+// ValidateDefinitionVersion 校验定义版本串：不超过 128 字符且只含可打印字符。
+func ValidateDefinitionVersion(version string) error {
+	if len(version) > 128 {
+		return validationError("graph.definition_version.too_long", "definition_version", "must be at most 128 characters, got %d", len(version))
+	}
+	for _, r := range version {
+		if !unicode.IsPrint(r) {
+			return validationError("graph.definition_version.unprintable", "definition_version", "must contain only printable characters")
+		}
+	}
+	return nil
+}
+
 func (g *Graph[I, O]) SetMaxSteps(value int) error {
 	if g == nil {
 		return validationError("graph.nil", "graph", "graph cannot be nil")
@@ -579,7 +622,7 @@ func (g *Graph[I, O]) cloneBuilder() *Graph[I, O] {
 	return &Graph[I, O]{
 		forks: cloneForks(g.forks), dispatches: cloneDispatches(g.dispatches), routes: cloneRuntimeRoutes(g.routes), stepMerger: g.stepMerger, maxConcurrency: g.maxConcurrency,
 
-		name: g.name, description: g.description, inputType: g.inputType, outputType: g.outputType, stateType: g.stateType,
+		name: g.name, description: g.description, definitionVersion: g.definitionVersion, inputType: g.inputType, outputType: g.outputType, stateType: g.stateType,
 		stateFactory: g.stateFactory, codec: g.codec, codecID: g.codecID, codecVersion: g.codecVersion, codecType: g.codecType,
 		nodes: nodes, nodeOrder: append([]string(nil), g.nodeOrder...), edges: append([]runtimeEdge(nil), g.edges...), maxSteps: g.maxSteps,
 	}

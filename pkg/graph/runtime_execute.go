@@ -1254,17 +1254,18 @@ func (g *Graph[I, O]) persistInterruption(
 	}
 	revision, _ := g.recoveryMetadata()
 	progress := executionProgress{
-		Schedule:      scheduleFromContext(ctx),
-		GraphName:     g.Name(),
-		GraphRevision: revision,
-		ResumeNode:    resumeNode,
-		Step:          step,
-		Visits:        cloneVisits(visits),
-		State:         stateCheckpoint,
-		CursorStack:   cursor.Clone(),
-		Point:         point,
-		Reason:        request.Reason,
-		Metadata:      clonePortableMetadata(request.Metadata),
+		Schedule:          scheduleFromContext(ctx),
+		GraphName:         g.Name(),
+		GraphRevision:     revision,
+		DefinitionVersion: g.DefinitionVersion(),
+		ResumeNode:        resumeNode,
+		Step:              step,
+		Visits:            cloneVisits(visits),
+		State:             stateCheckpoint,
+		CursorStack:       cursor.Clone(),
+		Point:             point,
+		Reason:            request.Reason,
+		Metadata:          clonePortableMetadata(request.Metadata),
 	}
 	if interaction != nil {
 		progress.Interrupts = interaction.records

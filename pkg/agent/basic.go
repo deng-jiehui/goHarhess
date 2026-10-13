@@ -33,7 +33,7 @@ func newBasicAgent(cfg baseConfig) (*BasicAgent, error) {
 			return a.prepareLLMRequest(ctx, messages, nil, runOpts)
 		},
 		NameMessages: a.withAgentName,
-	}, false)
+	}, false, cfg.DefinitionVersion)
 	if err != nil {
 		return nil, err
 	}

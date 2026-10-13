@@ -52,7 +52,11 @@ type baseConfig struct {
 	ToolRetryBackoff time.Duration
 	// ToolWorkers 是工具节点 Runtime 的实例级并发工具执行上限，
 	// 0 使用默认值 128，上限 tool.MaxRuntimeWorkers。
-	ToolWorkers         int
+	ToolWorkers int
+	// DefinitionVersion 是应用声明的 Agent 定义版本：不进入图指纹的
+	// 配置要素（提示、工具集、模型）变化时由应用递增；恢复时先于
+	// 指纹比对，不一致返回 graph.ErrDefinitionVersionMismatch。
+	DefinitionVersion   string
 	MaxTokens           int
 	MaxLLMCalls         int
 	ExtraGenerateConfig llm.GenerateConfig
@@ -75,6 +79,7 @@ type base struct {
 	checkpointStore      state.Store
 	checkpointTimeout    time.Duration
 	checkpointDurability graph.Durability
+	definitionVersion    string
 	limits               agentLimits
 	extraGenerateConfig  llm.GenerateConfig
 }
@@ -129,6 +134,7 @@ func newBase(cfg baseConfig) (*base, error) {
 		checkpointStore:      cfg.CheckpointStore,
 		checkpointTimeout:    cfg.CheckpointTimeout,
 		checkpointDurability: cfg.CheckpointDurability,
+		definitionVersion:    cfg.DefinitionVersion,
 		limits:               limitsFromConfig(cfg),
 		extraGenerateConfig:  cfg.ExtraGenerateConfig,
 	}

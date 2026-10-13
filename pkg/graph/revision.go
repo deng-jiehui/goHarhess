@@ -118,13 +118,17 @@ func (g *Graph[I, O]) recoveryMetadata() (string, error) {
 }
 
 // prepareRecoveredFrame 校验一份已保存现场能否由当前图继续执行：
-// 整图指纹是唯一的兼容性判据——图名或整图 revision 任一不一致即拒绝，
-// 不做条目化闭包比较，也不支持 State 迁移。marker 是调用方边界的错误标记
-// （根图 ErrGraphRevisionMismatch、嵌套子图 ErrResumeIncompatible）。
+// 应用定义版本先于指纹比较（不一致报 ErrDefinitionVersionMismatch），
+// 随后整图指纹是唯一的兼容性判据——图名或整图 revision 任一不一致即
+// 拒绝，不做条目化闭包比较，也不支持 State 迁移。marker 是调用方边界的
+// 错误标记（根图 ErrGraphRevisionMismatch、嵌套子图 ErrResumeIncompatible）。
 func (g *Graph[I, O]) prepareRecoveredFrame(saved *executionProgress, marker error) (*executionProgress, error) {
 	revision, resumableErr := g.recoveryMetadata()
 	if resumableErr != nil {
 		return nil, resumableErr
+	}
+	if saved.DefinitionVersion != g.DefinitionVersion() {
+		return nil, fmt.Errorf("%w: %w: checkpoint %q, now %q", marker, ErrDefinitionVersionMismatch, saved.DefinitionVersion, g.DefinitionVersion())
 	}
 	if saved.GraphName != g.Name() {
 		return nil, fmt.Errorf("%w: checkpoint graph %q, now %q", marker, saved.GraphName, g.Name())

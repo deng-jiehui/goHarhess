@@ -151,6 +151,14 @@ func WithTextReAct(value bool) Option {
 	return func(config *baseConfig) { config.TextReAct = value }
 }
 
+// WithDefinitionVersion 固定 Agent 定义版本：版本串明文写入检查点执行
+// 记录，恢复时先于图指纹比对；不一致返回 graph.ErrDefinitionVersionMismatch
+// （同时满足 errors.Is(err, graph.ErrGraphRevisionMismatch)）。供 YAML 或
+// 数据库驱动定义的应用在配置变更时递增；未设置时行为不变。
+func WithDefinitionVersion(value string) Option {
+	return func(config *baseConfig) { config.DefinitionVersion = value }
+}
+
 type agentLimits struct {
 	maxDepth       int
 	timeout        time.Duration
@@ -217,6 +225,9 @@ func validateBaseConfig(config baseConfig) error {
 		if check.value < check.min || check.value > check.max {
 			return fmt.Errorf("agent %s must be between %d and %d: %d", check.name, check.min, check.max, check.value)
 		}
+	}
+	if err := graph.ValidateDefinitionVersion(config.DefinitionVersion); err != nil {
+		return err
 	}
 	if config.Timeout <= 0 || config.Timeout > hardMaxTimeout {
 		return fmt.Errorf("agent timeout must be greater than zero and at most %s: %s", hardMaxTimeout, config.Timeout)

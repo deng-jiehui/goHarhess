@@ -46,7 +46,7 @@ func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schem
 			}, content)
 		},
 		NameMessages: base.withAgentName,
-	}, true)
+	}, true, base.definitionVersion)
 }
 
 func joinAgentTextBlocks(blocks []schema.ContentBlock) string {

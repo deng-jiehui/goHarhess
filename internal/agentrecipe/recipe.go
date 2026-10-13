@@ -284,7 +284,9 @@ type Hooks struct {
 	NameMessages func([]schema.Message) []schema.Message
 }
 
-func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
+// definitionVersion 是应用声明的 Agent 定义版本：不为空时记入图的
+// 执行记录，恢复时先于指纹比对（graph.ErrDefinitionVersionMismatch）。
+func NewToolRecipe(name string, hooks Hooks, tools bool, definitionVersion string) (*Recipe, error) {
 	if hooks.Model == nil {
 		return nil, errors.New("agent recipe requires a model node")
 	}
@@ -307,6 +309,11 @@ func NewToolRecipe(name string, hooks Hooks, tools bool) (*Recipe, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if definitionVersion != "" {
+		if err := g.SetDefinitionVersion(definitionVersion); err != nil {
+			return nil, err
+		}
 	}
 	// NameMessages 约定返回新视图、不改输入；未设置时原样传递。
 	nameMessages := func(messages []schema.Message) []schema.Message {

@@ -25,7 +25,11 @@ var (
 	ErrCheckpointRequired    = control.Sentinel("graph interruption requires a checkpoint")
 	ErrCheckpointNotFound    = control.Sentinel("graph checkpoint not found")
 	ErrGraphRevisionMismatch = control.Sentinel("graph revision mismatch")
-	ErrGraphNotResumable     = control.Sentinel("graph is not resumable")
+	// ErrDefinitionVersionMismatch 报告执行记录中的应用定义版本与当前图
+	// 不一致；它同时满足 errors.Is(err, ErrGraphRevisionMismatch)，既有
+	// 按指纹不匹配处理的代码无需改动。
+	ErrDefinitionVersionMismatch = fmt.Errorf("graph definition version mismatch: %w", ErrGraphRevisionMismatch)
+	ErrGraphNotResumable         = control.Sentinel("graph is not resumable")
 	// ErrRunAbandoned 表示检查点上的运行已通过 state.AbandonRun 放弃，不能再恢复。
 	ErrRunAbandoned = control.Sentinel("graph run was abandoned")
 )
@@ -55,16 +59,19 @@ type executionProgress struct {
 	Interrupts    []control.InterruptRecord `json:"interrupts,omitempty"`
 	GraphName     string                    `json:"graph_name"`
 	GraphRevision string                    `json:"graph_revision"`
-	ResumeNode    string                    `json:"resume_node"`
-	Step          int                       `json:"step"`
-	Visits        map[string]int            `json:"visits,omitempty"`
-	State         GraphStateCheckpoint      `json:"state"`
-	CursorStack   CursorStack               `json:"cursor_stack,omitempty"`
-	Point         InterruptPoint            `json:"point"`
-	Reason        string                    `json:"reason,omitempty"`
-	Metadata      map[string]any            `json:"metadata,omitempty"`
-	Tasks         []*taskProgress           `json:"tasks,omitempty"`
-	Children      []*childExecution         `json:"children,omitempty"`
+	// DefinitionVersion 是应用声明的定义版本，明文保存、不参与指纹；
+	// 空串与未设置等价，只有一侧设置即视为不一致。
+	DefinitionVersion string               `json:"definition_version,omitempty"`
+	ResumeNode        string               `json:"resume_node"`
+	Step              int                  `json:"step"`
+	Visits            map[string]int       `json:"visits,omitempty"`
+	State             GraphStateCheckpoint `json:"state"`
+	CursorStack       CursorStack          `json:"cursor_stack,omitempty"`
+	Point             InterruptPoint       `json:"point"`
+	Reason            string               `json:"reason,omitempty"`
+	Metadata          map[string]any       `json:"metadata,omitempty"`
+	Tasks             []*taskProgress      `json:"tasks,omitempty"`
+	Children          []*childExecution    `json:"children,omitempty"`
 	// Waiting 是挂起时的当前阻塞位置：本层问题、子调用或并行任务组。
 	// 恢复判定以它为准，已回答的旧问题不会误唤醒后来阻塞的任务。
 	Waiting *waitRecord `json:"waiting,omitempty"`
