@@ -12,6 +12,11 @@ import (
 
 type GenerateConfig map[string]any
 
+// ErrReservedGenerateKey 报告 GenerateConfig 携带框架管理的保留键
+// （model、messages、stream、tools、functions）：它们会静默覆盖框架生成
+// 的字段或丢弃工具定义，适配器在发送请求前一律拒绝。
+var ErrReservedGenerateKey = errors.New("llm: reserved generate config key")
+
 type Config struct {
 	Model       string
 	ModelType   string

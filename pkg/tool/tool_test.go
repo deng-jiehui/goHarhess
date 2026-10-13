@@ -32,13 +32,6 @@ func TestParseArgsStrictRejectsInvalidOrNonObjectJSON(t *testing.T) {
 	}
 }
 
-func TestParseArgsRemainsTolerantForPartialStreams(t *testing.T) {
-	args := tool.ParseArgs(`{"query":`)
-	if len(args) != 0 {
-		t.Fatalf("args = %#v, want empty map", args)
-	}
-}
-
 func TestResultToContentBlocksPreservesExplicitBlocks(t *testing.T) {
 	result := tool.Result{ContentBlocks: []schema.ContentBlock{
 		schema.NewTextBlock("first"),

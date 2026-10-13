@@ -124,6 +124,9 @@ func newOpenAICompatibleModel(cfg OpenAICompatibleConfig, declared *Capabilities
 	if maxResponseBytes <= 0 {
 		maxResponseBytes = DefaultMaxResponseBytes
 	}
+	if err := checkReservedGenerateKeys(cfg.GenerateConfig); err != nil {
+		return nil, err
+	}
 	return &OpenAICompatibleModel{
 		model:                   model,
 		endpoint:                endpoint,
@@ -272,8 +275,26 @@ func (m *OpenAICompatibleModel) Transform(ctx context.Context, input *runnable.S
 	return m.Stream(ctx, value, options...)
 }
 
+// reservedGenerateKeys 由框架在请求体中写入或由工具声明生成，出现在
+// GenerateConfig 中会静默覆盖字段或丢弃工具定义，一律拒绝。
+var reservedGenerateKeys = map[string]struct{}{
+	"model": {}, "messages": {}, "stream": {}, "tools": {}, "functions": {},
+}
+
+func checkReservedGenerateKeys(config GenerateConfig) error {
+	for key := range config {
+		if _, reserved := reservedGenerateKeys[key]; reserved {
+			return fmt.Errorf("%w: %q", ErrReservedGenerateKey, key)
+		}
+	}
+	return nil
+}
+
 func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functions []schema.FunctionDefinition, opts Options, streaming bool) (map[string]any, error) {
 	payload := map[string]any{}
+	if err := checkReservedGenerateKeys(opts.ExtraGenerateConfig); err != nil {
+		return nil, err
+	}
 	merged := MergeGenerateConfig(m.generateConfig, opts.ExtraGenerateConfig)
 	if opts.ResponseFormat != nil && merged["response_format"] != nil {
 		return nil, ErrResponseFormatConflict

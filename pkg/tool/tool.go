@@ -195,16 +195,6 @@ func (t *FunctionTool) Transform(ctx context.Context, input *runnable.StreamRead
 
 var _ Tool = (*FunctionTool)(nil)
 
-// ParseArgs decodes a JSON object and returns an empty map for invalid input.
-// Use this only for tolerant stream assembly; finalized calls should validate JSON first.
-func ParseArgs(raw string) map[string]any {
-	args, err := ParseArgsStrict(raw)
-	if err != nil {
-		return map[string]any{}
-	}
-	return args
-}
-
 // ParseArgsStrict decodes finalized tool arguments as a JSON object.
 func ParseArgsStrict(raw string) (map[string]any, error) {
 	if strings.TrimSpace(raw) == "" {

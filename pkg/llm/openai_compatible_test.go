@@ -407,3 +407,33 @@ func TestOpenAICompatibleValidatesFormatBeforeRequest(t *testing.T) {
 		t.Fatalf("requests = %d", requests)
 	}
 }
+
+func TestOpenAICompatibleRejectsReservedGenerateKeys(t *testing.T) {
+	for _, key := range []string{"model", "messages", "stream", "tools", "functions"} {
+		t.Run("construct/"+key, func(t *testing.T) {
+			_, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+				Model:          "m",
+				BaseURL:        "https://example.test",
+				GenerateConfig: llm.GenerateConfig{key: "x"},
+			})
+			if !errors.Is(err, llm.ErrReservedGenerateKey) || !strings.Contains(err.Error(), key) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+		t.Run("call/"+key, func(t *testing.T) {
+			model, err := llm.NewOpenAICompatibleModel(llm.OpenAICompatibleConfig{
+				Model:   "m",
+				BaseURL: "https://example.test",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = model.Invoke(context.Background(), llm.Request{
+				Messages: []schema.Message{schema.NewMessage(schema.RoleUser, schema.NewTextBlock("hi"))},
+			}, llm.WithGenerateConfig(llm.GenerateConfig{key: "x"}))
+			if !errors.Is(err, llm.ErrReservedGenerateKey) || !strings.Contains(err.Error(), key) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
