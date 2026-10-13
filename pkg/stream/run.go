@@ -50,6 +50,23 @@ type scope struct {
 }
 type scopeKey struct{}
 type trackingKey struct{}
+type suppressKey struct{}
+
+// SuppressEvents 标记上下文：其后代向公共流发布的消息、活动与生命周期
+// 事件全部丢弃。用于在工具调用内运行的子执行：默认不透传父运行的公共
+// 事件流，需要展示时由调用方选择不标记。观测（observe）与检查点不受影响。
+func SuppressEvents(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, suppressKey{}, true)
+}
+
+// EventsSuppressed 报告上下文是否被 SuppressEvents 标记。
+func EventsSuppressed(ctx context.Context) bool {
+	v, _ := ctx.Value(suppressKey{}).(bool)
+	return v
+}
 
 func HasMessageTracking(ctx context.Context) bool {
 	flags, _ := ctx.Value(trackingKey{}).([]*atomic.Bool)
@@ -121,7 +138,7 @@ func publish(ctx context.Context, p payload) error {
 		return nil
 	}
 	s, _ := ctx.Value(scopeKey{}).(*scope)
-	if s == nil {
+	if s == nil || EventsSuppressed(ctx) {
 		return nil
 	}
 	if p.lifecycle != nil && !s.lifecycle {
@@ -172,6 +189,11 @@ func PublishMessage(ctx context.Context, m MessageUpdate) error {
 	}
 	if err := publish(ctx, payload{message: &m}); err != nil {
 		return err
+	}
+	if EventsSuppressed(ctx) {
+		// 被抑制的发布不算到达公共流：不标记祖先的消息追踪旗标，
+		// 避免适配器误判已完成回退。
+		return nil
 	}
 	flags, _ := ctx.Value(trackingKey{}).([]*atomic.Bool)
 	for _, flag := range flags {

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -106,6 +107,17 @@ type Config struct {
 	// MaxConcurrent 限制同一管理器下同时运行的子 Agent 数；0 表示不限制。
 	// 超限的调用等待空位，不再与图批任务共享并发额度。
 	MaxConcurrent int
+	// TaskTimeout 是单次任务的时限（按次计，不含等待空位）；0 表示不限。
+	// 超时返回模型可修正的错误结果；子 Agent 仍受工具运行时超时约束，
+	// 更长的任务应整次放到后台，见对接说明。
+	TaskTimeout time.Duration
+	// MaxLLMCalls 是单次任务的模型调用上限（按次计）；0 表示沿用执行器
+	// 自身默认。超限返回模型可修正的错误结果而非静默截断。
+	// 只收紧不放宽：不能提高执行器构建时声明的上限。
+	MaxLLMCalls int
+	// EmitEvents 允许子 Agent 的运行事件透传到父运行的公共事件流；
+	// 默认不透传，只影响展示，不影响观测、检查点与中断传播。
+	EmitEvents bool
 }
 
 // ConfigError 是模型可修正的配置错误：名称不存在、超出范围或组合不兼容。
@@ -144,6 +156,12 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.MaxConcurrent < 0 {
 		return c, errors.New("subagent MaxConcurrent cannot be negative")
+	}
+	if c.TaskTimeout < 0 {
+		return c, errors.New("subagent TaskTimeout cannot be negative")
+	}
+	if c.MaxLLMCalls < 0 {
+		return c, errors.New("subagent MaxLLMCalls cannot be negative")
 	}
 	if len(c.Models) == 0 {
 		return c, errors.New("subagent config requires at least one model")

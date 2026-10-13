@@ -12,6 +12,7 @@ import (
 
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/stream"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
@@ -102,7 +103,20 @@ func (m *Manager) execute(ctx context.Context, resolved ResolvedSpec, agentID st
 	}
 	// 创建者作用域：子 Agent 内部再发起的子 Agent 归属该子 Agent。
 	ctx = withCaller(ctx, agentID)
-	result, exported, err = m.run(ctx, runner, input)
+	if !m.cfg.EmitEvents {
+		// 子执行默认不透传父运行的公共事件流；观测与检查点不受影响。
+		ctx = stream.SuppressEvents(ctx)
+	}
+	taskCtx := ctx
+	if m.cfg.TaskTimeout > 0 {
+		var cancel context.CancelFunc
+		taskCtx, cancel = context.WithTimeout(ctx, m.cfg.TaskTimeout)
+		defer cancel()
+	}
+	result, exported, err = m.run(taskCtx, runner, input)
+	if err != nil && !hasControlSignal(err) && taskCtx.Err() == context.DeadlineExceeded {
+		return "", nil, configErrorf("sub-agent task timed out after %s; split the work or retry with a smaller task", m.cfg.TaskTimeout)
+	}
 	if err != nil {
 		return "", nil, err
 	}

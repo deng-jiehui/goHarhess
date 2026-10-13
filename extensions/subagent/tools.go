@@ -278,7 +278,9 @@ func (m *Manager) settle(ctx context.Context, conversationID, agentID, caller, r
 		return tool.Result{}, err
 	}
 	if failed {
-		return tool.Result{}, runErr
+		// 模型可修正的失败（如任务超时、调用超限）返回错误结果让模型看到；
+		// 其余错误原样上交。
+		return modelError(runErr)
 	}
 	return tool.DataResult(map[string]any{
 		"agent_id": agentID, "task_id": taskID, "status": taskStatusCompleted, "result": result,

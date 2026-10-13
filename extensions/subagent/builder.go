@@ -146,17 +146,35 @@ func (m *Manager) freezeInput(saved json.RawMessage, task string) (json.RawMessa
 
 // run 执行一次任务：input 是登记时冻结的任务输入，运行后导出新的上下文
 // 并返回最终回复。挂起、取消等控制信号原样穿透给图引擎。返回的新上下文
-// 只在任务成功完成时使用。
+// 只在任务成功完成时使用。配置 MaxLLMCalls 时按次收紧执行器的模型预算，
+// 超限（输出停在未配对的工具调用上）返回模型可修正的错误，不静默截断。
 func (m *Manager) run(ctx context.Context, runner Runner, input []schema.Message) (result string, exported json.RawMessage, err error) {
-	output, err := runner.Invoke(ctx, schema.CloneMessages(input))
+	opts := []runnable.Option(nil)
+	if m.cfg.MaxLLMCalls > 0 {
+		opts = append(opts, agent.WithRunMaxLLMCalls(m.cfg.MaxLLMCalls))
+	}
+	output, err := runner.Invoke(ctx, schema.CloneMessages(input), opts...)
 	if err != nil {
 		return "", nil, err
+	}
+	if m.cfg.MaxLLMCalls > 0 && endsWithPendingCalls(output) {
+		return "", nil, configErrorf("sub-agent task stopped: reached the model-call limit of %d; retry with a smaller task or fewer steps", m.cfg.MaxLLMCalls)
 	}
 	exported, err = m.cfg.Codec.Export(input, output)
 	if err != nil {
 		return "", nil, fmt.Errorf("export sub-agent context: %w", err)
 	}
 	return finalText(output), exported, nil
+}
+
+// endsWithPendingCalls 判断输出是否停在未配对的工具调用上：ReAct 配方中
+// 模型调用预算耗尽时循环直接收尾，最后一条助手消息仍携带工具调用。
+func endsWithPendingCalls(output []schema.Message) bool {
+	if len(output) == 0 {
+		return false
+	}
+	last := output[len(output)-1]
+	return last.Role == schema.RoleAssistant && len(last.FunctionToolCalls()) > 0
 }
 
 // finalText 取最后一条带文本的助手消息作为任务的最终回复。
