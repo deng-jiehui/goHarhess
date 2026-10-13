@@ -138,6 +138,9 @@ func emit(ctx context.Context, event Event, payload func() any) {
 	if payload != nil {
 		event.Payload = payload()
 	}
+	// 元数据敏感键在分发边界脱敏：无命中零分配，命中时写时复制，
+	// 所有 Observer 看到同一份已脱敏的 Attrs，ctx 中的元数据不受影响。
+	event.Attrs = sanitizeEventAttrs(ctx, event.Attrs)
 	for _, observer := range observers {
 		dispatchOne(ctx, observer, event)
 	}
