@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -219,5 +220,53 @@ func TestCanceledRunCannotPublishSuccess(t *testing.T) {
 	defer r.Close()
 	if e, err := r.Recv(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("event=%+v err=%v", e, err)
+	}
+}
+
+func TestSlowConsumerCancelsRunWithErrSlowConsumer(t *testing.T) {
+	before := runtime.NumGoroutine()
+	publishErr := make(chan error, 1)
+	r, err := Run(context.Background(), func(ctx context.Context) (int, error) {
+		for i := 0; i < 100000; i++ {
+			if err := PublishActivity(ctx, ActivityUpdate{ID: "a", Status: "updated"}); err != nil {
+				publishErr <- err
+				return 0, err
+			}
+		}
+		return 0, nil
+	}, Config{Buffer: 1, SendTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// 消费一个事件确认流已启动，随后停止读取模拟慢消费者。
+	if _, err := r.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-publishErr:
+		if !errors.Is(err, ErrSlowConsumer) {
+			t.Fatalf("publish error = %v, want ErrSlowConsumer", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("publisher did not fail with ErrSlowConsumer")
+	}
+	if _, err := r.Recv(); !errors.Is(err, ErrSlowConsumer) {
+		t.Fatalf("Recv error = %v, want ErrSlowConsumer", err)
+	}
+	r.Close()
+	// 运行与排空协程都应在有界时间内退出。
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines = %d, want <= %d", runtime.NumGoroutine(), before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunRejectsNegativeSendTimeout(t *testing.T) {
+	if _, err := Run(context.Background(), func(context.Context) (int, error) { return 0, nil }, Config{SendTimeout: -time.Second}); err == nil {
+		t.Fatal("negative SendTimeout accepted")
 	}
 }

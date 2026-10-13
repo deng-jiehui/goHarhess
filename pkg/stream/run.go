@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/goharness/goharness/pkg/control"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -17,7 +18,15 @@ import (
 type Config struct {
 	Buffer    int
 	Lifecycle bool
+	// SendTimeout 是事件入队等待上限：队列满且阻塞超过该时长时，以
+	// ErrSlowConsumer 取消运行，读端最终收到该错误。0 表示不限（默认，
+	// 保持原有的背压等待语义）。
+	SendTimeout time.Duration
 }
+
+// ErrSlowConsumer 是慢消费者超时终止运行的原因：
+// 事件队列满且发布方等待超过 Config.SendTimeout。
+var ErrSlowConsumer = errors.New("stream consumer too slow")
 
 // Reader intentionally exposes no business-value Collect operation.
 type Reader[O any] struct {
@@ -255,7 +264,10 @@ func Run[O any](ctx context.Context, fn func(context.Context) (O, error), config
 	if cfg.Buffer < 0 {
 		return nil, errors.New("negative event buffer")
 	}
-	execution, cancel := context.WithCancel(ctx)
+	if cfg.SendTimeout < 0 {
+		return nil, errors.New("negative send timeout")
+	}
+	execution, cancel := context.WithCancelCause(ctx)
 	reader, writer := runnable.Pipe[Event[O]](context.WithoutCancel(ctx))
 	queue := make(chan payload, cfg.Buffer)
 	completed := make(chan struct{})
@@ -291,6 +303,28 @@ func Run[O any](ctx context.Context, fn func(context.Context) (O, error), config
 			}
 			prepared = local[p.message.MessageID]
 		}
+		if cfg.SendTimeout > 0 {
+			// 队列满且等待超时的分支：取消执行并让读端收到 ErrSlowConsumer。
+			timer := time.NewTimer(cfg.SendTimeout)
+			defer timer.Stop()
+			select {
+			case queue <- p:
+				if p.message != nil {
+					messageStates[p.message.MessageID] = prepared
+				}
+				return nil
+			case <-timer.C:
+				cancel(ErrSlowConsumer)
+				// 排空协程可能阻塞在 writer.Send 上；关闭管道解除阻塞并
+				// 把终端错误钉为 ErrSlowConsumer。
+				_ = writer.CloseWithError(ErrSlowConsumer)
+				return ErrSlowConsumer
+			case <-execution.Done():
+				return context.Cause(execution)
+			case <-call.Done():
+				return call.Err()
+			}
+		}
 		select {
 		case queue <- p:
 			if p.message != nil {
@@ -298,7 +332,7 @@ func Run[O any](ctx context.Context, fn func(context.Context) (O, error), config
 			}
 			return nil
 		case <-execution.Done():
-			return execution.Err()
+			return context.Cause(execution)
 		case <-call.Done():
 			return call.Err()
 		}
@@ -315,16 +349,16 @@ func Run[O any](ctx context.Context, fn func(context.Context) (O, error), config
 			close(completed)
 		}()
 		if execution.Err() != nil {
-			terminal = execution.Err()
+			terminal = context.Cause(execution)
 			return
 		}
 		output, terminal = fn(execution)
 		if terminal == nil {
-			terminal = execution.Err()
+			terminal = context.Cause(execution)
 		}
 	}()
 	go func() {
-		defer cancel()
+		defer cancel(nil)
 		defer writer.Close()
 		var sequence uint64
 		pending := newPendingEvents()
@@ -387,5 +421,5 @@ func Run[O any](ctx context.Context, fn func(context.Context) (O, error), config
 			}
 		}
 	}()
-	return &Reader[O]{reader: reader, cancel: cancel}, nil
+	return &Reader[O]{reader: reader, cancel: func() { cancel(nil) }}, nil
 }
