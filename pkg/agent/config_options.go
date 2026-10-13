@@ -123,6 +123,13 @@ func WithToolRetryBackoff(value time.Duration) Option {
 	return func(config *baseConfig) { config.ToolRetryBackoff = value }
 }
 
+// WithToolWorkers sets the instance-level cap on concurrent tool executions
+// shared by all in-flight runs of this Agent; 0 keeps the default of 128,
+// the hard ceiling is tool.MaxRuntimeWorkers.
+func WithToolWorkers(value int) Option {
+	return func(config *baseConfig) { config.ToolWorkers = value }
+}
+
 // WithMaxTokens sets the model-facing max_tokens generation limit.
 func WithMaxTokens(value int) Option {
 	return func(config *baseConfig) { config.MaxTokens = value }
@@ -202,6 +209,7 @@ func validateBaseConfig(config baseConfig) error {
 		{name: "max depth", value: config.MaxDepth, min: 1, max: hardMaxDepth},
 		{name: "max concurrency", value: config.MaxConcurrency, min: 1, max: hardMaxConcurrency},
 		{name: "tool retries", value: config.ToolRetries, min: 0, max: hardMaxRetries},
+		{name: "tool workers", value: config.ToolWorkers, min: 0, max: tool.MaxRuntimeWorkers},
 		{name: "max tokens", value: config.MaxTokens, min: 1, max: hardMaxTokens},
 		{name: "max LLM calls", value: config.MaxLLMCalls, min: 1, max: hardMaxLLMCalls},
 	}

@@ -50,6 +50,10 @@ type ToolNodeConfig struct {
 	// MaxAbandoned 是单个工具未归还执行的熔断阈值，0 使用默认值（8）；
 	// 达到阈值后新调用拒绝执行，防止不响应取消的工具耗尽 worker 池。
 	MaxAbandoned int
+	// MaxWorkers 是节点 Runtime 的实例级并发工具执行上限，0 使用默认值
+	// 128，有效范围 1 到 tool.MaxRuntimeWorkers。与批内并发 MaxConcurrency
+	// 无关：它是该节点所有在途运行共享的全局上限。
+	MaxWorkers int
 }
 
 // ToolsNode executes only the assistant tool calls at the message tail. It
@@ -90,6 +94,14 @@ func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
 	}
 	if config.MaxAbandoned != 0 {
 		runtimeConfig.MaxAbandoned = config.MaxAbandoned
+	}
+	if config.MaxWorkers != 0 {
+		runtimeConfig.MaxWorkers = config.MaxWorkers
+		// 未显式设置 MaxAbandoned 时，默认值随 worker 上限收紧；
+		// 显式值超限仍由 NewRuntime 校验报错。
+		if config.MaxAbandoned == 0 && runtimeConfig.MaxAbandoned > config.MaxWorkers {
+			runtimeConfig.MaxAbandoned = config.MaxWorkers
+		}
 	}
 	runtime, err := NewRuntime(config.Middlewares, runtimeConfig)
 	if err != nil {

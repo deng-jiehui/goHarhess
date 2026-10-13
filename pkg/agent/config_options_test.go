@@ -12,6 +12,7 @@ import (
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/tool"
 )
 
 func TestAgentInitializationOptionsConfigureCommonFields(t *testing.T) {
@@ -113,6 +114,8 @@ func TestAgentInitializationRejectsUnsafeNumericOptions(t *testing.T) {
 		{name: "timeout", opt: agent.WithTimeout(-time.Second)},
 		{name: "concurrency", opt: agent.WithMaxConcurrency(1000)},
 		{name: "retries", opt: agent.WithToolRetries(-1)},
+		{name: "workers negative", opt: agent.WithToolWorkers(-1)},
+		{name: "workers over cap", opt: agent.WithToolWorkers(tool.MaxRuntimeWorkers + 1)},
 		{name: "backoff", opt: agent.WithToolRetryBackoff(-time.Second)},
 		{name: "tokens", opt: agent.WithMaxTokens(0)},
 		{name: "LLM calls", opt: agent.WithMaxLLMCalls(0)},

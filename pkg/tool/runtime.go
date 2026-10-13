@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	maxExecutionDepth    = 32
-	maxBatchParallelism  = 64
-	maxRuntimeWorkers    = 128
+	maxExecutionDepth   = 32
+	maxBatchParallelism = 64
+	maxRuntimeWorkers   = 128
+	// MaxRuntimeWorkers 是实例级工具 worker 池的硬上限。
+	MaxRuntimeWorkers    = 4096
 	maxExecutionDuration = 5 * time.Minute
 	maxToolRetries       = 10
 	maxRetryBackoff      = 30 * time.Second
@@ -34,6 +36,10 @@ type RuntimeConfig struct {
 	// 仍未退出时计一次未归还，达到阈值后新调用直接拒绝，防止不响应 ctx 的
 	// 工具耗尽共享 worker 池。0 关闭熔断，上限为全局 worker 数。
 	MaxAbandoned int
+	// MaxWorkers 是实例级并发工具执行上限：该 Runtime 上所有在途运行合计
+	// 最多同时执行这么多工具，超出的排队等待并遵守 ctx 取消。0 使用
+	// 默认值 128，有效范围 1 到 MaxRuntimeWorkers。
+	MaxWorkers int
 }
 
 func defaultRuntimeConfig() RuntimeConfig {
@@ -62,8 +68,15 @@ func validateRuntimeConfig(config RuntimeConfig) error {
 	if config.RetryBackoff < 0 || config.RetryBackoff > maxRetryBackoff {
 		return fmt.Errorf("tool runtime retry backoff must be between zero and %s: %s", maxRetryBackoff, config.RetryBackoff)
 	}
-	if config.MaxAbandoned < 0 || config.MaxAbandoned > maxRuntimeWorkers {
-		return fmt.Errorf("tool runtime max abandoned must be between 0 and %d: %d", maxRuntimeWorkers, config.MaxAbandoned)
+	if config.MaxWorkers < 0 || config.MaxWorkers > MaxRuntimeWorkers {
+		return fmt.Errorf("tool runtime max workers must be between 0 and %d: %d", MaxRuntimeWorkers, config.MaxWorkers)
+	}
+	workers := config.MaxWorkers
+	if workers == 0 {
+		workers = maxRuntimeWorkers
+	}
+	if config.MaxAbandoned < 0 || config.MaxAbandoned > workers {
+		return fmt.Errorf("tool runtime max abandoned must be between 0 and %d: %d", workers, config.MaxAbandoned)
 	}
 	return nil
 }
@@ -107,12 +120,15 @@ func NewRuntime(middlewares []Middleware, configs ...RuntimeConfig) (*Runtime, e
 	if len(configs) > 0 {
 		config = configs[0]
 	}
+	if config.MaxWorkers == 0 {
+		config.MaxWorkers = maxRuntimeWorkers
+	}
 	if err := validateRuntimeConfig(config); err != nil {
 		return nil, err
 	}
 	runtime := &Runtime{
 		scheduler: newScheduler(),
-		workers:   make(chan struct{}, maxRuntimeWorkers),
+		workers:   make(chan struct{}, config.MaxWorkers),
 		config:    config,
 		abandoned: map[string]int{},
 	}
@@ -196,7 +212,7 @@ func (s *Scope) Execute(ctx context.Context, binding *Binding, input CallInput, 
 		return Result{}, ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return Result{}, classifiedCause(ctx)
 	}
 	// 解析属于执行限制的选项；其余选项继续透传给中间件与工具本体。
 	limits, remaining, err := runnable.ResolveComponentOptions(ExecutionLimits{}, options...)

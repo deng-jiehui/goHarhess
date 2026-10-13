@@ -48,8 +48,11 @@ type baseConfig struct {
 	Timeout        time.Duration
 	MaxConcurrency int
 	// ToolRetries 是只读工具的自动重试次数，ToolRetryBackoff 是重试间隔。
-	ToolRetries         int
-	ToolRetryBackoff    time.Duration
+	ToolRetries      int
+	ToolRetryBackoff time.Duration
+	// ToolWorkers 是工具节点 Runtime 的实例级并发工具执行上限，
+	// 0 使用默认值 128，上限 tool.MaxRuntimeWorkers。
+	ToolWorkers         int
 	MaxTokens           int
 	MaxLLMCalls         int
 	ExtraGenerateConfig llm.GenerateConfig
@@ -105,6 +108,7 @@ func newBase(cfg baseConfig) (*base, error) {
 			MaxDepth:       cfg.MaxDepth,
 			Timeout:        cfg.Timeout,
 			MaxRetries:     cfg.ToolRetries,
+			MaxWorkers:     cfg.ToolWorkers,
 			// 此处传递的是别名合并与默认值填充后的最终配置，标记为已提供，
 			// 显式零间隔不会被工具节点再次填回默认值。
 			RetryBackoff:    cfg.ToolRetryBackoff,
