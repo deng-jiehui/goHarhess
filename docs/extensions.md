@@ -189,3 +189,49 @@ visionModel := resolver.WrapModel(model)
 媒体数据超过阈值（按编码长度计）的保存直接返回 `ErrMediaTooLarge`，
 防止内联字节撑大存储；`state.RollbackBasisReader` 等可选接口照常
 透传。
+
+## 决策模型（实验）
+
+`extensions/decision` 接入「决策模型」这一类不生成文本、只对带类型
+问题（`Choice`/`Score`/`Noul`）返回概率的模型，用于图内条件路由与
+工具调用前筛查。**接口处于实验阶段，可能变化。**
+
+```go
+// 图内路由：decision.Node 调用模型写回 State，普通条件边按阈值判断。
+app, _ := graph.NewState[st]("triage").
+    Node("decide", decision.Node(dm, build, apply)).
+    Branch("decide", func(_ context.Context, s *st) (string, error) {
+        return decision.Route(s.Answer, 0.6, map[string]string{
+            "billing": "billing", "tech": "tech",
+        }, "manual"), nil // fallback 目标同样预声明
+    }, "billing", "tech", "manual")
+
+// 工具筛查：非只读工具先问 noul，低于 MinPTrue 经 graph.Interrupt
+// 转人工审批；批准后 Resume 继续，拒绝则返回模型可见的错误结果。
+guard, _ := decision.ToolGuard(decision.GuardConfig{Model: dm, MinPTrue: 0.8})
+agent.New(model, agent.WithTools(deploy), agent.WithMiddleware(guard),
+    agent.WithCheckpoint(store, session)) // 中断恢复需要检查点
+```
+
+- 厂商中立契约：`Model = runnable.Runnable[Request, Response]`；一次
+  调用并行回答至多 32 个问题（ID `[A-Za-z0-9_.-]{1,100}`）。
+- 适配器：`decision.NewHTTP`（信封字段名可配的 JSON 客户端，复用
+  llm 重试与 Retry-After）；`NewScriptedModel`/`NewFuncModel` 假实现
+  供测试与示例。注意信封顶层字段名虽可配，问题与回答的内部字段
+  （options/levels/p_true/confidence…）是本包自己的 JSON 形状，
+  没有已知的厂商服务直接接受；对接具体厂商需在 Model 外再包一层
+  转换，或自建网关。Endpoint 默认要求 https（回环地址或显式
+  AllowInsecureHTTP 除外）。
+- 敏感参数：筛查默认把工具的原始参数发给决策服务，并进入人工审批
+  中断的载荷与检查点；参数含敏感数据时用 GuardConfig.State 只发
+  必要字段（审批载荷里的参数仍是原始参数，需要时在应用侧脱敏展示）。
+- 观测：`decision.Observe(model)` 为每个回答发 `kind=decision` 事件，
+  带问题 ID、类型、选中项/分数/概率与置信度，供离线校准阈值。
+- 已知限制：恢复时筛查中间件随节点重放，决策模型会再问一次同一
+  问题（用恒定/确定性实现保持一致）；回答越界或缺失按
+  「模型不可用」处理。
+- 红线：决策是建议不是授权；状态里的提示注入会生效；计数、算术、
+  日期比较留给代码；阈值用有代表性用例校准并锁定模型版本。
+
+完整可运行示例见 `extensions/examples/decision`（脚本化假模型，
+离线演示分诊路由与筛查审批恢复）。
