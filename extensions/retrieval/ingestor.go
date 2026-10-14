@@ -23,8 +23,9 @@ type Limiter interface {
 }
 
 // IngestorConfig 配置入库流水线。Store 建议用 Scoped 包装以钉住租户；
-// Checkpoints 设置后流水线按批次落检查点，失败重跑时已完成批次直接
-// 复用结果，不会重复调用嵌入服务。
+// Checkpoints 设置后流水线按批次落检查点：失败时已完成并写入检查点
+// 的批次在恢复时复用、不会重复嵌入；失败瞬间仍在执行的兄弟批次会被
+// 取消，恢复时重做（至少一次语义）。
 type IngestorConfig struct {
 	Loader    runnable.Runnable[Source, []Document]
 	Chunker   runnable.Runnable[Document, []Chunk]
@@ -37,8 +38,16 @@ type IngestorConfig struct {
 	EmbeddingRaw        map[string]any
 	EmbeddingBatchSize  int
 	Limiter             Limiter
-	Checkpoints         state.Store
+	// MaxConcurrency 是同时执行的嵌入批次数上限；0 表示默认值 4，
+	// 负数返回配置错误。嵌入服务通常有并发与速率限制：Limiter 管
+	// 速率，MaxConcurrency 管并行度。设为 1 时批次按序执行，恢复
+	// 语义最确定。
+	MaxConcurrency int
+	Checkpoints    state.Store
 }
+
+// defaultMaxConcurrency 是 MaxConcurrency 缺省时的批次并行度。
+const defaultMaxConcurrency = 4
 
 // IngestRequest 是一次入库：一篇文档一个运行，检查点键形如
 // t/<租户>/ingest/<ID>（无租户作用域时为 ingest/<ID>）。
@@ -131,6 +140,12 @@ func NewIngestor(cfg IngestorConfig) (*Ingestor, error) {
 	if cfg.EmbeddingDimensions < 0 {
 		return nil, errors.New("ingestor embedding dimensions cannot be negative")
 	}
+	if cfg.MaxConcurrency < 0 {
+		return nil, errors.New("ingestor max concurrency cannot be negative")
+	}
+	if cfg.MaxConcurrency == 0 {
+		cfg.MaxConcurrency = defaultMaxConcurrency
+	}
 	ing := &Ingestor{cfg: cfg}
 	compiled, err := ing.buildGraph()
 	if err != nil {
@@ -142,6 +157,9 @@ func NewIngestor(cfg IngestorConfig) (*Ingestor, error) {
 
 func (i *Ingestor) buildGraph() (*graph.CompiledGraph[ingestState, *ingestState], error) {
 	g := graph.NewGraph[ingestState, *ingestState]("retrieval.ingest")
+	if err := g.SetMaxConcurrency(i.cfg.MaxConcurrency); err != nil {
+		return nil, err
+	}
 	if err := g.SetStateFactory(func(_ context.Context, in ingestState) (*ingestState, error) {
 		state := in
 		return &state, nil
@@ -403,8 +421,11 @@ func (i *Ingestor) checkpointKey(ctx context.Context, docID string) string {
 	return "ingest/" + docID
 }
 
-// Invoke 执行入库；设置 Checkpoints 时失败重跑自动从最近检查点恢复，
-// 已完成的嵌入批次经成员终态复用，不会重复调用嵌入服务。
+// Invoke 执行入库；设置 Checkpoints 时失败重跑自动从最近检查点恢复。
+// 失败时，已完成并写入检查点的批次在恢复时复用，不会重复嵌入；失败
+// 瞬间仍在执行的兄弟批次会被取消，恢复时重做（至少一次语义）。用
+// MaxConcurrency 控制并行度，设为 1 时批次按序执行，已完成批次的
+// 复用最确定。
 func (i *Ingestor) Invoke(ctx context.Context, req IngestRequest, options ...runnable.Option) (IngestStats, error) {
 	if ctx == nil {
 		return IngestStats{}, errors.New("ingest context cannot be nil")
@@ -438,7 +459,7 @@ func (i *Ingestor) Invoke(ctx context.Context, req IngestRequest, options ...run
 	}
 	out, err := i.graph.Invoke(ctx, in, opts...)
 	if err != nil && i.cfg.Checkpoints != nil && errors.Is(err, state.ErrUnfinishedRun) {
-		// 上次运行中途失败：同键恢复，已完成批次直接复用。
+		// 上次运行中途失败：同键恢复，已落检查点的批次直接复用。
 		out, err = i.graph.Resume(ctx, opts...)
 	}
 	if err != nil {

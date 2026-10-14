@@ -47,7 +47,12 @@ func TestRetrieverRedactCannotMutateQueryMetadata(t *testing.T) {
 	var events []observe.Event
 	ctx := observe.With(context.Background(),
 		observe.CapturePayload(func(_ observe.Event, raw any) any {
-			input := raw.(retrieval.CallbackInput)
+			// start 事件载荷是 CallbackInput，end 事件是 CallbackOutput；
+			// 只脱敏输入载荷，其他类型原样透传。
+			input, ok := raw.(retrieval.CallbackInput)
+			if !ok {
+				return raw
+			}
 			meta := input.Hybrid.Filter["k"].(*filterMeta)
 			meta.values["token"] = "***"
 			return input
