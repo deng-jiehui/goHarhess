@@ -39,6 +39,10 @@ type OpenAICompatibleConfig struct {
 	Headers                 map[string]string
 	Capabilities            Capabilities
 	IncludeReasoningContent bool
+	// IncludeStreamUsage 控制流式请求是否要求服务返回最终 Usage。
+	// nil 使用默认值 true；部分严格的第三方兼容服务不接受
+	// stream_options 时可显式传入指向 false 的指针关闭。
+	IncludeStreamUsage *bool
 	// MaxResponseBytes 是非流式响应体的读取上限；零值或负值使用
 	// DefaultMaxResponseBytes。
 	MaxResponseBytes int64
@@ -56,6 +60,7 @@ type OpenAICompatibleModel struct {
 	headers                 map[string]string
 	capabilities            Capabilities
 	includeReasoningContent bool
+	includeStreamUsage      bool
 	maxResponseBytes        int64
 }
 
@@ -84,6 +89,7 @@ func openAICompatibleFactory(defaultBaseURL string, reasoning bool) Factory {
 			Client:                  cfg.HTTPClient,
 			Headers:                 rawHeaders(cfg.Raw),
 			IncludeReasoningContent: reasoning || rawBool(cfg.Raw, "include_reasoning_content"),
+			IncludeStreamUsage:      rawBoolPtr(cfg.Raw, "include_usage"),
 			MaxResponseBytes:        rawInt64(cfg.Raw, "max_response_bytes"),
 		}, cfg.Capabilities)
 	}
@@ -124,6 +130,10 @@ func newOpenAICompatibleModel(cfg OpenAICompatibleConfig, declared *Capabilities
 	if maxResponseBytes <= 0 {
 		maxResponseBytes = DefaultMaxResponseBytes
 	}
+	includeStreamUsage := true
+	if cfg.IncludeStreamUsage != nil {
+		includeStreamUsage = *cfg.IncludeStreamUsage
+	}
 	if err := checkReservedGenerateKeys(cfg.GenerateConfig); err != nil {
 		return nil, err
 	}
@@ -136,6 +146,7 @@ func newOpenAICompatibleModel(cfg OpenAICompatibleConfig, declared *Capabilities
 		headers:                 cloneHeaders(cfg.Headers),
 		capabilities:            capabilities,
 		includeReasoningContent: cfg.IncludeReasoningContent,
+		includeStreamUsage:      includeStreamUsage,
 		maxResponseBytes:        maxResponseBytes,
 	}, nil
 }
@@ -347,6 +358,9 @@ func (m *OpenAICompatibleModel) requestPayload(messages []schema.Message, functi
 	}
 	payload["messages"] = encodedMessages
 	payload["stream"] = streaming
+	if streaming && m.includeStreamUsage {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if len(functions) > 0 && payload["tools"] == nil && payload["functions"] == nil {
 		payload["tools"] = encodeOpenAITools(functions)
 	}
@@ -469,14 +483,23 @@ type openAIToolCall struct {
 type openAIUsage struct {
 	PromptTokens           int `json:"prompt_tokens"`
 	CompletionTokens       int `json:"completion_tokens"`
+	InputTokens            int `json:"input_tokens"`
+	OutputTokens           int `json:"output_tokens"`
 	TotalTokens            int `json:"total_tokens"`
 	CompletionTokenDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
+	OutputTokenDetails struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
 	PromptTokenDetails struct {
 		CachedTokens     int `json:"cached_tokens"`
 		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
+	InputTokenDetails struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"input_tokens_details"`
 }
 
 func decodeOpenAIResponse(data []byte, delta bool) ([]schema.Message, *Usage, string, error) {
@@ -707,13 +730,33 @@ func decodeUsage(value *openAIUsage) *Usage {
 	if value == nil {
 		return nil
 	}
+	inputTokens := value.PromptTokens
+	if inputTokens == 0 {
+		inputTokens = value.InputTokens
+	}
+	outputTokens := value.CompletionTokens
+	if outputTokens == 0 {
+		outputTokens = value.OutputTokens
+	}
+	reasoningTokens := value.CompletionTokenDetails.ReasoningTokens
+	if reasoningTokens == 0 {
+		reasoningTokens = value.OutputTokenDetails.ReasoningTokens
+	}
+	cacheReadTokens := value.PromptTokenDetails.CachedTokens
+	if cacheReadTokens == 0 {
+		cacheReadTokens = value.InputTokenDetails.CachedTokens
+	}
+	cacheWriteTokens := value.PromptTokenDetails.CacheWriteTokens
+	if cacheWriteTokens == 0 {
+		cacheWriteTokens = value.InputTokenDetails.CacheWriteTokens
+	}
 	return &Usage{
-		InputTokens:      value.PromptTokens,
-		OutputTokens:     value.CompletionTokens,
+		InputTokens:      inputTokens,
+		OutputTokens:     outputTokens,
 		TotalTokens:      value.TotalTokens,
-		ReasoningTokens:  value.CompletionTokenDetails.ReasoningTokens,
-		CacheReadTokens:  value.PromptTokenDetails.CachedTokens,
-		CacheWriteTokens: value.PromptTokenDetails.CacheWriteTokens,
+		ReasoningTokens:  reasoningTokens,
+		CacheReadTokens:  cacheReadTokens,
+		CacheWriteTokens: cacheWriteTokens,
 	}
 }
 
@@ -969,6 +1012,17 @@ func rawBool(raw map[string]any, key string) bool {
 	}
 	value, _ := raw[key].(bool)
 	return value
+}
+
+func rawBoolPtr(raw map[string]any, key string) *bool {
+	if raw == nil {
+		return nil
+	}
+	value, ok := raw[key].(bool)
+	if !ok {
+		return nil
+	}
+	return &value
 }
 
 // rawInt64 读取配置文件中的整数值；容忍 JSON 数字常见的 float64。

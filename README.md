@@ -70,7 +70,9 @@ agent：agent.New(model, opts...) 在同一引擎上装配 ReAct 图
 - [观测](docs/observability.md) · [流式输出](docs/public-stream.md)
 - [检查点与中断](docs/checkpoints-interrupts.md) · [并行与分支](docs/graph-branches.md)
 - [结构化输出](docs/structured-output.md) · [数据模型](docs/datamodel.md) · [扩展](docs/extensions.md) · [Cookbook](docs/cookbook.md)
-- [设计取舍](docs/设计取舍.md)：砍掉/外移的能力与理由；`pre-slim` tag 保留完整版
+- **嵌入后端**：[多用户接入](docs/多用户接入.md) · [部署与运维](docs/部署与运维.md) · [指标与告警](docs/运维指标与告警.md) · [对接说明集](docs/integration.md)
+- **RAG 与协作**：[RAG 指南](docs/RAG指南.md) · [多 Agent 协作](docs/多Agent协作.md) · [多模态](docs/多模态.md)
+- [设计取舍](docs/设计取舍.md)：砍掉/外移的能力与理由；`pre-slim` tag 保留完整版；设计文档索引 [docs/design](docs/design/README.md)
 - 过程文档：[docs/design/archive/](docs/design/archive)；面试与学习材料：[docs/showcase/](docs/showcase)
 
 ## 消息协议

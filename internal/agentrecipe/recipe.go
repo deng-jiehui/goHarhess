@@ -20,8 +20,9 @@ import (
 )
 
 // stateCodecVersion 在配方 State 结构变化时递增；旧版本续点恢复时会明确报错。
-// v4：会话外部化——History 在持久化快照中改为 history_len 引用。
-const stateCodecVersion = 4
+// v5：会话外部化——History 在持久化快照中改为 history_len 引用，
+// 并保存本轮输入边界，供模型上下文压缩区分历史与当前工作集。
+const stateCodecVersion = 5
 
 // ModelNodeID 是配方图中模型节点的固定 ID，供上层按路径定向模型选项。
 const ModelNodeID = "llm"
@@ -58,6 +59,7 @@ type RunConfig struct {
 // 回填后清零。两个字段都不参与线格式。
 type baseState struct {
 	History      []schema.Message `json:"history,omitempty"`
+	Input        []schema.Message `json:"input,omitempty"`
 	Messages     []schema.Message `json:"messages,omitempty"`
 	Response     []schema.Message `json:"response,omitempty"`
 	externalConv bool
@@ -66,9 +68,8 @@ type baseState struct {
 
 // baseStateWire 是 baseState 的持久化视图：ConvExternal 时 History
 // 只保存 history_len 引用，恢复时由检查点会话回填；否则按原样内联。
-// Messages 为裁剪后工作集、Response 为本轮增量，与执行进度强相关，
-// 保持内联；Input 保留在线格式中只解码旧检查点，运行时不再携带——
-// 本轮输入已包含在 History 尾部，恢复所需的原始输入由调用方重新提供。
+// Input 为本轮输入，用于恢复时确定历史与当前工作集的边界；Messages 为
+// 模型工作消息、Response 为本轮增量，与执行进度强相关，均保持内联。
 type baseStateWire struct {
 	History      []schema.Message `json:"history,omitempty"`
 	Input        []schema.Message `json:"input,omitempty"`
@@ -79,7 +80,7 @@ type baseStateWire struct {
 }
 
 func (s *baseState) wire() baseStateWire {
-	w := baseStateWire{Messages: s.Messages, Response: s.Response}
+	w := baseStateWire{Input: s.Input, Messages: s.Messages, Response: s.Response}
 	if s.externalConv {
 		w.ConvExternal = true
 		w.HistoryLen = len(s.History)
@@ -90,8 +91,7 @@ func (s *baseState) wire() baseStateWire {
 }
 
 func (w baseStateWire) toState() baseState {
-	// w.Input 只作旧检查点解码的兼容字段，内容并入 History，不再回填 State。
-	s := baseState{History: w.History, Messages: w.Messages, Response: w.Response}
+	s := baseState{History: w.History, Input: w.Input, Messages: w.Messages, Response: w.Response}
 	if w.ConvExternal {
 		s.externalConv = true
 		s.historyLen = w.HistoryLen
@@ -135,7 +135,15 @@ func newBaseState(input []schema.Message, cfg RunConfig) baseState {
 	if history == nil {
 		history = original
 	}
-	return baseState{History: history, Messages: messages}
+	currentInput := cfg.Input
+	if currentInput == nil {
+		currentInput = original
+	}
+	return baseState{
+		History:  history,
+		Input:    schema.CloneMessages(currentInput),
+		Messages: messages,
+	}
 }
 
 // ToolState 是 Basic/ReAct 配方的运行状态。
@@ -278,7 +286,7 @@ func addFinishNode[T any](g *graph.Graph[[]schema.Message, []schema.Message], ou
 type Hooks struct {
 	Model        runnable.Runnable[llm.Request, llm.Response]
 	Tools        runnable.Runnable[[]schema.Message, []schema.Message]
-	PrepareModel func(context.Context, []schema.Message) (llm.Request, error)
+	PrepareModel func(context.Context, *ToolState) (llm.Request, error)
 	DetectCalls  func([]schema.Message) []Call
 	Observation  func(ToolResult) schema.Message
 	NameMessages func([]schema.Message) []schema.Message
@@ -326,7 +334,7 @@ func NewToolRecipe(name string, hooks Hooks, tools bool, definitionVersion strin
 		graph.WithPreHandler(func(ctx context.Context, state *ToolState) (llm.Request, error) {
 			// state.Messages 在图内按不可变约定传递；PrepareModel 只读，
 			// 模型输入的隔离由 ChatModelNode 的 request.Clone() 负责。
-			return hooks.PrepareModel(ctx, state.Messages)
+			return hooks.PrepareModel(ctx, state)
 		}),
 		graph.WithPostHandler(func(_ context.Context, state *ToolState, response llm.Response) error {
 			// 节点输出归图所有；State 只追加切片、共享不可变元素。

@@ -102,7 +102,8 @@ func TestAgentGraphResumeUsesOneStoreForConversationAndExecution(t *testing.T) {
 	}
 
 	resumed, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-		if len(request.Messages) != 2 || request.Messages[0].JoinedText("") != "replacement policy\n\ncaller policy" || request.Messages[1].JoinedText("") != "continue" {
+		messages := businessMessages(request.Messages)
+		if len(messages) != 2 || messages[0].JoinedText("") != "replacement policy\n\ncaller policy" || messages[1].JoinedText("") != "continue" {
 			t.Fatalf("restored messages=%#v", request.Messages)
 		}
 		return []schema.Message{schema.AssistantMessage("resumed")}, nil

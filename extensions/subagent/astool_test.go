@@ -10,6 +10,7 @@ import (
 
 	"github.com/goharness/goharness/extensions/subagent"
 	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/schema"
@@ -23,8 +24,12 @@ import (
 // captureModel 记录专家实际收到的消息并回显最后一条文本。
 func captureModel(seen *[]schema.Message) llm.ChatModel {
 	return llm.NewHandlerModel(func(_ context.Context, req llm.Request, _ llm.Options) ([]schema.Message, error) {
-		*seen = append([]schema.Message(nil), req.Messages...)
-		return []schema.Message{schema.AssistantMessage("echo:" + req.Messages[len(req.Messages)-1].JoinedText(""))}, nil
+		for _, message := range req.Messages {
+			if !contextengine.IsSystemReminder(message) {
+				*seen = append(*seen, message)
+			}
+		}
+		return []schema.Message{schema.AssistantMessage("echo:" + lastBusinessMessage(req.Messages).JoinedText(""))}, nil
 	})
 }
 

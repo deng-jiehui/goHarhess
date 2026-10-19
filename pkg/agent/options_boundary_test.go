@@ -29,7 +29,8 @@ func withProbeMode(mode string) runnable.Option {
 
 // probeBuilder 声明接收 probeConfig，验证 Builder 声明类型的选项直达它。
 type probeBuilder struct {
-	seen atomic.Int32
+	seen      atomic.Int32
+	functions []schema.FunctionDefinition
 }
 
 func (b *probeBuilder) OptionTypes() []reflect.Type {
@@ -37,6 +38,7 @@ func (b *probeBuilder) OptionTypes() []reflect.Type {
 }
 
 func (b *probeBuilder) Invoke(ctx context.Context, request contextengine.Request, options ...runnable.Option) (contextengine.Result, error) {
+	b.functions = append([]schema.FunctionDefinition(nil), request.Functions...)
 	resolved, remaining, err := runnable.ResolveComponentOptions(probeConfig{}, options...)
 	if err != nil {
 		return contextengine.Result{}, err
@@ -54,6 +56,27 @@ func (b *probeBuilder) Invoke(ctx context.Context, request contextengine.Request
 		return contextengine.Result{}, fmt.Errorf("builder lost scoped metadata")
 	}
 	return contextengine.Result{Messages: schema.CloneMessages(request.Input)}, nil
+}
+
+func TestContextBuilderReceivesModelFunctionDefinitions(t *testing.T) {
+	builder := &probeBuilder{}
+	toolValue := tool.NewFunctionTool(tool.Spec{Name: "lookup"}, func(context.Context, tool.CallInput) (tool.Result, error) {
+		return tool.TextResult("ok"), nil
+	})
+	model := llm.NewHandlerModel(func(context.Context, llm.Request, llm.Options) ([]schema.Message, error) {
+		return []schema.Message{schema.AssistantMessage("done")}, nil
+	})
+	value, err := agent.New(model, agent.WithContextBuilder(builder), agent.WithTool(toolValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := observe.WithMetadata(context.Background(), map[string]any{"tenant": "acme"})
+	if _, err := value.Invoke(ctx, []schema.Message{schema.UserMessage("find")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(builder.functions) != 1 || builder.functions[0].Name != "lookup" {
+		t.Fatalf("builder functions=%#v", builder.functions)
+	}
 }
 func (b *probeBuilder) Stream(ctx context.Context, in contextengine.Request, opts ...runnable.Option) (*runnable.StreamReader[contextengine.Result], error) {
 	return runnable.StreamFromInvoke(ctx, in, b.Invoke, opts...)

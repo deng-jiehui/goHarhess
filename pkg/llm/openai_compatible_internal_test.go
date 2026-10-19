@@ -43,6 +43,42 @@ func TestOpenAIResponseKeepsParallelCallsInOneMessage(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponseDecodesInputTokenDetails(t *testing.T) {
+	data := []byte(`{
+	  "id":"resp-usage","model":"model-usage",
+	  "choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}],
+	  "usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28,
+	    "input_tokens_details":{"cached_tokens":16,"cache_write_tokens":4},
+	    "output_tokens_details":{"reasoning_tokens":3}}
+	}`)
+	_, usage, _, err := decodeOpenAIResponse(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage == nil || usage.InputTokens != 20 || usage.OutputTokens != 8 || usage.TotalTokens != 28 || usage.CacheReadTokens != 16 || usage.CacheWriteTokens != 4 || usage.ReasoningTokens != 3 {
+		t.Fatalf("usage=%#v", usage)
+	}
+}
+
+func TestOpenAICompatibleCanDisableStreamUsage(t *testing.T) {
+	disabled := false
+	model, err := NewOpenAICompatibleModel(OpenAICompatibleConfig{
+		Model:              "model-usage",
+		BaseURL:            "https://example.test/v1",
+		IncludeStreamUsage: &disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := model.requestPayload(nil, nil, Options{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["stream_options"]; ok {
+		t.Fatalf("stream_options = %#v, want omitted", payload["stream_options"])
+	}
+}
+
 func TestOpenAICompatibleEncodesBlockMessages(t *testing.T) {
 	messages := []schema.Message{schema.NewMessage(schema.RoleAssistant,
 		schema.NewTextBlock("checking"),

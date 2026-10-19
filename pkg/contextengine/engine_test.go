@@ -3,6 +3,7 @@ package contextengine_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -10,6 +11,202 @@ import (
 	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/schema"
 )
+
+type historyCompressorFunc func(context.Context, []schema.Message) ([]schema.Message, error)
+
+func (f historyCompressorFunc) Compress(ctx context.Context, history []schema.Message) ([]schema.Message, error) {
+	return f(ctx, history)
+}
+
+func TestContextBuilderAppliesHistoryCompressorWithoutMutatingRequest(t *testing.T) {
+	history := []schema.Message{schema.UserMessage("old history")}
+	compressCalls := 0
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     100,
+		ReservedOutputTokens: 10,
+		Counter:              runeCounter{},
+		HistoryCompressor: historyCompressorFunc(func(_ context.Context, messages []schema.Message) ([]schema.Message, error) {
+			compressCalls++
+			if len(messages) != 1 || messages[0].JoinedText("") != "old history" {
+				t.Fatalf("compressor input=%#v", messages)
+			}
+			messages[0].ContentBlocks[0].Text.Text = "mutated by compressor"
+			return []schema.Message{schema.UserMessage("history summary")}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assembler.Invoke(context.Background(), contextengine.Request{
+		History: history,
+		Input:   []schema.Message{schema.UserMessage("current question")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compressCalls != 1 {
+		t.Fatalf("compress calls=%d, want 1", compressCalls)
+	}
+	if history[0].JoinedText("") != "old history" {
+		t.Fatalf("original history mutated: %#v", history)
+	}
+	if len(result.Messages) != 2 || result.Messages[0].JoinedText("") != "history summary" || result.Messages[1].JoinedText("") != "current question" {
+		t.Fatalf("assembled messages=%#v", result.Messages)
+	}
+}
+
+func TestContextBuilderAppendsSystemReminderAndCountsItInBudget(t *testing.T) {
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     100,
+		ReservedOutputTokens: 10,
+		Counter:              runeCounter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assembler.Invoke(context.Background(), contextengine.Request{
+		Input: []schema.Message{schema.UserMessage("answer")},
+		SystemReminder: &contextengine.Reminder{
+			Text:   "当前阶段：工具执行",
+			Fields: map[string]string{"approval": "等待中"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 2 {
+		t.Fatalf("messages=%#v", result.Messages)
+	}
+	reminder := result.Messages[len(result.Messages)-1]
+	if reminder.Role != schema.RoleSystem || !strings.Contains(reminder.JoinedText(""), "<system-reminder>") || !strings.Contains(reminder.JoinedText(""), "</system-reminder>") {
+		t.Fatalf("reminder=%#v", reminder)
+	}
+	if reminder.Extra["context_kind"] != "system_reminder" || reminder.Extra["ephemeral"] != true {
+		t.Fatalf("reminder metadata=%#v", reminder.Extra)
+	}
+	if result.Stats.SystemReminderTokens == 0 || result.Stats.RequestTokens > result.Stats.BudgetTokens {
+		t.Fatalf("stats=%#v", result.Stats)
+	}
+}
+
+func TestContextBuilderRegeneratesReminderPerInvocation(t *testing.T) {
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     100,
+		ReservedOutputTokens: 10,
+		Counter:              runeCounter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &contextengine.Reminder{Text: "阶段一"}
+	second := &contextengine.Reminder{Text: "阶段二"}
+	left, err := assembler.Invoke(context.Background(), contextengine.Request{Input: []schema.Message{schema.UserMessage("q")}, SystemReminder: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := assembler.Invoke(context.Background(), contextengine.Request{Input: []schema.Message{schema.UserMessage("q")}, SystemReminder: second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(left.Messages[len(left.Messages)-1].JoinedText(""), "阶段二") || !strings.Contains(right.Messages[len(right.Messages)-1].JoinedText(""), "阶段二") {
+		t.Fatalf("reminders left=%q right=%q", left.Messages[len(left.Messages)-1].JoinedText(""), right.Messages[len(right.Messages)-1].JoinedText(""))
+	}
+}
+
+func TestContextBuilderCountsFunctionDefinitionsInRequestBudget(t *testing.T) {
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     40,
+		ReservedOutputTokens: 1,
+		Counter:              runeCounter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = assembler.Invoke(context.Background(), contextengine.Request{
+		Functions: []schema.FunctionDefinition{{
+			Name:        "search",
+			Description: strings.Repeat("说明", 20),
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+		}},
+		Input: []schema.Message{schema.UserMessage("q")},
+	})
+	if err == nil {
+		t.Fatal("expected function definitions to consume the context budget")
+	}
+	var budgetErr *contextengine.BudgetError
+	if !errors.As(err, &budgetErr) {
+		t.Fatalf("error=%v, want BudgetError", err)
+	}
+}
+
+func TestContextBuilderTrimsNestedToolResultTextWithoutChangingCallArguments(t *testing.T) {
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     90,
+		ReservedOutputTokens: 5,
+		Counter:              runeCounter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assembler.Invoke(context.Background(), contextengine.Request{Input: []schema.Message{
+		schema.UserMessage("run"),
+		schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "search", `{"q":"keep"}`)),
+		schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock("call-1", "search", false,
+			schema.NewTextBlock(strings.Repeat("result ", 40)),
+		)),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.TruncatedToolResults == 0 {
+		t.Fatalf("stats=%#v", result.Stats)
+	}
+	call := result.Messages[1].FunctionToolCalls()[0]
+	if call.Arguments != `{"q":"keep"}` {
+		t.Fatalf("arguments=%q", call.Arguments)
+	}
+	if err := result.Messages[2].Validate(); err != nil {
+		t.Fatalf("trimmed tool result invalid: %v", err)
+	}
+	if result.Stats.RequestTokens > result.Stats.BudgetTokens {
+		t.Fatalf("stats=%#v", result.Stats)
+	}
+}
+
+func TestContextBuilderDropsHistoricalMediaAndNestedReasoningBeforeText(t *testing.T) {
+	assembler, err := contextengine.NewContextBuilder(contextengine.Config{
+		MaxContextTokens:     70,
+		ReservedOutputTokens: 5,
+		MediaEstimator:       contextengine.ApproxMediaEstimator{Image: 30},
+		Counter:              runeCounter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assembler.Invoke(context.Background(), contextengine.Request{
+		History: []schema.Message{
+			schema.UserMessage("old"),
+			schema.NewMessage(schema.RoleAssistant, schema.NewFunctionToolCallBlock("call-1", "search", `{}`)),
+			schema.NewMessage(schema.RoleTool, schema.NewFunctionToolResultBlock("call-1", "search", false,
+				schema.NewReasoningBlock("old reasoning", "signature"),
+				schema.NewImageBlock("file:///old.png", "image/png"),
+				schema.NewTextBlock(strings.Repeat("old result ", 10)),
+			)),
+		},
+		Input: []schema.Message{schema.UserMessage("current")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.DroppedReasoningBlocks == 0 || result.Stats.DroppedMediaBlocks == 0 {
+		t.Fatalf("stats=%#v", result.Stats)
+	}
+	for _, message := range result.Messages {
+		if err := message.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 type runeCounter struct{}
 

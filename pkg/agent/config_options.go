@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -67,6 +68,16 @@ func WithMiddlewares(values ...tool.Middleware) Option {
 	return func(config *baseConfig) { config.Middlewares = append([]tool.Middleware(nil), values...) }
 }
 
+// WithArtifactStore 外置过大的工具结果，并在模型上下文中只保留引用卡片。
+func WithArtifactStore(store tool.ArtifactStore) Option {
+	return func(config *baseConfig) { config.ArtifactStore = store }
+}
+
+// WithArtifactThresholdBytes 设置工具结果外置阈值；零值关闭外置。
+func WithArtifactThresholdBytes(value int) Option {
+	return func(config *baseConfig) { config.ArtifactThresholdBytes = value }
+}
+
 func WithMiddleware(value tool.Middleware) Option {
 	return func(config *baseConfig) { config.Middlewares = append(config.Middlewares, value) }
 }
@@ -74,6 +85,12 @@ func WithMiddleware(value tool.Middleware) Option {
 // WithContextBuilder replaces the default context assembly Runnable.
 func WithContextBuilder(value runnable.Runnable[contextengine.Request, contextengine.Result]) Option {
 	return func(config *baseConfig) { config.ContextBuilder = value }
+}
+
+// WithHistoryCompressor 为默认 ContextBuilder 增加只处理历史的压缩步骤。
+// 完整历史仍保存到 Checkpoint，压缩只改变本次模型调用发送的消息。
+func WithHistoryCompressor(value contextengine.HistoryCompressor) Option {
+	return func(config *baseConfig) { config.HistoryCompressor = value }
 }
 
 // WithCheckpointStore 为指定会话 ID 的运行配置统一检查点存储。
@@ -208,6 +225,9 @@ func applyConfigDefaults(config *baseConfig) {
 }
 
 func validateBaseConfig(config baseConfig) error {
+	if config.ArtifactThresholdBytes < 0 {
+		return errors.New("artifact threshold bytes cannot be negative")
+	}
 	checks := []struct {
 		name  string
 		value int

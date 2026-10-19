@@ -35,10 +35,13 @@ type baseConfig struct {
 	// parsed and before any tool starts.
 	BeforeToolBatch []tool.BeforeBatchHook
 	// Middlewares run in order inside the fixed system runtime.
-	Middlewares []tool.Middleware
+	Middlewares            []tool.Middleware
+	ArtifactStore          tool.ArtifactStore
+	ArtifactThresholdBytes int
 	// ContextBuilder assembles model context. The zero value uses the standard
 	// contextengine builder.
-	ContextBuilder runnable.Runnable[contextengine.Request, contextengine.Result]
+	ContextBuilder    runnable.Runnable[contextengine.Request, contextengine.Result]
+	HistoryCompressor contextengine.HistoryCompressor
 	// CheckpointStore enables durable conversations when a run supplies a conversation ID.
 	CheckpointStore   state.Store
 	CheckpointTimeout time.Duration
@@ -91,7 +94,9 @@ type base struct {
 func newBase(cfg baseConfig) (*base, error) {
 	var err error
 	if cfg.ContextBuilder == nil {
-		cfg.ContextBuilder, err = contextengine.NewContextBuilder(contextengine.Config{})
+		cfg.ContextBuilder, err = contextengine.NewContextBuilder(contextengine.Config{
+			HistoryCompressor: cfg.HistoryCompressor,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("configure agent %q context builder: %w", cfg.Name, err)
 		}
@@ -118,8 +123,10 @@ func newBase(cfg baseConfig) (*base, error) {
 			MaxWorkers:     cfg.ToolWorkers,
 			// 此处传递的是别名合并与默认值填充后的最终配置，标记为已提供，
 			// 显式零间隔不会被工具节点再次填回默认值。
-			RetryBackoff:    cfg.ToolRetryBackoff,
-			RetryBackoffSet: true,
+			RetryBackoff:           cfg.ToolRetryBackoff,
+			RetryBackoffSet:        true,
+			ArtifactStore:          cfg.ArtifactStore,
+			ArtifactThresholdBytes: cfg.ArtifactThresholdBytes,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("configure agent %q tools node: %w", cfg.Name, err)
@@ -266,17 +273,21 @@ func (b *base) toolDefinitions() []schema.FunctionDefinition {
 	return definitions
 }
 
-func (b *base) prepareLLMRequest(ctx context.Context, messages []schema.Message, functions []schema.FunctionDefinition, opts RunOptions) (llm.Request, error) {
+func (b *base) prepareLLMRequest(ctx context.Context, pinned, history, messages []schema.Message, functions []schema.FunctionDefinition, opts RunOptions, completedCalls int) (llm.Request, error) {
 	if b.modelNode == nil {
 		return llm.Request{}, ErrMissingModel
 	}
-	messages = b.withSystemMessage(messages)
+	pinned = b.withSystemMessage(pinned)
 	// Builder 只收到按其声明类型分流的选项；其余组件配置由配方图入口分发。
 	// 预留输出预算使用裁剪前解析出的有效模型配置，与模型实际收到的参数一致。
 	assembled, err := b.contextBuilder.Invoke(ctx, contextengine.Request{
 		// ContextBuilder 是可替换扩展点，输入按边界克隆；默认引擎内部
 		// 还会为归一化/裁剪再建自有副本。
+		Pinned:               schema.CloneMessages(pinned),
+		History:              schema.CloneMessages(history),
 		Input:                schema.CloneMessages(messages),
+		Functions:            append([]schema.FunctionDefinition(nil), functions...),
+		SystemReminder:       b.systemReminder(ctx, opts, functions, completedCalls),
 		MaxContextTokens:     opts.ContextWindowTokens,
 		ReservedOutputTokens: effectiveMaxTokens(opts),
 	}, opts.builderOptions...)
@@ -286,6 +297,89 @@ func (b *base) prepareLLMRequest(ctx context.Context, messages []schema.Message,
 	// assembled.Messages 归本次请求所有；模型边界由 ChatModelNode 的
 	// request.Clone() 隔离，此处不再重复深拷贝。
 	return llm.Request{Messages: assembled.Messages, Functions: functions}, nil
+}
+
+// modelContextParts 把配方 State 拆成三部分：系统前缀、上一轮完整历史和
+// 本轮模型工作集。History 在 State 中仍保留完整会话以便检查点提交；
+// Input 记录本轮边界，Response 记录本轮已经追加的模型/工具结果。
+func modelContextParts(state *agentrecipe.ToolState) (pinned, history, input []schema.Message) {
+	if state == nil {
+		return nil, nil, nil
+	}
+	historyCount := len(state.History) - len(state.Input)
+	if historyCount < 0 || historyCount > len(state.History) {
+		historyCount = 0
+	}
+	workingStart := len(state.Messages) - len(state.Input) - len(state.Response)
+	if workingStart < 0 || workingStart > len(state.Messages) {
+		workingStart = historyCount
+		if workingStart > len(state.Messages) {
+			workingStart = 0
+		}
+	}
+	pinnedCount := 0
+	for pinnedCount < len(state.Messages) && state.Messages[pinnedCount].Role == schema.RoleSystem {
+		pinnedCount++
+	}
+	pinned = state.Messages[:pinnedCount]
+	history = withoutLeadingSystemMessages(state.History[:historyCount])
+	inputStart := workingStart
+	if inputStart < pinnedCount {
+		inputStart = pinnedCount
+	}
+	input = state.Messages[inputStart:]
+	return pinned, history, input
+}
+
+func withoutLeadingSystemMessages(messages []schema.Message) []schema.Message {
+	start := 0
+	for start < len(messages) && messages[start].Role == schema.RoleSystem {
+		start++
+	}
+	return messages[start:]
+}
+
+// leadingSystemMessages 提取模型工作集最前面的系统消息作为稳定前缀。
+// Agent 的系统提示和调用方系统消息都在运行前置阶段进入工作集，当前
+// 输入只保留其余消息，避免历史压缩器误删系统契约。
+func leadingSystemMessages(messages []schema.Message) []schema.Message {
+	count := 0
+	for count < len(messages) && messages[count].Role == schema.RoleSystem {
+		count++
+	}
+	if count == 0 {
+		return nil
+	}
+	return schema.CloneMessages(messages[:count])
+}
+
+// systemReminder 为每次模型调用生成短暂的运行快照。它只进入本次 Context
+// Builder 请求，不写回 Agent 的会话消息或 Checkpoint。
+
+func (b *base) systemReminder(ctx context.Context, opts RunOptions, functions []schema.FunctionDefinition, completedCalls int) *contextengine.Reminder {
+	remaining := opts.MaxLLMCalls - completedCalls
+	if remaining < 0 {
+		remaining = 0
+	}
+	fields := map[string]string{
+		"stage":                 "model_call",
+		"agent":                 b.name,
+		"available_tools":       fmt.Sprintf("%d", len(functions)),
+		"remaining_model_calls": fmt.Sprintf("%d", remaining),
+		"generated_at":          time.Now().UTC().Format(time.RFC3339),
+	}
+	if opts.ContextWindowTokens > 0 {
+		fields["context_window_tokens"] = fmt.Sprintf("%d", opts.ContextWindowTokens)
+	}
+	if metadata := observe.MetadataFromContext(ctx); metadata != nil {
+		if approval, ok := metadata["approval_status"].(string); ok && approval != "" {
+			fields["approval_status"] = approval
+		}
+	}
+	return &contextengine.Reminder{
+		Text:   "以下信息只用于本次模型调用的运行提示，请勿把它当作用户消息或权限判断。",
+		Fields: fields,
+	}
 }
 
 // modelOptions 把 Agent 级运行配置翻译为模型调用的类型化选项。

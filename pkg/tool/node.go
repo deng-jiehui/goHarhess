@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,22 +55,31 @@ type ToolNodeConfig struct {
 	// 128，有效范围 1 到 tool.MaxRuntimeWorkers。与批内并发 MaxConcurrency
 	// 无关：它是该节点所有在途运行共享的全局上限。
 	MaxWorkers int
+	// ArtifactStore 将超过 ArtifactThresholdBytes 的工具结果外置保存，
+	// 模型只接收带引用和预览的短卡片；零值表示不外置。
+	ArtifactStore          ArtifactStore
+	ArtifactThresholdBytes int
 }
 
 // ToolsNode executes only the assistant tool calls at the message tail. It
 // returns append-only tool result messages; callers append those results to
 // the existing conversation before the next model loop.
 type ToolsNode struct {
-	name        string
-	description string
-	tools       map[string]*Binding
-	order       []string
-	scope       *Scope
-	maxParallel int
-	beforeBatch []BeforeBatchHook
+	name                   string
+	description            string
+	tools                  map[string]*Binding
+	order                  []string
+	scope                  *Scope
+	maxParallel            int
+	beforeBatch            []BeforeBatchHook
+	artifactStore          ArtifactStore
+	artifactThresholdBytes int
 }
 
 func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
+	if config.ArtifactThresholdBytes < 0 {
+		return nil, errors.New("artifact threshold bytes cannot be negative")
+	}
 	name := config.Name
 	if name == "" {
 		name = "tools"
@@ -108,12 +118,14 @@ func NewToolsNode(config ToolNodeConfig) (*ToolsNode, error) {
 		return nil, fmt.Errorf("configure tools node runtime: %w", err)
 	}
 	node := &ToolsNode{
-		name:        name,
-		description: config.Description,
-		tools:       map[string]*Binding{},
-		scope:       runtime.NewScope(config.MaxConcurrency),
-		maxParallel: config.MaxConcurrency,
-		beforeBatch: append([]BeforeBatchHook(nil), config.BeforeBatch...),
+		name:                   name,
+		description:            config.Description,
+		tools:                  map[string]*Binding{},
+		scope:                  runtime.NewScope(config.MaxConcurrency),
+		maxParallel:            config.MaxConcurrency,
+		beforeBatch:            append([]BeforeBatchHook(nil), config.BeforeBatch...),
+		artifactStore:          config.ArtifactStore,
+		artifactThresholdBytes: config.ArtifactThresholdBytes,
 	}
 	if node.description == "" {
 		node.description = "append-only tool execution node"
@@ -424,7 +436,46 @@ func (n *ToolsNode) invokeCall(ctx context.Context, scope *Scope, call ToolCall,
 	if err != nil {
 		return failed(err)
 	}
+	blocks, err = n.externalizeResult(ctx, call, callKey, blocks)
+	if err != nil {
+		return toolErrorMessage(call, err), err
+	}
 	return done(blocks, result.IsError), nil
+}
+
+func (n *ToolsNode) externalizeResult(ctx context.Context, call ToolCall, callKey string, blocks []schema.ContentBlock) ([]schema.ContentBlock, error) {
+	if n == nil || n.artifactStore == nil || n.artifactThresholdBytes <= 0 {
+		return blocks, nil
+	}
+	data, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode tool result: %v", ErrArtifactStore, err)
+	}
+	if len(data) < n.artifactThresholdBytes {
+		return blocks, nil
+	}
+	ref, err := n.artifactStore.Save(ctx, Artifact{
+		ID:       artifactKey(call.Name, callKey),
+		ToolName: call.Name,
+		CallID:   call.FunctionID,
+		Data:     data,
+	})
+	if err != nil {
+		if errors.Is(err, ErrArtifactStore) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", ErrArtifactStore, err)
+	}
+	preview := schema.NewMessage(schema.RoleTool, blocks...).JoinedText("")
+	preview = strings.TrimSpace(preview)
+	if len([]rune(preview)) > 256 {
+		preview = string([]rune(preview)[:256]) + "…"
+	}
+	if preview == "" {
+		preview = "（结果包含非文本内容）"
+	}
+	card := fmt.Sprintf("[tool result archived]\ntool: %s\nartifact_id: %s\nsize: %d bytes\nsha256: %s\npreview: %s\nUse read_artifact with artifact_id to read the full result.", call.Name, ref.ID, ref.Size, ref.SHA256, strings.ReplaceAll(preview, "\n", " "))
+	return []schema.ContentBlock{schema.NewTextBlock(card)}, nil
 }
 
 func toolResultMessage(call ToolCall, blocks []schema.ContentBlock, isError bool) schema.Message {

@@ -235,3 +235,13 @@ agent.New(model, agent.WithTools(deploy), agent.WithMiddleware(guard),
 
 完整可运行示例见 `extensions/examples/decision`（脚本化假模型，
 离线演示分诊路由与筛查审批恢复）。
+
+## 声明式装配示例
+
+`extensions/examples/yamlagent` 演示把 YAML 声明映射成 `agent.New`
+的 Option：`name`/`instructions`/`version`（→ `WithDefinitionVersion`）、
+`tools:` 与 `agents:` 按注册表查名（未知名报错不放行）、`agents:` 经
+`subagent.AsTool` 挂成专家工具、限额项向下收紧到封顶值。框架不内置
+配置加载器；从不可信来源加载时的最小护栏清单（注册表约束、参数
+封顶、指令长度、版本必填、MCP 严格模式）见示例 `main.go` 末尾的
+`untrustedInputRules` 注释。

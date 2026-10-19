@@ -1,0 +1,11 @@
+{
+  "listen": "127.0.0.1:8080",
+  "data_dir": "./data",
+  "model_mode": "fixture",
+  "model_endpoint": "",
+  "model_name": "",
+  "api_key_env": "",
+  "auth_token_env": "",
+  "workspace_root": ".",
+  "workspace_shell": ""
+}

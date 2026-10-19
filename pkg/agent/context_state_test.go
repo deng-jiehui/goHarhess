@@ -46,6 +46,38 @@ func TestConversationCheckpointPreservesCallerSystemMessage(t *testing.T) {
 	}
 }
 
+func TestAgentAddsEphemeralSystemReminderToModelRequest(t *testing.T) {
+	store := state.NewMemoryStore()
+	var requests []llm.Request
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		requests = append(requests, request.Clone())
+		return []schema.Message{schema.AssistantMessage("ok")}, nil
+	})
+	value, err := agent.New(model, agent.WithCheckpointStore(store), agent.WithName("reminder-agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("hello")}, agent.WithConversationID("reminder-session")); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || len(requests[0].Messages) == 0 {
+		t.Fatalf("requests=%#v", requests)
+	}
+	reminder := requests[0].Messages[len(requests[0].Messages)-1]
+	if !contextengine.IsSystemReminder(reminder) {
+		t.Fatalf("request reminder=%#v", reminder)
+	}
+	checkpoint, found, err := store.Load(context.Background(), "reminder-session")
+	if err != nil || !found {
+		t.Fatalf("checkpoint found=%t err=%v", found, err)
+	}
+	for _, message := range checkpoint.Messages {
+		if contextengine.IsSystemReminder(message) {
+			t.Fatal("ephemeral reminder was persisted in checkpoint")
+		}
+	}
+}
+
 type blockingCheckpointStore struct{}
 
 func (blockingCheckpointStore) Load(context.Context, string) (state.Checkpoint, bool, error) {
@@ -117,7 +149,7 @@ func TestAgentLoadsAssemblesAndSavesConversationCheckpoint(t *testing.T) {
 		t.Fatalf("model calls = %d", len(gotCalls))
 	}
 	second := gotCalls[1]
-	if len(second) != 4 || second[0].Role != schema.RoleSystem || second[1].JoinedText("") != "first" || second[2].JoinedText("") != "answer-1" || second[3].JoinedText("") != "second" {
+	if len(second) != 5 || second[0].Role != schema.RoleSystem || second[1].JoinedText("") != "first" || second[2].JoinedText("") != "answer-1" || second[3].JoinedText("") != "second" || !contextengine.IsSystemReminder(second[4]) {
 		t.Fatalf("second model context = %#v", second)
 	}
 	if _, ok := second[0].Extra[contextengine.PromptCacheMetadataKey]; !ok {

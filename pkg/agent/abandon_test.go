@@ -25,7 +25,7 @@ func TestNewInputCanAbandonFailedRun(t *testing.T) {
 		if fail.Load() {
 			return nil, errors.New("provider rejected input")
 		}
-		return []schema.Message{schema.AssistantMessage("answer to " + request.Messages[len(request.Messages)-1].JoinedText(""))}, nil
+		return []schema.Message{schema.AssistantMessage("answer to " + lastBusinessMessage(request.Messages).JoinedText(""))}, nil
 	}), agent.WithCheckpointStore(store))
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestNewInputCanAbandonPendingInterrupt(t *testing.T) {
 	store := state.NewMemoryStore()
 	var toolCalls atomic.Int32
 	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-		if request.Messages[len(request.Messages)-1].JoinedText("") == "run tool" {
+		if lastBusinessMessage(request.Messages).JoinedText("") == "run tool" {
 			return []schema.Message{functionCallMessage("echo", "call-1")}, nil
 		}
 		return []schema.Message{schema.AssistantMessage("plain answer")}, nil

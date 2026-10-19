@@ -28,9 +28,10 @@ func newBasicAgent(cfg baseConfig) (*BasicAgent, error) {
 	recipeName := string(AgentKindBasic)
 	recipe, err := agentrecipe.NewToolRecipe(recipeName, agentrecipe.Hooks{
 		Model: a.modelNode,
-		PrepareModel: func(ctx context.Context, messages []schema.Message) (llm.Request, error) {
+		PrepareModel: func(ctx context.Context, state *agentrecipe.ToolState) (llm.Request, error) {
 			runOpts, _ := resolvedRunOptionsFromContext(ctx)
-			return a.prepareLLMRequest(ctx, messages, nil, runOpts)
+			pinned, history, messages := modelContextParts(state)
+			return a.prepareLLMRequest(ctx, pinned, history, messages, nil, runOpts, state.LLMCalls)
 		},
 		NameMessages: a.withAgentName,
 	}, false, cfg.DefinitionVersion)

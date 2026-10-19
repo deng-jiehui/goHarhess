@@ -8,8 +8,12 @@ require (
 	github.com/mark3labs/mcp-go v0.48.0
 	github.com/redis/go-redis/v9 v9.12.1
 	go.opentelemetry.io/otel v1.34.0
+	go.opentelemetry.io/otel/metric v1.34.0
 	go.opentelemetry.io/otel/sdk v1.34.0
+	go.opentelemetry.io/otel/sdk/metric v1.34.0
 	go.opentelemetry.io/otel/trace v1.34.0
+	golang.org/x/net v0.38.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -23,9 +27,6 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
-	go.opentelemetry.io/otel/metric v1.34.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.34.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 )
 

@@ -27,6 +27,14 @@ func benchContextBuild(b *testing.B, name string, request contextengine.Request,
 			b.Fatal(err)
 		}
 		check(b, probe)
+		if probe.Stats.RequestTokens > probe.Stats.BudgetTokens {
+			b.Fatalf("request tokens %d exceed budget %d", probe.Stats.RequestTokens, probe.Stats.BudgetTokens)
+		}
+		for index, message := range probe.Messages {
+			if err := message.Validate(); err != nil {
+				b.Fatalf("message %d invalid: %v", index, err)
+			}
+		}
 		b.ReportAllocs()
 		var result contextengine.Result
 		b.ResetTimer()
@@ -38,6 +46,9 @@ func benchContextBuild(b *testing.B, name string, request contextengine.Request,
 		}
 		b.StopTimer()
 		check(b, result)
+		if result.Stats.RequestTokens > result.Stats.BudgetTokens {
+			b.Fatalf("request tokens %d exceed budget %d", result.Stats.RequestTokens, result.Stats.BudgetTokens)
+		}
 	})
 }
 
@@ -125,6 +136,27 @@ func benchmarkContextGroup(b *testing.B, profile string) {
 			func(b *testing.B, r contextengine.Result) {
 				if r.Stats.TruncatedMessages == 0 {
 					b.Fatal("OversizedLatest did not truncate")
+				}
+			})
+		// 工具定义与尾部 system-reminder 共同占用请求预算。
+		functions := make([]schema.FunctionDefinition, 32)
+		for index := range functions {
+			functions[index] = schema.FunctionDefinition{
+				Name:        fmt.Sprintf("tool-%d", index),
+				Description: strings.Repeat("description ", 16),
+				Parameters:  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+			}
+		}
+		toolRequest := pinnedRequest(100, true, 32768, 2048)
+		toolRequest.Functions = functions
+		toolRequest.SystemReminder = &contextengine.Reminder{
+			Text:   "当前阶段：工具调用",
+			Fields: map[string]string{"remaining_model_calls": "7", "approval": "none"},
+		}
+		benchContextBuild(b, "ContextTrim/ToolDefinitions/functions=32/reminder=on", toolRequest,
+			func(b *testing.B, r contextengine.Result) {
+				if r.Stats.FunctionDefinitionTokens == 0 || r.Stats.SystemReminderTokens == 0 {
+					b.Fatalf("request stats=%#v", r.Stats)
 				}
 			})
 	}

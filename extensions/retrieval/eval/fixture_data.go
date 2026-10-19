@@ -35,6 +35,11 @@ var fixedCases = []Case{
 	{Query: "slow query index", Relevant: []string{"sql-index"}},
 }
 
+// FixedCases 返回固定评测集的副本，供对自有检索器跑同一套评测。
+func FixedCases() []Case {
+	return append([]Case(nil), fixedCases...)
+}
+
 // NewFixedSearcher 构建固定数据集上的混合检索器：哈希嵌入 +
 // 内存向量 + 词项关键词，全离线、结果确定。
 func NewFixedSearcher(ctx context.Context) (Searcher, error) {

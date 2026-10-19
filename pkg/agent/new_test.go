@@ -36,7 +36,7 @@ func TestNewAgentAutoComposesToolsNodeFromBaseTool(t *testing.T) {
 		if len(request.Messages) < 3 {
 			return nil, fmt.Errorf("second turn messages = %#v", request.Messages)
 		}
-		observation := request.Messages[len(request.Messages)-1]
+		observation := lastBusinessMessage(request.Messages)
 		results := observation.FunctionToolResults()
 		if observation.Role != schema.RoleTool || len(results) != 1 || results[0].CallID != "echo-1" || toolResultText(observation) != "hello" {
 			return nil, fmt.Errorf("tool observation = %#v", observation)

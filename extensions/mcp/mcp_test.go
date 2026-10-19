@@ -13,6 +13,7 @@ import (
 
 	mcpext "github.com/goharness/goharness/extensions/mcp"
 	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/schema"
 	"github.com/goharness/goharness/pkg/tool"
@@ -156,7 +157,12 @@ func TestMCPToolsRunInReactAgentAppendOnlyLoop(t *testing.T) {
 	}
 	var calls atomic.Int32
 	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-		messages := request.Messages
+		messages := make([]schema.Message, 0, len(request.Messages))
+		for _, message := range request.Messages {
+			if !contextengine.IsSystemReminder(message) {
+				messages = append(messages, message)
+			}
+		}
 		current := calls.Add(1)
 		if len(request.Functions) != 1 || request.Functions[0].Name != "lookup" {
 			return nil, fmt.Errorf("model tool definitions = %#v", request.Functions)

@@ -1,0 +1,11 @@
+/data/
+/.cache/
+/bin/
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/test-results/
+/web/playwright-report/
+/web/.test-data/
+*.tsbuildinfo
+*.local.json

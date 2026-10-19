@@ -83,19 +83,19 @@ func (n *ChatModelNode) Stream(ctx context.Context, request Request, options ...
 	if len(info.Attributes) > 0 {
 		metadata["llm.attributes"] = info.Attributes
 	}
-	modelCtx, invocation := BeginCallback(ctx, n.name, metadata, request)
+	modelCtx, callback := beginModelCallback(ctx, n.name, metadata, request)
 	modelCtx, _ = stream.TrackMessages(modelCtx)
 	upstream, err := n.model.Stream(modelCtx, request.Clone(), options...)
 	if err != nil {
-		ErrorCallback(modelCtx, invocation, err)
+		callback.finish(Response{}, err)
 		return nil, err
 	}
 	if upstream == nil {
 		err := errors.New("chat model returned a nil stream reader")
-		ErrorCallback(modelCtx, invocation, err)
+		callback.finish(Response{}, err)
 		return nil, err
 	}
-	return ObserveReaderWithInvocation(modelCtx, invocation, upstream)
+	return observeReaderWithCallback(modelCtx, callback, upstream)
 }
 
 func (n *ChatModelNode) Collect(ctx context.Context, input *runnable.StreamReader[Request], options ...runnable.Option) (Response, error) {

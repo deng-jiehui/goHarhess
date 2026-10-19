@@ -98,7 +98,17 @@ Graph 只在成功保存后返回可由 `errors.Is(err, graph.ErrInterrupted)` �
 - 将稳定前缀与 System 消息放在最前面。
 - 修复 Assistant/Function 孤儿消息和无效 Role 顺序；也可使用严格模式直接报错。
 - 按完整 User Turn 从最旧历史开始裁切，避免拆散工具调用上下文。
+- 把本次请求的 `Functions` 工具定义一起计入预算；工具定义属于模型调用契约，
+  超出窗口时返回 `BudgetError`，不会悄悄删掉。
+- 对 `FunctionToolResult.ContentBlocks` 递归裁剪文本。工具调用的参数保持原样，
+  不会为了省 token 把合法 JSON 截成坏 JSON。
 - 单个最新 Turn 仍超限时，裁掉 Reasoning 和文本开头，保留最新输入尾部。
+- 可以通过 `agent.WithHistoryCompressor` 接入历史压缩器。压缩器只接收上一轮
+  及更早的历史消息，不会接收本轮输入、工具定义或 `system-reminder`；返回的
+  消息只用于当前模型请求。
+- 每次模型调用前可以附带一个短暂的 `system-reminder`。它放在工作集最后，记录
+  当前阶段、剩余预算、审批状态和可用工具等变化信息；它不进入 Checkpoint，
+  也不属于稳定前缀。
 - 保证输出 Token 估算不超过 `MaxContextTokens - ReservedOutputTokens`。
 - 在稳定前缀末尾写入 Provider-neutral Prompt Cache breakpoint。
 
@@ -116,6 +126,64 @@ assembler, err := contextengine.NewContextBuilder(contextengine.Config{
 ```
 
 默认使用无外部依赖的近似 Token Counter。需要精确预算时，实现 `contextengine.TokenCounter` 并注入模型对应的 tokenizer。
+
+历史压缩器的接口是：
+
+```go
+type HistoryCompressor interface {
+    Compress(context.Context, []schema.Message) ([]schema.Message, error)
+}
+```
+
+例如，把较早的多轮对话替换成一条摘要：
+
+```go
+compressor := contextengine.HistoryCompressorFunc(
+    func(ctx context.Context, history []schema.Message) ([]schema.Message, error) {
+        return summarizeOldTurns(ctx, history)
+    },
+)
+
+value, err := agent.New(model,
+    agent.WithHistoryCompressor(compressor),
+)
+```
+
+压缩器返回错误时，本次模型调用失败；完整历史仍按原消息写入 Checkpoint，
+因此压缩不会改变下一轮恢复时的事实记录。若使用 `agent.WithContextBuilder`
+完全替换默认 Builder，`WithHistoryCompressor` 不会自动改写自定义 Builder；
+此时应由自定义 Builder 自己决定如何调用压缩器。
+
+`Request.Functions` 和提醒都属于本次模型请求的预算。提醒用固定的开始和结束标记
+包住，字段按键名排序并清理换行；它只是给模型的运行提示，工具权限和审批仍由
+运行时执行。Agent 默认在每次模型调用前重新生成提醒；调用方自定义 Context Builder
+时可以选择保留、改写或忽略 `Request.SystemReminder`。
+
+统计字段按三个范围理解：`InputTokens` 是裁剪前历史、固定前缀和本次输入的消息成本，
+`OutputTokens` 是最终组装消息的成本（包含提醒），`FunctionDefinitionTokens` 是工具
+定义成本；`RequestTokens` 是模型请求的总成本，即最终消息加工具定义。这样可以区分
+“历史有多大”和“这次真正发了多少内容”。
+
+过大的工具结果可以外置到应用提供的 `tool.ArtifactStore`。模型上下文只保留一张
+包含工具名、工件 ID、大小、校验摘要和短预览的卡片，完整结果通过按范围读取工件的
+工具取回；Checkpoint 只保存这张卡片，不保存大结果正文：
+
+```go
+artifacts, err := tool.NewFileArtifactStore("./runtime-artifacts")
+if err != nil {
+    return err
+}
+_, err = agent.New(model,
+    agent.WithTools(searchTool, tool.NewReadArtifactTool(artifacts)),
+    agent.WithArtifactStore(artifacts),
+    agent.WithArtifactThresholdBytes(32*1024),
+)
+```
+
+`ArtifactStore` 的生产实现可以换成对象存储。工件 ID 不暴露服务器绝对路径，
+保存失败会让本次工具调用返回框架错误，避免模型误以为完整结果已经保存。同一工件
+在重试时如果内容相同会直接复用；如果同一 ID 对应了不同内容，存储会拒绝覆盖并
+返回 `ErrArtifactStore`，避免检查点中的旧引用悄悄指向新结果。
 
 ## Agent 会话生命周期
 
@@ -144,7 +212,8 @@ messages, err := value.Invoke(
 执行顺序为：
 
 1. 根据 `conversation_id` Load 完整 Checkpoint。
-2. 将历史与本轮输入交给 Context Engine。
+2. 将上一轮历史、本轮输入和本次模型工具定义分别交给 Context Engine；如果配置了
+   历史压缩器，只压缩上一轮历史。
 3. 每次 LLM 调用都重新治理增长后的工具消息和输出。
 4. Agent 流成功结束后保存本轮输入、工具消息、最终输出和 State Values。
 5. LLM、工具或 Checkpoint 保存失败时不提交半成品会话。

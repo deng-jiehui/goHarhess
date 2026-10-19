@@ -31,6 +31,11 @@ output, err := assistant.Invoke(ctx, input)
 `tool.abandoned`、输入输出类型名等）；llm 结束事件带 token 用量。Graph 为每个节点创建
 独立子 Span，嵌套 Agent / 子图形成调用树，APM 系统保留节点级瀑布时序。
 
+llm 结束事件中的 `Usage` 由模型适配器从 Provider 响应转换而来，包含输入、输出、总量、
+推理和提示缓存 Token（`CacheReadTokens`/`CacheWriteTokens`）。框架不会根据请求内容自行
+推算缓存命中；Provider 没有返回缓存字段时，缓存指标保持未知或为零，前端应按字段是否
+存在决定显示数值还是 `—`。
+
 事件默认不含请求/响应载荷——需要时用 `observe.CapturePayload(redact)`
 显式开启并把脱敏函数交给 `With`。
 
@@ -82,3 +87,19 @@ err := writeAudit(persistCtx, event)
 观测（observe）与实时流（stream）的分工：observe 是事后审计与指标通道，事件随
 生命周期同步递交；stream 是消费侧实时数据通道，受队列背压约束。两者互补，
 互不替代。
+
+## 模型 callback 归属
+
+模型观测沿用 `llm.BeginCallback` / `EndCallback` / `ErrorCallback`，统一发送
+`observe.KindLLM` 事件。`ChatModelNode` 在执行入口组装模型信息并开启调用，
+流式 Reader 归约负责收尾；两者共用包内 callback 对象，终止事件只递交一次。
+快照发布失败、上游错误和响应截断均产生 error 事件；主动关闭 Reader 会取消上游，
+终止事件由生产协程退出时递交。
+
+独立模型调用也可以复用 `llm.NewChatModelNode(model)`，它已经实现 `ChatModel`，
+无需启动 Graph。裸 Provider 不会自动发射这些生命周期事件；手动调用公开 callback
+时，由调用方配对开始与终止。`ObserveReaderWithInvocation` 接续已有调用身份，
+不会额外发射开始事件。
+
+`observe.Slog` 默认输出 `kind`、`phase`、`trace_id`、`span_id`、`parent_span_id`
+和 `run_id`，可以按调用身份关联并发日志；事件元数据不能覆盖这些关联字段。

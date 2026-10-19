@@ -16,16 +16,20 @@ func reactRecipe(base *base, prepareModelMessages func([]schema.Message) []schem
 	return agentrecipe.NewToolRecipe(string(AgentKindReact), agentrecipe.Hooks{
 		Model: base.modelNode,
 		Tools: base.toolNode,
-		PrepareModel: func(ctx context.Context, messages []schema.Message) (llm.Request, error) {
+		PrepareModel: func(ctx context.Context, state *agentrecipe.ToolState) (llm.Request, error) {
 			opts, _ := resolvedRunOptionsFromContext(ctx)
+			pinned, history, messages := modelContextParts(state)
 			if prepareModelMessages != nil {
-				messages = prepareModelMessages(messages)
+				working := append(schema.CloneMessages(pinned), messages...)
+				working = prepareModelMessages(working)
+				pinned = leadingSystemMessages(working)
+				messages = working[len(pinned):]
 			}
 			functions := base.toolDefinitions()
 			if textReAct {
 				functions = nil
 			}
-			return base.prepareLLMRequest(ctx, messages, functions, opts)
+			return base.prepareLLMRequest(ctx, pinned, history, messages, functions, opts, state.LLMCalls)
 		},
 		DetectCalls: func(messages []schema.Message) []agentrecipe.Call {
 			actions := detectReactActions(messages, textReAct)

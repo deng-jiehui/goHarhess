@@ -24,8 +24,15 @@ type slogObserver struct {
 
 func (o *slogObserver) OnEvent(ctx context.Context, event Event) {
 	depth := o.depth(event)
-	attrs := make([]slog.Attr, 0, len(event.Attrs)+4)
-	attrs = append(attrs, slog.String("name", event.Name))
+	attrs := make([]slog.Attr, 0, len(event.Attrs)+10)
+	attrs = append(attrs,
+		slog.String("name", event.Name),
+		slog.String("kind", string(event.Kind)),
+		slog.String("phase", string(event.Phase)),
+		slog.String("trace_id", event.Trace.TraceID),
+		slog.String("span_id", event.Trace.SpanID),
+		slog.String("parent_span_id", event.Trace.ParentSpanID),
+		slog.String("run_id", event.Trace.RunID))
 	if event.Duration > 0 {
 		attrs = append(attrs, slog.Duration("duration", event.Duration))
 	}
@@ -39,6 +46,11 @@ func (o *slogObserver) OnEvent(ctx context.Context, event Event) {
 		attrs = append(attrs, slog.String("error", event.Err.Error()))
 	}
 	for key, value := range event.Attrs {
+		// 身份字段取自事件本身，防止业务元数据覆盖日志关联键。
+		switch key {
+		case "kind", "phase", "trace_id", "span_id", "parent_span_id", "run_id":
+			continue
+		}
 		attrs = append(attrs, slog.Any(key, value))
 	}
 	if event.Payload != nil {

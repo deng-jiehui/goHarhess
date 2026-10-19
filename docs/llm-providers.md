@@ -52,6 +52,25 @@ model, err := llm.New(llm.Config{
 
 非流式响应体受 `OpenAICompatibleConfig.MaxResponseBytes`（或配置键 `max_response_bytes`）限制，默认 `llm.DefaultMaxResponseBytes`（32 MiB）。超限立即返回 `*llm.ResponseTooLargeError`（`errors.Is(err, llm.ErrResponseTooLarge)`），属调用失败——截断字节不会被当作完整响应解析。流式 SSE 按事件帧处理，不受此限。
 
+### Token 用量和提示缓存
+
+适配器会把 Provider 返回的用量统一放到 `Response.Usage`，其中
+`CacheReadTokens` 对应模型实际复用的提示 Token，`CacheWriteTokens` 对应模型写入缓存的
+提示 Token。Chat Completions 常见的字段是
+`usage.prompt_tokens_details.cached_tokens`；部分较新的兼容服务返回
+`usage.input_tokens_details.cached_tokens`，两种格式都会转换成 `CacheReadTokens`。
+同样，`prompt_tokens`/`completion_tokens` 和 `input_tokens`/`output_tokens`、两种推理 Token
+字段也会按对应含义兼容解析。
+
+流式请求默认发送 `stream_options.include_usage=true`，这样服务才会在最后一个用量事件中
+返回完整的 `Usage`。如果第三方服务不接受 `stream_options`，可以在直接构造适配器时设置
+`OpenAICompatibleConfig.IncludeStreamUsage` 为指向 `false` 的指针，或在工厂配置的
+`Raw` 中设置 `include_usage: false`。关闭后服务若不返回用量，`Response.Usage` 会保持为空，
+框架不会自行推算缓存 Token。
+
+这里兼容的是 Responses 风格的 **Usage 字段命名**。当前 `openai-compatible` 适配器仍然
+请求 Chat Completions 路径，并未把 Responses API 的 `output` 消息协议当作另一套完整线路。
+
 未注入客户端时，模型 Provider 使用 `pkg/httpclient.DefaultPool`。同一 Transport 也用于检索和推理 REST 服务；零超时 LLM 客户端仍适合长时间 SSE 流。
 
 不要将 API Key 写入 `observe.Event`、Checkpoint、日志或 Graph State。

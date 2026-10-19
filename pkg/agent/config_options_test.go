@@ -12,6 +12,7 @@ import (
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
 	"github.com/goharness/goharness/pkg/schema"
+	"github.com/goharness/goharness/pkg/state"
 	"github.com/goharness/goharness/pkg/tool"
 )
 
@@ -103,6 +104,58 @@ func TestDefaultContextBuilderIsAStandardRunnable(t *testing.T) {
 		t.Fatal(err)
 	}
 	var _ runnable.Runnable[contextengine.Request, contextengine.Result] = builder
+}
+
+func TestAgentHistoryCompressorAppliesToDefaultContextBuilder(t *testing.T) {
+	store := state.NewMemoryStore()
+	var compressedHistory []schema.Message
+	modelCalls := 0
+	model := llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
+		modelCalls++
+		texts := make([]string, 0, len(request.Messages))
+		for _, message := range request.Messages {
+			texts = append(texts, message.JoinedText(""))
+		}
+		if len(texts) > 0 && texts[len(texts)-1] == "current" {
+			if strings.Contains(strings.Join(texts, "|"), "old history") || strings.Contains(strings.Join(texts, "|"), "old answer") {
+				return nil, fmt.Errorf("uncompressed history was sent: %#v", request.Messages)
+			}
+			if !strings.Contains(strings.Join(texts, "|"), "compressed history") {
+				return nil, fmt.Errorf("compressed history was not sent: %#v", request.Messages)
+			}
+		}
+		if modelCalls == 1 {
+			return []schema.Message{schema.AssistantMessage("old answer")}, nil
+		}
+		return []schema.Message{schema.AssistantMessage("new answer")}, nil
+	})
+	compressor := contextengine.HistoryCompressorFunc(func(_ context.Context, history []schema.Message) ([]schema.Message, error) {
+		if len(history) == 0 {
+			return history, nil
+		}
+		compressedHistory = schema.CloneMessages(history)
+		return []schema.Message{schema.UserMessage("compressed history")}, nil
+	})
+	value, err := agent.New(model, agent.WithHistoryCompressor(compressor), agent.WithCheckpointStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("old history")}, agent.WithConversationID("compressor")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := value.Invoke(context.Background(), []schema.Message{schema.UserMessage("current")}, agent.WithConversationID("compressor")); err != nil {
+		t.Fatal(err)
+	}
+	if len(compressedHistory) != 2 || compressedHistory[0].JoinedText("") != "old history" || compressedHistory[1].JoinedText("") != "old answer" {
+		t.Fatalf("compressed history = %#v", compressedHistory)
+	}
+	checkpoint, found, err := store.Load(context.Background(), "compressor")
+	if err != nil || !found || len(checkpoint.Messages) != 4 {
+		t.Fatalf("checkpoint found=%t err=%v messages=%#v", found, err, checkpoint.Messages)
+	}
+	if checkpoint.Messages[0].JoinedText("") != "old history" || checkpoint.Messages[1].JoinedText("") != "old answer" || checkpoint.Messages[2].JoinedText("") != "current" {
+		t.Fatalf("checkpoint history was compressed: %#v", checkpoint.Messages)
+	}
 }
 
 func TestAgentInitializationRejectsUnsafeNumericOptions(t *testing.T) {

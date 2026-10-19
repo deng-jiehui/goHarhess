@@ -19,13 +19,17 @@ func ObserveReader(ctx context.Context, name string, request Request, reader *ru
 	if reader == nil {
 		return nil, errors.New("model response reader is nil")
 	}
-	modelCtx, invocation := BeginCallback(ctx, name, nil, request)
-	return ObserveReaderWithInvocation(modelCtx, invocation, reader)
+	modelCtx, callback := beginModelCallback(ctx, name, nil, request)
+	return observeReaderWithCallback(modelCtx, callback, reader)
 }
 
 // ObserveReaderWithInvocation wraps a Reader for callers that already opened
 // the lifecycle invocation and must avoid a duplicate Start event.
 func ObserveReaderWithInvocation(ctx context.Context, invocation observe.Invocation, upstream *runnable.StreamReader[Response]) (*runnable.StreamReader[Response], error) {
+	return observeReaderWithCallback(ctx, newModelCallback(ctx, invocation), upstream)
+}
+
+func observeReaderWithCallback(ctx context.Context, callback *modelCallback, upstream *runnable.StreamReader[Response]) (*runnable.StreamReader[Response], error) {
 	if ctx == nil {
 		return nil, errors.New("model observe context cannot be nil")
 	}
@@ -37,36 +41,42 @@ func ObserveReaderWithInvocation(ctx context.Context, invocation observe.Invocat
 	go func() {
 		defer close(done)
 		defer upstream.Close()
-		defer writer.Close()
 		var final Response
+		var terminalErr error
+		// 先递交终止观测再关闭输出管道；调用方取消时仍由生产协程收尾。
+		defer func() {
+			callback.finish(final, terminalErr)
+			if terminalErr != nil {
+				_ = writer.CloseWithError(terminalErr)
+				return
+			}
+			_ = writer.Close()
+		}()
 		sawResponse := false
 		for {
 			value, err := upstream.Recv()
 			if errors.Is(err, io.EOF) {
 				if !sawResponse {
-					ErrorCallback(ctx, invocation, ErrStreamTruncated)
-					_ = writer.CloseWithError(ErrStreamTruncated)
+					terminalErr = ErrStreamTruncated
 					return
 				}
 				if stream.HasMessageTracking(ctx) && !stream.MessagesPublished(ctx) {
 					if err := stream.PublishSnapshots(ctx, final.Messages); err != nil {
-						_ = writer.CloseWithError(err)
+						terminalErr = err
 						return
 					}
 				}
-				EndCallback(ctx, invocation, final)
 				return
 			}
 			if err != nil {
-				ErrorCallback(ctx, invocation, err)
-				_ = writer.CloseWithError(err)
+				terminalErr = err
 				return
 			}
 			final = value.Clone()
 			stream.EnsureMessageIDs(final.Messages)
 			sawResponse = true
 			if err := writer.Send(final.Clone()); err != nil {
-				ErrorCallback(ctx, invocation, err)
+				terminalErr = err
 				return
 			}
 		}

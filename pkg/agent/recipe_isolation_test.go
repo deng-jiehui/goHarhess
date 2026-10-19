@@ -147,11 +147,12 @@ func TestConcurrentReactRunsKeepIndependentState(t *testing.T) {
 		return tool.TextResult("ok"), nil
 	})
 	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-		if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
-			return []schema.Message{schema.AssistantMessage("done:" + request.Messages[len(request.Messages)-2].Extra["run"].(string))}, nil
+		if lastBusinessMessage(request.Messages).Role == schema.RoleTool {
+			messages := businessMessages(request.Messages)
+			return []schema.Message{schema.AssistantMessage("done:" + messages[len(messages)-2].Extra["run"].(string))}, nil
 		}
 		call := functionCallMessage("echo", "call-1")
-		call.Extra = map[string]any{"run": request.Messages[len(request.Messages)-1].JoinedText("")}
+		call.Extra = map[string]any{"run": lastBusinessMessage(request.Messages).JoinedText("")}
 		return []schema.Message{call}, nil
 	}), agent.WithName("concurrent-react"), agent.WithTools(echo))
 	if err != nil {
@@ -188,7 +189,7 @@ func TestReactRunDoesNotMutateCallerInput(t *testing.T) {
 	})
 	var calls atomic.Int32
 	value, err := agent.New(llm.NewHandlerModel(func(_ context.Context, request llm.Request, _ llm.Options) ([]schema.Message, error) {
-		if request.Messages[len(request.Messages)-1].Role == schema.RoleTool {
+		if lastBusinessMessage(request.Messages).Role == schema.RoleTool {
 			return []schema.Message{schema.AssistantMessage("done")}, nil
 		}
 		calls.Add(1)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/goharness/goharness/extensions/subagent"
 	"github.com/goharness/goharness/pkg/agent"
+	"github.com/goharness/goharness/pkg/contextengine"
 	"github.com/goharness/goharness/pkg/graph"
 	"github.com/goharness/goharness/pkg/llm"
 	"github.com/goharness/goharness/pkg/runnable"
@@ -56,6 +57,15 @@ func toolOutputs(req llm.Request) []toolOut {
 		}
 	}
 	return out
+}
+
+func lastBusinessMessage(messages []schema.Message) schema.Message {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if !contextengine.IsSystemReminder(messages[index]) {
+			return messages[index]
+		}
+	}
+	return schema.Message{}
 }
 
 func decode(t *testing.T, text string) map[string]any {
@@ -116,7 +126,7 @@ func spawnStep(args map[string]any) step {
 // echoModel 让子 Agent 把收到的最后一条消息原文回显——便于断言上下文沿用。
 func echoModel() llm.ChatModel {
 	return llm.NewHandlerModel(func(_ context.Context, req llm.Request, _ llm.Options) ([]schema.Message, error) {
-		return []schema.Message{schema.AssistantMessage("echo:" + req.Messages[len(req.Messages)-1].JoinedText(""))}, nil
+		return []schema.Message{schema.AssistantMessage("echo:" + lastBusinessMessage(req.Messages).JoinedText(""))}, nil
 	})
 }
 
@@ -168,7 +178,7 @@ func TestParallelSpawnCalls(t *testing.T) {
 			peak.Store(cur)
 		}
 		defer concurrent.Add(-1)
-		return []schema.Message{schema.AssistantMessage("echo:" + req.Messages[len(req.Messages)-1].JoinedText(""))}, nil
+		return []schema.Message{schema.AssistantMessage("echo:" + lastBusinessMessage(req.Messages).JoinedText(""))}, nil
 	})
 	m := newManager(t, cfg)
 	run := &parentRun{}
@@ -211,7 +221,7 @@ func TestSubAgentApprovalSuspendsAndResumes(t *testing.T) {
 	var runs atomic.Int32
 	cfg.Models["main"] = llm.NewHandlerModel(func(_ context.Context, req llm.Request, _ llm.Options) ([]schema.Message, error) {
 		runs.Add(1)
-		last := req.Messages[len(req.Messages)-1]
+		last := lastBusinessMessage(req.Messages)
 		if results := last.FunctionToolResults(); len(results) > 0 {
 			for _, block := range results[0].ContentBlocks {
 				if block.Text != nil {
@@ -283,7 +293,7 @@ func TestPartialSuspendReplaysCompletedSpawn(t *testing.T) {
 		} else {
 			fastCalls.Add(1)
 		}
-		last := req.Messages[len(req.Messages)-1]
+		last := lastBusinessMessage(req.Messages)
 		if results := last.FunctionToolResults(); len(results) > 0 {
 			var text string
 			for _, block := range results[0].ContentBlocks {
@@ -346,7 +356,7 @@ func TestApprovalWithoutCheckpointErrors(t *testing.T) {
 	})}
 	cfg.DefaultTools = []string{"ask"}
 	cfg.Models["main"] = llm.NewHandlerModel(func(_ context.Context, req llm.Request, _ llm.Options) ([]schema.Message, error) {
-		last := req.Messages[len(req.Messages)-1]
+		last := lastBusinessMessage(req.Messages)
 		if results := last.FunctionToolResults(); len(results) > 0 {
 			return []schema.Message{schema.AssistantMessage("final")}, nil
 		}
@@ -631,7 +641,7 @@ func TestCleanupRemovesAbandonedRunAgents(t *testing.T) {
 	})}
 	cfg.DefaultTools = []string{"ask"}
 	cfg.Models["main"] = llm.NewHandlerModel(func(_ context.Context, req llm.Request, _ llm.Options) ([]schema.Message, error) {
-		last := req.Messages[len(req.Messages)-1]
+		last := lastBusinessMessage(req.Messages)
 		if results := last.FunctionToolResults(); len(results) > 0 {
 			return []schema.Message{schema.AssistantMessage("final")}, nil
 		}

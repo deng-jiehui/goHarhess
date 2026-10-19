@@ -197,6 +197,6 @@ func (s *tenantStore) RollbackBasis(ctx context.Context, conversationID string) 
 }
 
 var (
-	_ state.Store                = (*tenantStore)(nil)
-	_ state.RollbackBasisReader  = (*tenantStore)(nil)
+	_ state.Store               = (*tenantStore)(nil)
+	_ state.RollbackBasisReader = (*tenantStore)(nil)
 )

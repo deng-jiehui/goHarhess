@@ -29,6 +29,10 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 		if payload["model"] != "deepseek-chat" || payload["stream"] != true {
 			t.Fatalf("payload = %#v", payload)
 		}
+		streamOptions, ok := payload["stream_options"].(map[string]any)
+		if !ok || streamOptions["include_usage"] != true {
+			t.Fatalf("stream_options = %#v", payload["stream_options"])
+		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = writer.Write([]byte("data: {\"id\":\"resp-stream\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n"))
@@ -36,7 +40,7 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\n"))
 		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"search","arguments":"{\"text\":\"hel"}}]}}]}` + "\n\n"))
 		_, _ = writer.Write([]byte("data: " + `{"choices":[{"index":0,"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"function":{"arguments":"lo\"}"}}]}}]}` + "\n\n"))
-		_, _ = writer.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7,\"completion_tokens_details\":{\"reasoning_tokens\":2}}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"choices\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":2}}}\n\n"))
 		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -76,7 +80,7 @@ func TestOpenAICompatibleStreamingStandardizesReasoningAndToolDeltas(t *testing.
 	if len(calls) != 1 || calls[0].ID != "call-1" || calls[0].Name != "search" || calls[0].Arguments != `{"text":"hello"}` {
 		t.Fatalf("function calls = %#v", calls)
 	}
-	if response.Usage == nil || response.Usage.TotalTokens != 7 || response.Usage.ReasoningTokens != 2 {
+	if response.Usage == nil || response.Usage.TotalTokens != 7 || response.Usage.InputTokens != 3 || response.Usage.CacheReadTokens != 2 || response.Usage.ReasoningTokens != 2 {
 		t.Fatalf("usage = %#v", response.Usage)
 	}
 	meta := messages[0].ResponseMeta
